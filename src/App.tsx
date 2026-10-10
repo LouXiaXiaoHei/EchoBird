@@ -292,9 +292,9 @@ function AppContent() {
                                       {is('feedback') && t('page.feedback')}
                                     </h2>
                                     <div className="page-kicker truncate" aria-hidden="true">
-                                      {is('models') && 'ROSTER'}
+                                      {is('models') && 'MODELS'}
                                       {is('accounts') && 'ACCOUNTS'}
-                                      {is('freeModels') && 'SMART ROUTER'}
+                                      {is('freeModels') && 'ROUTER'}
                                       {is('apps') && 'DESKTOP'}
                                       {is('myProjects') && 'VIBE CODING'}
                                       {is('aiCareer') && 'CAREER'}
