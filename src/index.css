@@ -43,10 +43,6 @@
   --text-muted-rgb: 130 124 114; /* #827C72 — readable warm muted */
 }
 
-.settings-language-select > div {
-  background-color: rgb(var(--bg-input-rgb));
-}
-
 .usage-card-action-button {
   position: relative;
   display: inline-flex;

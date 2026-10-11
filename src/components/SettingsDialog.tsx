@@ -352,12 +352,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                       {t('settings.language')}
                     </span>
                   </div>
-                  <MiniSelect
-                    value={locale}
-                    onChange={onLocaleChange}
-                    options={LOCALE_OPTIONS}
-                    className="settings-language-select"
-                  />
+                  <MiniSelect value={locale} onChange={onLocaleChange} options={LOCALE_OPTIONS} />
                 </div>
 
                 <div className="h-px bg-cyber-border/50" />

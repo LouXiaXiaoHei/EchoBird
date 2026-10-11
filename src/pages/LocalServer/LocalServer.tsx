@@ -642,7 +642,6 @@ export const LocalServerMain: React.FC = () => {
 
   // Render START button (state machine)
   const renderStartButton = () => {
-    // Shared button styles — solid fill matching AppManager launch button
     // START needs both a model and an engine. The engine can come from the
     // bundled install OR a saved custom command (whose line 1 is its own exe),
     // so a custom command lets a no-engine user run their own build. The model
@@ -660,21 +659,16 @@ export const LocalServerMain: React.FC = () => {
         engineStatus === 'checking' ||
         (engineStatus === 'error' && !customCmdUsable));
     const btnBase =
-      'font-bold text-base font-mono transition-all flex items-center justify-center gap-2 flex-shrink-0 rounded-lg';
-    // No border on active — `btnDisabled` and `btnStop` don't carry one,
-    // and a 1px border on only one of the three states shifts the button's
-    // box size when transitioning between idle / disabled / running. Pure
-    // bg + shadow keeps the box identical across all three.
-    const btnActive =
-      'bg-cyber-accent text-white hover:bg-cyber-accent-secondary shadow-lg shadow-cyber-accent/30';
-    const btnDisabled = 'bg-cyber-border/60 text-cyber-text-secondary';
-    const btnStop = 'bg-red-500 text-white hover:bg-red-600 shadow-[0_0_8px_rgba(239,68,68,0.2)]';
+      'font-bold text-base font-mono transition-colors flex items-center justify-center gap-2 flex-shrink-0 border rounded-button outline-none';
+    const btnActive = 'border-cyber-border/50 text-cyber-text hover:bg-cyber-text/10';
+    const btnDisabled = 'border-cyber-border text-cyber-text-muted';
+    const btnStop = 'border-cyber-error/50 text-cyber-error hover:bg-cyber-error/10';
 
     const startStopBtn = (
       <button
         onClick={handleToggleServer}
         disabled={disabledStart}
-        className={`py-3 px-6 tracking-[0.3em] ${btnBase} ${isRunning ? btnStop : disabledStart ? btnDisabled : btnActive}`}
+        className={`py-[calc(0.75rem_-_1px)] px-[calc(1.5rem_-_1px)] tracking-[0.3em] ${btnBase} ${isRunning ? btnStop : disabledStart ? btnDisabled : btnActive}`}
       >
         {isRunning ? (
           <>
@@ -692,9 +686,9 @@ export const LocalServerMain: React.FC = () => {
       <button
         onClick={() => engineInstallDir && api.openFolder(engineInstallDir)}
         disabled={!engineInstallDir}
-        className={`py-3 px-3 ${btnBase} ${
+        className={`p-[calc(0.75rem_-_1px)] ${btnBase} ${
           engineInstallDir
-            ? 'bg-cyber-border/60 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/20'
+            ? 'border-cyber-border/50 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10'
             : btnDisabled
         }`}
       >
@@ -710,7 +704,7 @@ export const LocalServerMain: React.FC = () => {
     const gearBtn = canCustomize ? (
       <button
         onClick={openCustomCmd}
-        className={`py-3 px-3 ${btnBase} bg-cyber-border/60 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/20`}
+        className={`p-[calc(0.75rem_-_1px)] ${btnBase} border-cyber-border/50 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10`}
       >
         <Settings className="w-4 h-4" />
       </button>
@@ -724,8 +718,7 @@ export const LocalServerMain: React.FC = () => {
         <div className="flex gap-1.5 w-full">
           <button
             onClick={handleDownloadEngine}
-            className="flex-1 py-3 font-bold text-base tracking-[0.3em] font-mono transition-all flex items-center justify-center gap-2 rounded-lg
-                            bg-cyber-accent text-white border border-cyber-accent hover:bg-cyber-accent-secondary hover:border-cyber-accent-secondary shadow-lg shadow-cyber-accent/30"
+            className="flex-1 py-3 font-bold text-base tracking-[0.3em] font-mono transition-colors flex items-center justify-center gap-2 rounded-lg border outline-none bg-cyber-accent text-white border-cyber-accent hover:bg-cyber-accent-secondary hover:border-cyber-accent-secondary shadow-lg shadow-cyber-accent/30"
           >
             <Download className="w-4 h-4" />
             {engineStatus === 'error'
@@ -790,8 +783,7 @@ export const LocalServerMain: React.FC = () => {
         <div className="flex gap-1.5 w-full">
           <button
             onClick={handleDownloadEngine}
-            className="py-2 px-4 font-mono text-xs flex items-center gap-1.5 rounded-lg
-                            bg-cyber-accent/15 text-cyber-accent border border-cyber-accent/40 hover:bg-cyber-accent/25 hover:border-cyber-accent/60 transition-colors flex-shrink-0"
+            className={`py-2 px-4 font-mono text-xs flex items-center gap-1.5 rounded-button border transition-colors flex-shrink-0 outline-none ${btnActive}`}
           >
             <Download className="w-3.5 h-3.5" />
             {t('server.upgradeEngine') || 'UPGRADE ENGINE'}
@@ -990,7 +982,7 @@ export const LocalServerMain: React.FC = () => {
           <div
             ref={logsContainerRef}
             onScroll={handleScroll}
-            className="absolute inset-0 overflow-y-auto py-3 bg-cyber-surface border border-cyber-border font-mono text-sm space-y-0.5 custom-scrollbar rounded-lg"
+            className="absolute inset-0 overflow-y-auto py-3 bg-cyber-surface border border-transparent font-mono text-sm space-y-0.5 custom-scrollbar rounded-lg"
           >
             {logs.length === 0 && (
               <div
@@ -1006,7 +998,7 @@ export const LocalServerMain: React.FC = () => {
                   </div>
                 </div>
                 <div className="w-full max-w-3xl px-4">
-                  <div className="rounded-lg border border-cyber-border/60 bg-cyber-bg-secondary/40 p-5 shadow-sm">
+                  <div className="rounded-lg border border-transparent p-5">
                     <table className="w-full text-sm border-collapse font-sans">
                       <thead>
                         <tr className="text-cyber-text-secondary">
@@ -1060,13 +1052,13 @@ export const LocalServerMain: React.FC = () => {
                     <div className="flex justify-center gap-3 mt-4">
                       <button
                         onClick={() => goToMother(t('mother.hintDetectCuda'))}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
+                        className="px-3 py-1.5 text-xs rounded-button border border-cyber-border/50 text-cyber-text-secondary hover:bg-cyber-text/10 hover:text-cyber-text transition-colors outline-none"
                       >
                         {t('mother.hintDetectCuda')}
                       </button>
                       <button
                         onClick={() => goToMother(t('mother.hintInstallCuda'))}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
+                        className="px-3 py-1.5 text-xs rounded-button border border-cyber-border/50 text-cyber-text-secondary hover:bg-cyber-text/10 hover:text-cyber-text transition-colors outline-none"
                       >
                         {t('mother.hintInstallCuda')}
                       </button>
@@ -1153,7 +1145,7 @@ export const LocalServerMain: React.FC = () => {
             <div className="px-5 py-3 border-t border-cyber-border/60 flex justify-end">
               <button
                 onClick={() => setEnginePickerOpen(false)}
-                className="px-4 py-1.5 text-sm font-mono text-cyber-text-secondary hover:text-cyber-text rounded transition-colors"
+                className="px-[calc(1rem_-_1px)] py-[calc(0.375rem_-_1px)] text-sm font-mono border border-cyber-border/50 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10 rounded-button transition-colors outline-none"
               >
                 {t('btn.cancel')}
               </button>
@@ -1192,20 +1184,20 @@ export const LocalServerMain: React.FC = () => {
             <div className="px-5 py-3 border-t border-cyber-border/60 flex justify-between gap-2">
               <button
                 onClick={resetCustomCmd}
-                className="px-4 py-1.5 text-sm font-mono text-cyber-text-secondary hover:text-cyber-text rounded transition-colors"
+                className="px-[calc(1rem_-_1px)] py-[calc(0.375rem_-_1px)] text-sm font-mono border border-cyber-border/50 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10 rounded-button transition-colors outline-none"
               >
                 {t('server.customCmdReset')}
               </button>
               <div className="flex gap-2">
                 <button
                   onClick={() => setCustomCmdOpen(false)}
-                  className="px-4 py-1.5 text-sm font-mono text-cyber-text-secondary hover:text-cyber-text rounded transition-colors"
+                  className="px-[calc(1rem_-_1px)] py-[calc(0.375rem_-_1px)] text-sm font-mono border border-cyber-border/50 text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10 rounded-button transition-colors outline-none"
                 >
                   {t('btn.close')}
                 </button>
                 <button
                   onClick={saveCustomCmd}
-                  className="px-4 py-1.5 text-sm font-mono bg-cyber-accent text-white rounded hover:bg-cyber-accent-secondary transition-colors"
+                  className="px-[calc(1rem_-_1px)] py-[calc(0.375rem_-_1px)] text-sm font-mono border border-cyber-border/50 text-cyber-text rounded-button hover:bg-cyber-text/10 transition-colors outline-none"
                 >
                   {t('btn.save')}
                 </button>
