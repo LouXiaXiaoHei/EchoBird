@@ -24,9 +24,14 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+
+mod daily_tokens;
+pub use daily_tokens::daily_tokens;
+pub use daily_tokens::{DailyTokenEntry, DailyTokenResponse};
 
 // ─── Tool families ───────────────────────────────────────────────────────
 
@@ -159,6 +164,32 @@ pub struct SavedSession {
     pub saved_at: String,
     pub file_path: Option<String>,
     pub turn_count: Option<u32>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct TokenUsage {
+    input: Option<u64>,
+    output: Option<u64>,
+}
+
+impl TokenUsage {
+    fn read(value: &serde_json::Value, input: &str, output: &str) -> Self {
+        Self {
+            input: value.get(input).and_then(serde_json::Value::as_u64),
+            output: value.get(output).and_then(serde_json::Value::as_u64),
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        if let Some(input) = other.input {
+            self.input = Some(self.input.unwrap_or(0).saturating_add(input));
+        }
+        if let Some(output) = other.output {
+            self.output = Some(self.output.unwrap_or(0).saturating_add(output));
+        }
+    }
 }
 
 /// One tuple per session file: mtime (seconds since epoch) + an approximate
@@ -210,16 +241,9 @@ fn is_system_injected(text: &str) -> bool {
     SYSTEM_INJECTION_TAGS.iter().any(|tag| t.starts_with(tag))
 }
 
-/// Truncate a candidate title to 40 chars, appending an ellipsis if longer.
+/// Replace newlines with spaces while preserving the complete title.
 fn make_title(raw: &str) -> String {
-    let safe = raw.replace('\n', " ");
-    let mut chars = safe.chars();
-    let chunk: String = chars.by_ref().take(40).collect();
-    if chars.next().is_some() {
-        format!("{}...", chunk)
-    } else {
-        chunk
-    }
+    raw.replace('\n', " ")
 }
 
 fn mtime_millis(path: &Path) -> String {
@@ -255,6 +279,7 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
     let mut title = String::new();
     let mut total_messages = 0u32;
     let mut real_user_messages = 0u32;
+    let mut usage_by_message = HashMap::new();
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
@@ -281,6 +306,20 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
         }
         let Some(msg_obj) = msg_obj else { continue };
         let role = msg_obj.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if role == "assistant" {
+            if let Some(usage) = msg_obj.get("usage") {
+                let key = msg_obj
+                    .get("id")
+                    .or_else(|| value.get("uuid"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("row-{}", usage_by_message.len()));
+                usage_by_message.insert(
+                    key,
+                    TokenUsage::read(usage, "input_tokens", "output_tokens"),
+                );
+            }
+        }
         if role == "user" || role == "assistant" {
             total_messages += 1;
         }
@@ -361,6 +400,10 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
     }
 
     let id = family.as_id();
+    let mut usage = TokenUsage::default();
+    for sample in usage_by_message.into_values() {
+        usage.add(sample);
+    }
     Some(SavedSession {
         id: format!("{}_native_{}", id, session_id),
         name: title,
@@ -370,6 +413,8 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
         saved_at: mtime_millis(file_path),
         file_path: Some(file_path.to_string_lossy().into_owned()),
         turn_count: Some(turns_from_messages(total_messages)),
+        input_tokens: usage.input,
+        output_tokens: usage.output,
     })
 }
 
@@ -465,17 +510,24 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
     let mut cwd = String::new();
     let mut title = String::new();
     let mut total_messages = 0u32;
+    let mut usage = daily_tokens::CodexUsage::default();
+    let mut metadata_seen = false;
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
+        usage.consume(&value);
         let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let Some(payload) = value.get("payload") else {
             continue;
         };
 
         if row_type == "session_meta" {
+            if metadata_seen {
+                continue;
+            }
+            metadata_seen = true;
             // Codex (incl. Codex Desktop) writes a separate rollout JSONL for
             // every sub-agent it spawns; these inherit the parent's first user
             // message and would surface as duplicate top-level cards. See
@@ -537,6 +589,7 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
     if title.is_empty() {
         title = "Codex Session".to_string();
     }
+    let usage = usage.total_usage();
 
     Some(SavedSession {
         id: format!("codex_native_{}", session_id),
@@ -547,6 +600,8 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
         saved_at: mtime_millis(file_path),
         file_path: Some(file_path.to_string_lossy().into_owned()),
         turn_count: Some(turns_from_messages(total_messages)),
+        input_tokens: usage.input,
+        output_tokens: usage.output,
     })
 }
 
@@ -762,6 +817,7 @@ fn drizzle_history_page(
                 .into_owned(),
             None => directory,
         };
+        let usage = drizzle_session_usage(&conn, &id);
         Ok(SavedSession {
             id: format!("{}_native_{}", tool, id),
             name: title,
@@ -771,11 +827,96 @@ fn drizzle_history_page(
             saved_at: time_updated.to_string(),
             file_path: Some(db_str.clone()),
             turn_count: Some(std::cmp::max(1, msg_count / 2) as u32),
+            input_tokens: usage.input,
+            output_tokens: usage.output,
         })
     });
     match rows {
         Ok(iter) => iter.flatten().collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+fn drizzle_session_usage(conn: &rusqlite::Connection, session_id: &str) -> TokenUsage {
+    let has_v2_session = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id = ?1)",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    let has_v2_messages = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_message WHERE session_id = ?1)",
+            [session_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    let table = if has_v2_session || has_v2_messages {
+        "session_message"
+    } else {
+        "message"
+    };
+    let boundary = drizzle_usage_boundary(conn, table);
+    let Ok(mut statement) = conn.prepare(&format!(
+        "SELECT m.data FROM {table} m WHERE m.session_id = ?1{boundary}"
+    )) else {
+        return TokenUsage::default();
+    };
+    let Ok(rows) = statement.query_map([session_id], |row| row.get::<_, String>(0)) else {
+        return TokenUsage::default();
+    };
+    let mut usage = TokenUsage::default();
+    for data in rows.flatten() {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(tokens) = value.get("tokens") {
+                let sample = TokenUsage::read(tokens, "input", "output");
+                if table != "message" || !is_unmeasured_drizzle_zero(&value, sample) {
+                    usage.add(sample);
+                }
+            }
+        }
+    }
+    usage
+}
+
+fn is_unmeasured_drizzle_zero(value: &serde_json::Value, usage: TokenUsage) -> bool {
+    value.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+        && usage.input == Some(0)
+        && usage.output == Some(0)
+        && value
+            .get("finish")
+            .and_then(serde_json::Value::as_str)
+            .filter(|finish| !finish.is_empty())
+            .is_none()
+}
+
+fn drizzle_usage_boundary(conn: &rusqlite::Connection, message_table: &str) -> String {
+    if conn
+        .prepare(&format!("SELECT time_created FROM {message_table} LIMIT 0"))
+        .is_err()
+    {
+        return String::new();
+    }
+    let has_v2_sessions = conn.prepare("SELECT id FROM session_v2 LIMIT 0").is_ok();
+    let mut sources = Vec::new();
+    for table in ["session_v2", "session"] {
+        if conn
+            .prepare(&format!("SELECT time_created FROM {table} LIMIT 0"))
+            .is_ok()
+        {
+            let migration = if table == "session" && has_v2_sessions {
+                " WHERE NOT EXISTS(SELECT 1 FROM session_v2 WHERE id=session.id)"
+            } else {
+                ""
+            };
+            sources.push(format!("SELECT id,time_created FROM {table}{migration}"));
+        }
+    }
+    if sources.is_empty() {
+        String::new()
+    } else {
+        format!(" AND (m.time_created IS NULL OR m.time_created<=0 OR m.time_created>=COALESCE((SELECT time_created FROM ({}) WHERE id=m.session_id),0))", sources.join(" UNION ALL "))
     }
 }
 
@@ -936,14 +1077,25 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
         cwd: String,
         started_at: f64,
         msg_count: i64,
+        usage: TokenUsage,
     }
     let raws: Vec<Raw> = {
-        let query = "SELECT id, title, cwd, started_at, message_count \
+        let usage_columns = if conn
+            .prepare("SELECT input_tokens, output_tokens FROM sessions LIMIT 0")
+            .is_ok()
+        {
+            "input_tokens, output_tokens"
+        } else {
+            "NULL, NULL"
+        };
+        let query = format!(
+            "SELECT id, title, cwd, started_at, message_count, {usage_columns} \
                      FROM sessions \
                      WHERE archived = 0 \
                      ORDER BY started_at DESC \
-                     LIMIT ?1 OFFSET ?2";
-        let Ok(mut stmt) = conn.prepare(query) else {
+                     LIMIT ?1 OFFSET ?2"
+        );
+        let Ok(mut stmt) = conn.prepare(&query) else {
             return Vec::new();
         };
         let rows = stmt.query_map([limit as i64, offset as i64], |row| {
@@ -959,6 +1111,16 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
                     .unwrap_or_default(),
                 started_at: row.get::<_, Option<f64>>(3).unwrap_or(None).unwrap_or(0.0),
                 msg_count: row.get::<_, Option<i64>>(4).unwrap_or(None).unwrap_or(0),
+                usage: TokenUsage {
+                    input: row
+                        .get::<_, Option<i64>>(5)
+                        .unwrap_or(None)
+                        .and_then(|v| u64::try_from(v).ok()),
+                    output: row
+                        .get::<_, Option<i64>>(6)
+                        .unwrap_or(None)
+                        .and_then(|v| u64::try_from(v).ok()),
+                },
             })
         });
         match rows {
@@ -998,6 +1160,8 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
                 file_path: Some(db_str.clone()),
                 turn_count: Some(turns_from_messages(r.msg_count.max(0) as u32)),
                 session_token: Some(r.id),
+                input_tokens: r.usage.input,
+                output_tokens: r.usage.output,
             }
         })
         .collect()
@@ -1147,6 +1311,14 @@ fn dsh_turn_count(events: &[serde_json::Value]) -> u32 {
         .count() as u32
 }
 
+fn dsh_owns_usage(header: &serde_json::Value, event: &serde_json::Value) -> Option<bool> {
+    let seed_length = match header.get("seedLength") {
+        Some(length) => length.as_u64()?,
+        None => 0,
+    };
+    Some(seed_length == 0 || event.get("seq")?.as_u64()? >= seed_length)
+}
+
 /// Parse one DeepSeek Harness session log into a `SavedSession`. The header
 /// line carries id + cwd; events are scanned for the title + turn count.
 /// `saved_at` is the artifact mtime (last append), matching the other JSONL
@@ -1187,6 +1359,39 @@ fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
 
     let title = dsh_title_from_events(&events);
     let turn_count = dsh_turn_count(&events);
+    let mut usage_by_step = HashMap::new();
+    for event in &events {
+        let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let Some(data) = event.get("data") else {
+            continue;
+        };
+        let sample = match kind {
+            "assistant/message" => data.get("usage"),
+            "assistant/chunk"
+                if data.pointer("/chunk/type").and_then(|v| v.as_str()) == Some("usage") =>
+            {
+                data.pointer("/chunk/usage")
+            }
+            _ => None,
+        };
+        if let (Some(sample), Some(turn), Some(step)) = (
+            sample,
+            data.get("turn").and_then(|v| v.as_u64()),
+            data.get("step").and_then(|v| v.as_u64()),
+        ) {
+            if dsh_owns_usage(&header, event) != Some(true) {
+                continue;
+            }
+            usage_by_step.insert(
+                (turn, step),
+                TokenUsage::read(sample, "inputTokens", "outputTokens"),
+            );
+        }
+    }
+    let mut usage = TokenUsage::default();
+    for sample in usage_by_step.into_values() {
+        usage.add(sample);
+    }
 
     Some(SavedSession {
         id: format!("deepseek_native_{}", session_id),
@@ -1197,6 +1402,8 @@ fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
         saved_at: mtime_millis(path),
         file_path: Some(path.to_string_lossy().into_owned()),
         turn_count: (turn_count > 0).then_some(turn_count),
+        input_tokens: usage.input,
+        output_tokens: usage.output,
     })
 }
 
@@ -1248,6 +1455,49 @@ fn sum_dsh_sizes(root: &Path, cap: u64, total: &mut u64) {
 struct CachedCount {
     mtime: i64,
     count: u32,
+    #[serde(default)]
+    size: u64,
+}
+
+struct CachedSession {
+    mtime: SystemTime,
+    size: u64,
+    session: Option<SavedSession>,
+}
+
+fn session_cache() -> &'static Mutex<HashMap<PathBuf, CachedSession>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedSession>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_session_cached(path: &Path, family: Family) -> Option<SavedSession> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let mtime = metadata.modified().ok()?;
+    let size = metadata.len();
+    if let Ok(cache) = session_cache().lock() {
+        if let Some(entry) = cache.get(path) {
+            if entry.mtime == mtime && entry.size == size {
+                return entry.session.clone();
+            }
+        }
+    }
+    let session = match family {
+        Family::Claude => parse_agent_jsonl(path, family),
+        Family::Codex => parse_codex_session_jsonl(path),
+        Family::DeepSeek => parse_dsh_session(path),
+        _ => None,
+    };
+    if let Ok(mut cache) = session_cache().lock() {
+        cache.insert(
+            path.to_path_buf(),
+            CachedSession {
+                mtime,
+                size,
+                session: session.clone(),
+            },
+        );
+    }
+    session
 }
 
 fn count_cache_path() -> PathBuf {
@@ -1256,20 +1506,19 @@ fn count_cache_path() -> PathBuf {
         .join("ai-career-heatmap-counts.json")
 }
 
-fn read_count_cache() -> HashMap<String, CachedCount> {
-    std::fs::read_to_string(count_cache_path())
+fn read_count_cache(path: &Path) -> HashMap<String, CachedCount> {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_default()
 }
 
-fn write_count_cache(map: &HashMap<String, CachedCount>) {
-    let path = count_cache_path();
+fn write_count_cache(path: &Path, map: &HashMap<String, CachedCount>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(json) = serde_json::to_string(map) {
-        let _ = std::fs::write(&path, json);
+        let _ = std::fs::write(path, json);
     }
 }
 
@@ -1281,12 +1530,24 @@ pub fn family_history(family: Family, offset: usize, limit: usize) -> Vec<SavedS
     let Some(home) = dirs::home_dir() else {
         return Vec::new();
     };
+    family_history_at(&home, family, offset, limit)
+}
+
+fn family_history_at(
+    home: &Path,
+    family: Family,
+    offset: usize,
+    limit: usize,
+) -> Vec<SavedSession> {
+    if limit == 0 {
+        return Vec::new();
+    }
 
     // OpenCode + MiMo (its fork) + Hermes keep sessions in a SQLite db, not flat
     // files. OpenCode/MiMo share one reader (`drizzle_*`); Hermes has its own.
     if family == Family::OpenCode {
         return drizzle_history_page(
-            &Family::OpenCode.root(&home).join("opencode.db"),
+            &Family::OpenCode.root(home).join("opencode.db"),
             "opencode",
             "OpenCode",
             offset,
@@ -1294,48 +1555,38 @@ pub fn family_history(family: Family, offset: usize, limit: usize) -> Vec<SavedS
         );
     }
     if family == Family::MiMo {
-        return drizzle_history_page(&mimo_db_path(&home), "mimo", "MiMo", offset, limit);
+        return drizzle_history_page(&mimo_db_path(home), "mimo", "MiMo", offset, limit);
     }
     if family == Family::Hermes {
-        return hermes_history_page(&Family::Hermes.root(&home).join("state.db"), offset, limit);
+        return hermes_history_page(&Family::Hermes.root(home).join("state.db"), offset, limit);
     }
     // DeepSeek Harness keeps one event log per session (`session.jsonl.zstd`
     // by default) — collect + parse those directly.
-    if family == Family::DeepSeek {
-        let mut candidates: Vec<(SystemTime, PathBuf, Family)> = Vec::new();
-        collect_dsh_paths(&family.root(&home), family, &mut candidates);
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
-        return candidates
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .filter_map(|(_, path, _)| parse_dsh_session(&path))
-            .collect();
-    }
-
     let mut candidates: Vec<(SystemTime, PathBuf, Family)> = Vec::new();
     match family {
         Family::Claude | Family::Codex => {
             if let Some(depth) = family.jsonl_depth() {
-                collect_jsonl_paths(family.root(&home), depth, family, &mut candidates);
+                collect_jsonl_paths(family.root(home), depth, family, &mut candidates);
             }
         }
-        Family::OpenCode | Family::Hermes | Family::MiMo | Family::DeepSeek => unreachable!(),
+        Family::DeepSeek => collect_dsh_paths(&family.root(home), family, &mut candidates),
+        Family::OpenCode | Family::Hermes | Family::MiMo => unreachable!(),
     }
 
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    if let Ok(mut cache) = session_cache().lock() {
+        let keep: HashSet<_> = candidates.iter().map(|(_, path, _)| path).collect();
+        let root = family.root(home);
+        cache.retain(|path, _| !path.starts_with(&root) || keep.contains(path));
+    }
     let mut sessions: Vec<_> = candidates
         .into_iter()
+        .filter_map(|(_, path, _)| parse_session_cached(&path, family))
         .skip(offset)
         .take(limit)
-        .filter_map(|(_, path, _)| match family {
-            Family::Claude => parse_agent_jsonl(&path, Family::Claude),
-            Family::Codex => parse_codex_session_jsonl(&path),
-            Family::OpenCode | Family::Hermes | Family::MiMo | Family::DeepSeek => None,
-        })
         .collect();
     if family == Family::Codex {
-        apply_codex_thread_names(&family.root(&home), &mut sessions);
+        apply_codex_thread_names(&family.root(home), &mut sessions);
     }
     sessions
 }
@@ -1343,35 +1594,45 @@ pub fn family_history(family: Family, offset: usize, limit: usize) -> Vec<SavedS
 /// Contribution-heatmap entries across all six families, 210-day lookback.
 /// Past session files are immutable once their mtime settles, so per-file
 /// counts are cached on disk and skipped on subsequent scans.
-pub fn message_heatmap() -> Vec<HeatmapEntry> {
+pub fn message_heatmap(selected_family: Option<Family>) -> Vec<HeatmapEntry> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    message_heatmap_at(&home, selected_family, &count_cache_path())
+}
+
+fn message_heatmap_at(
+    home: &Path,
+    selected_family: Option<Family>,
+    cache_path: &Path,
+) -> Vec<HeatmapEntry> {
     const LOOKBACK_SECS: u64 = 210 * 86_400;
     let now = SystemTime::now();
     let cutoff = now
         .checked_sub(Duration::from_secs(LOOKBACK_SECS))
         .unwrap_or(UNIX_EPOCH);
 
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-
     // Collect file candidates for the JSONL families only (OpenCode, MiMo, and
     // Hermes are separate SQLite passes below).
     let mut candidates: Vec<(SystemTime, PathBuf, Family)> = Vec::new();
     for family in Family::ALL {
+        if selected_family.is_some_and(|selected| selected != family) {
+            continue;
+        }
         match family {
             Family::Claude | Family::Codex => {
                 if let Some(depth) = family.jsonl_depth() {
-                    collect_jsonl_paths(family.root(&home), depth, family, &mut candidates);
+                    collect_jsonl_paths(family.root(home), depth, family, &mut candidates);
                 }
             }
             Family::DeepSeek => {
-                collect_dsh_paths(&family.root(&home), family, &mut candidates);
+                collect_dsh_paths(&family.root(home), family, &mut candidates);
             }
             Family::OpenCode | Family::Hermes | Family::MiMo => {}
         }
     }
 
-    let mut cache = read_count_cache();
+    let mut cache = read_count_cache(cache_path);
     let mut cache_dirty = false;
     let mut keep: HashSet<String> = HashSet::new();
     let mut out: Vec<HeatmapEntry> = Vec::with_capacity(candidates.len());
@@ -1386,9 +1647,14 @@ pub fn message_heatmap() -> Vec<HeatmapEntry> {
             .unwrap_or(0);
         let key = path.to_string_lossy().into_owned();
         keep.insert(key.clone());
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let stamp = mtime
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
 
         let count = match cache.get(&key) {
-            Some(entry) if entry.mtime == ts => entry.count,
+            Some(entry) if entry.mtime == stamp && entry.size == size => entry.count,
             _ => {
                 // DeepSeek logs are zstd by default — count via its own
                 // decompress-then-count path; everyone else counts lines.
@@ -1399,8 +1665,9 @@ pub fn message_heatmap() -> Vec<HeatmapEntry> {
                 cache.insert(
                     key.clone(),
                     CachedCount {
-                        mtime: ts,
+                        mtime: stamp,
                         count: c,
+                        size,
                     },
                 );
                 cache_dirty = true;
@@ -1414,12 +1681,15 @@ pub fn message_heatmap() -> Vec<HeatmapEntry> {
 
     // Prune entries for files that vanished from disk.
     let before = cache.len();
-    cache.retain(|k, _| keep.contains(k));
+    cache.retain(|key, _| {
+        selected_family.is_some_and(|family| !Path::new(key).starts_with(family.root(home)))
+            || keep.contains(key)
+    });
     if cache.len() != before {
         cache_dirty = true;
     }
     if cache_dirty {
-        write_count_cache(&cache);
+        write_count_cache(cache_path, &cache);
     }
 
     // SQLite second pass — OpenCode, MiMo (its fork), and Hermes keep sessions
@@ -1429,17 +1699,23 @@ pub fn message_heatmap() -> Vec<HeatmapEntry> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    collect_drizzle_heatmap_entries(
-        &Family::OpenCode.root(&home).join("opencode.db"),
-        cutoff_secs,
-        &mut out,
-    );
-    collect_drizzle_heatmap_entries(&mimo_db_path(&home), cutoff_secs, &mut out);
-    collect_hermes_heatmap_entries(
-        &Family::Hermes.root(&home).join("state.db"),
-        cutoff_secs,
-        &mut out,
-    );
+    if selected_family.map_or(true, |family| family == Family::OpenCode) {
+        collect_drizzle_heatmap_entries(
+            &Family::OpenCode.root(home).join("opencode.db"),
+            cutoff_secs,
+            &mut out,
+        );
+    }
+    if selected_family.map_or(true, |family| family == Family::MiMo) {
+        collect_drizzle_heatmap_entries(&mimo_db_path(home), cutoff_secs, &mut out);
+    }
+    if selected_family.map_or(true, |family| family == Family::Hermes) {
+        collect_hermes_heatmap_entries(
+            &Family::Hermes.root(home).join("state.db"),
+            cutoff_secs,
+            &mut out,
+        );
+    }
 
     out
 }
@@ -1449,43 +1725,50 @@ pub fn message_heatmap() -> Vec<HeatmapEntry> {
 /// divides by a bytes-per-token ratio. Deliberately approximate — it measures
 /// content volume, so it works even when a provider doesn't report real usage
 /// (third-party models often log 0 tokens). Stat-only (no file reads), cheap.
-pub fn estimate_token_bytes() -> u64 {
+pub fn estimate_token_bytes(selected_family: Option<Family>) -> u64 {
     let Some(home) = dirs::home_dir() else {
         return 0;
     };
+    estimate_token_bytes_at(&home, selected_family)
+}
+
+fn estimate_token_bytes_at(home: &Path, selected_family: Option<Family>) -> u64 {
     const MAX_PER_FILE: u64 = 32 * 1024 * 1024;
     let mut total: u64 = 0;
     for family in Family::ALL {
+        if selected_family.is_some_and(|selected| selected != family) {
+            continue;
+        }
         match family {
             Family::Hermes => {
                 // Hermes keeps all sessions in one SQLite db; its file size
                 // stands in for the family's content volume.
-                if let Ok(m) = std::fs::metadata(family.root(&home).join("state.db")) {
+                if let Ok(m) = std::fs::metadata(family.root(home).join("state.db")) {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::Claude | Family::Codex => {
                 if let Some(depth) = family.jsonl_depth() {
-                    sum_jsonl_sizes(family.root(&home), depth, MAX_PER_FILE, &mut total);
+                    sum_jsonl_sizes(family.root(home), depth, MAX_PER_FILE, &mut total);
                 }
             }
             Family::OpenCode => {
                 // One shared DB holds every OpenCode session; its file size
                 // stands in for the family's content volume.
-                if let Ok(m) = std::fs::metadata(family.root(&home).join("opencode.db")) {
+                if let Ok(m) = std::fs::metadata(family.root(home).join("opencode.db")) {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::MiMo => {
                 // MiMo Code's SQLite db (its OpenCode fork's `mimocode.db`).
-                if let Ok(m) = std::fs::metadata(mimo_db_path(&home)) {
+                if let Ok(m) = std::fs::metadata(mimo_db_path(home)) {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::DeepSeek => {
                 // One event-log file per DeepSeek session (`session.jsonl.zstd`
                 // by default); their sizes stand in for the family's volume.
-                sum_dsh_sizes(&family.root(&home), MAX_PER_FILE, &mut total);
+                sum_dsh_sizes(&family.root(home), MAX_PER_FILE, &mut total);
             }
         }
     }
@@ -1513,10 +1796,396 @@ fn sum_jsonl_sizes(dir: PathBuf, depth: u8, cap: u64, total: &mut u64) {
     }
 }
 
+fn resolve_session_file(path: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("Session path must be absolute".to_string());
+    }
+    path.canonicalize()
+        .map_err(|e| format!("Cannot resolve session path: {e}"))
+}
+
+pub fn reveal_session_file(path: &Path) -> Result<(), String> {
+    let path = resolve_session_file(path)?;
+    #[cfg(target_os = "windows")]
+    {
+        let value = path.to_string_lossy();
+        let value = if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+        };
+        crate::utils::process::command("explorer.exe")
+            .arg("/select,")
+            .arg(value)
+            .spawn()
+            .map_err(|e| format!("Cannot open file manager: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::utils::process::command("open")
+            .arg("-R")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Cannot open file manager: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let directory = if path.is_dir() {
+            path.as_path()
+        } else {
+            path.parent().ok_or("Session path has no parent")?
+        };
+        crate::utils::process::command("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|e| format!("Cannot open file manager: {e}"))?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        return Err("File manager is unavailable on this platform".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine;
+
+    fn fixture_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("echobird_career_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_jsonl(path: &Path, rows: &[serde_json::Value]) {
+        let contents = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    #[test]
+    fn claude_usage_replaces_streamed_samples_and_preserves_zero_and_missing() {
+        let dir = fixture_dir();
+        let path = dir.join("session.jsonl");
+        let user = serde_json::json!({"message":{"role":"user","content":"Fixture question"}});
+        write_jsonl(
+            &path,
+            &[
+                user.clone(),
+                serde_json::json!({"message":{"id":"a","role":"assistant","usage":{"input_tokens":10,"output_tokens":0,"cache_read_input_tokens":900}}}),
+                serde_json::json!({"message":{"id":"a","role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}),
+                serde_json::json!({"message":{"id":"b","role":"assistant","usage":{"input_tokens":20,"output_tokens":2}}}),
+            ],
+        );
+        let session = parse_agent_jsonl(&path, Family::Claude).unwrap();
+        assert_eq!(
+            (session.input_tokens, session.output_tokens),
+            (Some(30), Some(7))
+        );
+        write_jsonl(
+            &path,
+            &[
+                user.clone(),
+                serde_json::json!({"message":{"role":"assistant","usage":{"input_tokens":0,"output_tokens":0}}}),
+            ],
+        );
+        let session = parse_agent_jsonl(&path, Family::Claude).unwrap();
+        assert_eq!(
+            (session.input_tokens, session.output_tokens),
+            (Some(0), Some(0))
+        );
+        write_jsonl(&path, &[user]);
+        let session = parse_agent_jsonl(&path, Family::Claude).unwrap();
+        assert_eq!((session.input_tokens, session.output_tokens), (None, None));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_usage_preserves_initial_cumulative_snapshot_without_double_counting() {
+        let dir = fixture_dir();
+        let path = dir.join("rollout.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                serde_json::json!({"type":"session_meta","payload":{"id":"fixture","cwd":"/fixture","source":"cli"}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":25,"output_tokens":7},"last_token_usage":{"input_tokens":15,"output_tokens":5}}}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":null}}),
+            ],
+        );
+        let session = parse_codex_session_jsonl(&path).unwrap();
+        assert_eq!(
+            (session.input_tokens, session.output_tokens),
+            (Some(25), Some(7))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn deepseek_usage_replaces_chunk_with_final_sample_for_each_step() {
+        let dir = fixture_dir();
+        let path = dir.join("session.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                serde_json::json!({"type":"session","id":"fixture","cwd":"/fixture"}),
+                serde_json::json!({"type":"assistant/chunk","data":{"turn":0,"step":0,"chunk":{"type":"usage","usage":{"inputTokens":10,"outputTokens":2}}}}),
+                serde_json::json!({"type":"assistant/message","data":{"turn":0,"step":0,"usage":{"inputTokens":10,"outputTokens":5,"cacheReadTokens":900}}}),
+                serde_json::json!({"type":"assistant/message","data":{"turn":0,"step":1,"usage":{"inputTokens":20,"outputTokens":3}}}),
+            ],
+        );
+        let session = parse_dsh_session(&path).unwrap();
+        assert_eq!(
+            (session.input_tokens, session.output_tokens),
+            (Some(30), Some(8))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn jsonl_pages_filter_internal_sessions_before_paging_and_cache_parsing() {
+        let home = fixture_dir();
+        let root = home.join(".codex/sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let stamp = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for index in 0..6 {
+            let path = root.join(format!("{index}.jsonl"));
+            let source = if index % 2 == 0 {
+                serde_json::json!({"subagent":{}})
+            } else {
+                serde_json::json!("cli")
+            };
+            write_jsonl(
+                &path,
+                &[
+                    serde_json::json!({"type":"session_meta","payload":{"id":format!("s{index}"),"cwd":"/fixture","source":source}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("Question {index}")}]}}),
+                ],
+            );
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(stamp)
+                .unwrap();
+        }
+        let first = family_history_at(&home, Family::Codex, 0, 2);
+        let second = family_history_at(&home, Family::Codex, 2, 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|s| s.session_token.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["s1", "s3"]
+        );
+        assert_eq!(
+            second
+                .iter()
+                .map(|s| s.session_token.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["s5"]
+        );
+        assert!(family_history_at(&home, Family::Codex, 3, 2).is_empty());
+        let path = root.join("1.jsonl");
+        session_cache()
+            .lock()
+            .unwrap()
+            .get_mut(&path)
+            .unwrap()
+            .session
+            .as_mut()
+            .unwrap()
+            .name = "Cache hit marker".to_string();
+        assert_eq!(
+            family_history_at(&home, Family::Codex, 0, 2)[0].name,
+            "Cache hit marker"
+        );
+        let original = std::fs::read_to_string(&path).unwrap();
+        let changed = original.replace("Question 1", "Modified 1");
+        assert_eq!(original.len(), changed.len());
+        std::fs::write(&path, changed).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stamp + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            family_history_at(&home, Family::Codex, 0, 2)[0].name,
+            "Modified 1"
+        );
+        // Changing length invalidates a cache entry even if the mtime is preserved.
+        session_cache()
+            .lock()
+            .unwrap()
+            .get_mut(&path)
+            .unwrap()
+            .session
+            .as_mut()
+            .unwrap()
+            .name = "Stale marker".to_string();
+        std::fs::write(&path, format!("{original}\n")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(stamp + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(
+            parse_session_cached(&path, Family::Codex).unwrap().name,
+            "Question 1"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(family_history_at(&home, Family::Codex, 0, 10)
+            .iter()
+            .all(|s| s.session_token.as_deref() != Some("s1")));
+        assert!(!session_cache().lock().unwrap().contains_key(&path));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn family_stats_filter_sources_and_preserve_other_families_count_cache() {
+        let home = fixture_dir();
+        let claude = Family::Claude
+            .root(&home)
+            .join("project")
+            .join("fixture.jsonl");
+        let codex = Family::Codex.root(&home).join("fixture.jsonl");
+        for path in [&claude, &codex] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&claude, "{}\n{}\n").unwrap();
+        std::fs::write(&codex, "{}\n{}\n{}\n").unwrap();
+        let cache_path = home.join("counts.json");
+        assert_eq!(
+            message_heatmap_at(&home, Some(Family::Codex), &cache_path)
+                .iter()
+                .map(|entry| entry.count)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        assert_eq!(
+            message_heatmap_at(&home, Some(Family::Claude), &cache_path)
+                .iter()
+                .map(|entry| entry.count)
+                .collect::<Vec<_>>(),
+            [2]
+        );
+        assert!(read_count_cache(&cache_path).contains_key(codex.to_str().unwrap()));
+        assert_eq!(estimate_token_bytes_at(&home, Some(Family::Claude)), 6);
+        assert_eq!(estimate_token_bytes_at(&home, Some(Family::Codex)), 9);
+        std::fs::remove_file(&claude).unwrap();
+        assert!(message_heatmap_at(&home, Some(Family::Claude), &cache_path).is_empty());
+        assert!(read_count_cache(&cache_path).contains_key(codex.to_str().unwrap()));
+        assert!(!read_count_cache(&cache_path).contains_key(claude.to_str().unwrap()));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn reveal_resolves_existing_absolute_unicode_paths_without_launching() {
+        let dir = fixture_dir();
+        let path = dir.join("会话 & 'fixture'.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        assert_eq!(
+            resolve_session_file(&path).unwrap(),
+            path.canonicalize().unwrap()
+        );
+        assert!(resolve_session_file(Path::new("relative.jsonl")).is_err());
+        assert!(resolve_session_file(&dir.join("missing.jsonl")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn drizzle_usage_uses_authoritative_store_and_keeps_unknown_empty_sessions() {
+        let db = opencode_v2_fixture();
+        add_opencode_v1_fixture(&db);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"ALTER TABLE session_message ADD COLUMN data TEXT;
+               ALTER TABLE message ADD COLUMN data TEXT;
+               UPDATE session_message SET data='{"tokens":{"input":10,"output":4}}' WHERE id='a1';
+               UPDATE session_message SET data='{"tokens":{"input":20,"output":0}}' WHERE id='a2';
+               UPDATE message SET data='{"tokens":{"input":9000,"output":9000}}' WHERE session_id='main';
+               UPDATE message SET data='{"tokens":{"input":50,"output":8}}' WHERE id='legacy-a';
+               INSERT INTO session VALUES ('pending','Pending','/fixture',5500,NULL,NULL),
+                   ('error','Error','/fixture',5500,NULL,NULL),
+                   ('finished','Finished','/fixture',5500,NULL,NULL),
+                   ('user-zero','User','/fixture',5500,NULL,NULL);
+               INSERT INTO message VALUES
+                   ('pending','pending','{"role":"assistant","tokens":{"input":0,"output":0}}'),
+                   ('error','error','{"role":"assistant","error":{},"time":{"completed":5500},"tokens":{"input":0,"output":0}}'),
+                   ('finished','finished','{"role":"assistant","finish":"stop","tokens":{"input":0,"output":0}}'),
+                   ('user-zero','user-zero','{"role":"user","tokens":{"input":0,"output":0}}');
+               INSERT INTO session_v2 VALUES ('v2-zero','V2 zero','/fixture',NULL,5500,NULL,NULL);
+               INSERT INTO session_message VALUES ('v2-zero','v2-zero','assistant','{"role":"assistant","tokens":{"input":0,"output":0}}');"#,
+        ).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        for tool in ["opencode", "mimo"] {
+            let rows = drizzle_history_page(&db, tool, tool, 0, 10);
+            let main = rows
+                .iter()
+                .find(|row| row.session_token.as_deref() == Some("main"))
+                .unwrap();
+            assert_eq!((main.input_tokens, main.output_tokens), (Some(30), Some(4)));
+            let legacy = rows
+                .iter()
+                .find(|row| row.session_token.as_deref() == Some("legacy"))
+                .unwrap();
+            assert_eq!(
+                (legacy.input_tokens, legacy.output_tokens),
+                (Some(50), Some(8))
+            );
+            let empty = rows
+                .iter()
+                .find(|row| row.session_token.as_deref() == Some("empty"))
+                .unwrap();
+            assert_eq!((empty.input_tokens, empty.output_tokens), (None, None));
+            for id in ["pending", "error", "finished", "user-zero", "v2-zero"] {
+                let session = rows
+                    .iter()
+                    .find(|row| row.session_token.as_deref() == Some(id))
+                    .unwrap();
+                let expected = if id == "pending" || id == "error" {
+                    (None, None)
+                } else {
+                    (Some(0), Some(0))
+                };
+                assert_eq!(
+                    (session.input_tokens, session.output_tokens),
+                    expected,
+                    "{id}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        std::fs::remove_file(db).unwrap();
+    }
+
+    #[test]
+    fn hermes_usage_supports_old_schema_and_preserves_recorded_zero() {
+        let dir = fixture_dir();
+        let db = dir.join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL, message_count INTEGER, archived INTEGER);
+             INSERT INTO sessions VALUES ('fixture', 'Fixture task', '/fixture', 1000, 2, 0);",
+        ).unwrap();
+        let old = hermes_history_page(&db, 0, 20);
+        assert_eq!((old[0].input_tokens, old[0].output_tokens), (None, None));
+        conn.execute_batch("ALTER TABLE sessions ADD COLUMN input_tokens INTEGER; ALTER TABLE sessions ADD COLUMN output_tokens INTEGER; UPDATE sessions SET input_tokens=15, output_tokens=0;").unwrap();
+        let recorded = hermes_history_page(&db, 0, 20);
+        assert_eq!(
+            (recorded[0].input_tokens, recorded[0].output_tokens),
+            (Some(15), Some(0))
+        );
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn family_id_round_trips() {
@@ -1527,17 +2196,20 @@ mod tests {
     }
 
     #[test]
-    fn title_truncates_at_40_chars_with_ellipsis() {
+    fn title_preserves_full_length() {
         let long = "a".repeat(50);
-        let t = make_title(&long);
-        assert!(t.ends_with("..."));
-        assert_eq!(t.chars().count(), 43); // 40 + "..."
+        assert_eq!(make_title(&long), long);
         assert_eq!(make_title("short"), "short");
     }
 
     #[test]
     fn newlines_collapsed_in_title() {
         assert_eq!(make_title("line one\nline two"), "line one line two");
+        let chinese = "完整保留中文对话标题".repeat(6);
+        assert_eq!(
+            make_title(&format!("{chinese}\n下一行")),
+            format!("{chinese} 下一行")
+        );
     }
 
     #[test]
@@ -1595,11 +2267,19 @@ mod tests {
         let dir = std::env::temp_dir().join("echobird_ai_career_test_agent");
         let _ = std::fs::create_dir_all(&dir);
         let f = dir.join("sess.jsonl");
-        let body = "{\"sessionId\":\"abc\",\"cwd\":\"/tmp/proj\",\"message\":{\"role\":\"user\",\"content\":\"hello world\"}}\n\
-                    {\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}\n";
+        let prompt = format!(
+            "{}\n{}",
+            "long conversation title ".repeat(3),
+            "完整的中文标题".repeat(6)
+        );
+        let body = format!(
+            "{}\n{}\n",
+            serde_json::json!({"sessionId":"abc","cwd":"/tmp/proj","message":{"role":"user","content":prompt}}),
+            serde_json::json!({"message":{"role":"assistant","content":"hi"}})
+        );
         std::fs::write(&f, body).unwrap();
         let s = parse_agent_jsonl(&f, Family::Claude).unwrap();
-        assert_eq!(s.name, "hello world");
+        assert_eq!(s.name, prompt.replace('\n', " "));
         assert_eq!(s.tool, "claude");
         assert_eq!(s.cwd, "/tmp/proj");
         assert_eq!(s.session_token.as_deref(), Some("abc"));

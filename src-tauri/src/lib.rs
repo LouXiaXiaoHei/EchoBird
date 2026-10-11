@@ -1204,6 +1204,8 @@ pub fn run() {
             ai_career_commands::ai_career_token_bytes,
             pulse_commands::pulse_save,
             pulse_commands::pulse_load_all,
+            ai_career_commands::ai_career_daily_tokens,
+            ai_career_commands::reveal_ai_career_session_file,
             settings_commands::set_avatar,
             settings_commands::get_avatar,
         ])

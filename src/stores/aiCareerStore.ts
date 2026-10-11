@@ -1,15 +1,13 @@
-// AI-career page store — shares the selected tool family between the center
-// page (family cards) and the right panel (session list), which App.tsx
-// mounts in separate slots. Also carries the "refresh" signal: the title-bar
-// refresh button bumps `refreshKey`, which both surfaces watch to re-scan
-// disk (new sessions / messages created since the page first loaded).
+// AI-career dashboard selection and explicit refresh signal.
 
 import { create } from 'zustand';
 import type { AiCareerFamily } from '../api/aiCareer';
 
 interface AiCareerState {
-  selectedFamily: AiCareerFamily;
-  setSelectedFamily: (family: AiCareerFamily) => void;
+  selectedFamily: AiCareerFamily | null;
+  setSelectedFamily: (family: AiCareerFamily | null) => void;
+  chartMetric: 'messages' | 'tokens';
+  setChartMetric: (metric: 'messages' | 'tokens') => void;
   refreshKey: number;
   refreshing: boolean;
   refresh: () => void;
@@ -17,9 +15,10 @@ interface AiCareerState {
 }
 
 export const useAiCareerStore = create<AiCareerState>((set) => ({
-  // Default to Claude so the right panel shows sessions immediately.
-  selectedFamily: 'claude',
+  selectedFamily: null,
   setSelectedFamily: (family) => set({ selectedFamily: family }),
+  chartMetric: 'tokens',
+  setChartMetric: (metric) => set({ chartMetric: metric }),
   refreshKey: 0,
   refreshing: false,
   refresh: () => set((s) => ({ refreshKey: s.refreshKey + 1, refreshing: true })),

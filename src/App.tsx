@@ -49,7 +49,7 @@ import {
 import { MotherAgentProvider, MotherAgentMain, MotherAgentPanel } from './pages/MotherAgent';
 import { FeedbackMain } from './pages/Feedback';
 import { MyProjectsMain, MyProjectsPanel, MyProjectsBottom } from './pages/MyProjects';
-import { AiCareerMain, AiCareerPanel, AiCareerTitleActions } from './pages/AiCareer';
+import { AiCareerMain, AiCareerFamilyPanel, AiCareerTitleActions } from './pages/AiCareer';
 import { AiPulseProvider, AiPulseTitleActions, AiPulsePanel, AiNewsMain } from './pages/AiPulse';
 import { useMyProjectsStore } from './stores/myProjectsStore';
 import {
@@ -353,7 +353,7 @@ function AppContent() {
                                 <div className={pageBlock(is('localLlm'))}>
                                   <LocalServerMain />
                                 </div>
-                                <div className={pageScroll(is('aiCareer'))}>
+                                <div className={pageBlock(is('aiCareer'))}>
                                   <AiCareerMain />
                                 </div>
                                 <div className={pageBlock(is('aiNews'))}>
@@ -389,7 +389,7 @@ function AppContent() {
                                 <LocalServerPanel />
                               </div>
                               <div className={page(is('aiCareer'))}>
-                                <AiCareerPanel />
+                                <AiCareerFamilyPanel />
                               </div>
                               <div className={page(is('aiNews'))}>
                                 <AiPulsePanel />

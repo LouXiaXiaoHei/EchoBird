@@ -21,6 +21,7 @@ import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from '
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { buildGrid, DAYS, WEEKS, type DayBuckets } from './heatmapData';
+import { CareerTooltip } from './CareerTooltip';
 
 // Rest colours (theme-tracking var strings): empty day is a faint wash of the
 // primary text colour; levels 1–4 ramp the coral accent's opacity.
@@ -71,7 +72,6 @@ const GRID_STYLE: CSSProperties = {
 
 type RGB = [number, number, number];
 type RGBA = [number, number, number, number];
-type Phase = 'enter' | 'exit' | 'done';
 
 const clamp01 = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
 // Ease-out (quadratic) so the per-cell fade decelerates, matching the feel of
@@ -125,9 +125,6 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
   const cellRefs = useRef<(HTMLDivElement | null)[]>([]);
   const [tip, setTip] = useState<TipState | null>(null);
   const [tipLeft, setTipLeft] = useState(0);
-  // Phase is used only for the legend (hidden during enter); the cell colours
-  // are driven directly by the rAF loop below, not by React re-renders.
-  const [phase, setPhase] = useState<Phase>('done');
   const activePage = useNavigationStore((s) => s.activePage);
 
   // Per-cell intro metadata: right→left stagger delay + random loading
@@ -152,7 +149,7 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
   // flashes for a frame before the reveal. React renders each cell's rest
   // colour via its style prop; since that value is constant across the intro,
   // React never re-applies it, so our per-frame `el.style.backgroundColor`
-  // writes are not clobbered by tooltip/phase re-renders.
+  // writes are not clobbered by tooltip re-renders.
   useLayoutEffect(() => {
     if (activePage !== 'aiCareer' || buckets.sessions.size === 0) return;
     const root = rootRef.current;
@@ -172,9 +169,6 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
       const el = els[i];
       if (el && !intro[i].future) el.style.backgroundColor = rgbaStr(grey);
     }
-    setPhase('enter');
-    const toExit = window.setTimeout(() => setPhase('exit'), SWEEP_MS);
-    const toDone = window.setTimeout(() => setPhase('done'), SWEEP_MS * 2);
 
     // 2) Drive every cell's colour per frame.
     let raf = 0;
@@ -210,8 +204,6 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
     raf = window.requestAnimationFrame(frame);
 
     return () => {
-      window.clearTimeout(toExit);
-      window.clearTimeout(toDone);
       window.cancelAnimationFrame(raf);
     };
   }, [buckets, activePage, intro]);
@@ -271,10 +263,7 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
         ))}
       </div>
 
-      <div
-        className="mt-2.5 flex items-center justify-end gap-1.5 text-xs text-cyber-text-secondary"
-        style={{ opacity: phase === 'enter' ? 0 : 1 }}
-      >
+      <div className="mt-2.5 flex items-center justify-end gap-1.5 text-xs text-cyber-text-secondary">
         <span>{t('aiCareer.legendLess')}</span>
         {LEVEL_BG.map((bg, lv) => (
           <span
@@ -291,15 +280,7 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
         <span>{t('aiCareer.legendMore')}</span>
       </div>
 
-      {tip && (
-        <div
-          ref={tipRef}
-          className="pointer-events-none absolute z-20 -translate-x-1/2 -translate-y-full rounded-md border border-cyber-border bg-cyber-elevated px-2 py-1 text-xs text-cyber-text whitespace-nowrap shadow-lg"
-          style={{ left: tipLeft, top: tip.top }}
-        >
-          {tip.text}
-        </div>
-      )}
+      {tip && <CareerTooltip ref={tipRef} text={tip.text} left={tipLeft} top={tip.top} />}
     </div>
   );
 }
