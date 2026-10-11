@@ -59,7 +59,7 @@ export const MiniSelect: React.FC<MiniSelectProps> = ({
       <button
         type="button"
         onClick={() => !disabled && setIsOpen(!isOpen)}
-        className={`w-full min-w-[90px] bg-cyber-input border border-cyber-border px-3 py-2 outline-none flex items-center justify-center transition-colors text-[14px] rounded-button ${
+        className={`w-full min-w-[90px] bg-cyber-surface border border-cyber-border px-3 py-2 outline-none flex items-center justify-center transition-colors text-[14px] rounded-button ${
           disabled ? 'opacity-40' : accentBorderHover
         } ${isOpen ? accentBorderOpen : ''}`}
       >
@@ -72,7 +72,7 @@ export const MiniSelect: React.FC<MiniSelectProps> = ({
 
       {isOpen && (
         <div
-          className={`absolute ${dropUp ? 'bottom-full mb-px' : 'top-full mt-px'} left-0 right-0 bg-cyber-input border ${accentDropdownBorder} max-h-80 overflow-y-auto z-50 rounded-button shadow-lg`}
+          className={`absolute ${dropUp ? 'bottom-full mb-px' : 'top-full mt-px'} left-0 right-0 bg-cyber-surface border ${accentDropdownBorder} max-h-80 overflow-y-auto z-50 rounded-button shadow-lg`}
         >
           {options.map((option) => (
             <div

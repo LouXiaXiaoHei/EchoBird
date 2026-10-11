@@ -8,7 +8,7 @@
 
 .free-model-router-hub {
   background: rgb(var(--bg-surface-rgb));
-  border: 1px solid rgb(var(--border-rgb) / 0.7);
+  border: 1px solid transparent;
 }
 
 .super-router {

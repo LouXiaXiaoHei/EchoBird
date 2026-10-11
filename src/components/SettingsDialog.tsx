@@ -392,7 +392,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                   </div>
                   <div className="h-10 flex items-center">
                     {installing ? (
-                      <div className="relative w-full h-10 overflow-hidden border border-cyber-accent/40 bg-cyber-input rounded-button">
+                      <div className="relative w-full h-10 overflow-hidden border border-cyber-accent/40 bg-cyber-surface rounded-button">
                         <div
                           className="absolute inset-y-0 left-0 bg-cyber-accent/20 transition-[width] duration-200"
                           style={{
@@ -416,12 +416,12 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                     ) : updateStatus === 'available' ? (
                       <button
                         onClick={handleUpdate}
-                        className="flex items-center justify-center gap-1.5 w-full h-10 text-[14px] font-semibold border border-cyber-accent/50 bg-cyber-input text-cyber-accent hover:border-cyber-accent transition-colors rounded-button"
+                        className="flex items-center justify-center gap-1.5 w-full h-10 text-[14px] font-semibold border border-cyber-accent/50 bg-cyber-surface text-cyber-accent hover:border-cyber-accent transition-colors rounded-button"
                       >
                         {t('settings.updateTo')} v{latestVersion} <Download size={13} />
                       </button>
                     ) : (
-                      <div className="w-full h-10 flex items-center justify-center gap-1.5 text-[14px] text-cyber-text border border-cyber-border/30 bg-cyber-input rounded-button">
+                      <div className="w-full h-10 flex items-center justify-center gap-1.5 text-[14px] text-cyber-text border border-cyber-border/30 bg-cyber-surface rounded-button">
                         <span className="text-cyber-accent">✓</span> {t('settings.latestVersion')}
                       </div>
                     )}

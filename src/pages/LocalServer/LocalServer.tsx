@@ -872,7 +872,7 @@ export const LocalServerMain: React.FC = () => {
         </div>
 
         {/* Parameter row */}
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-4 gap-3 [&_button.opacity-40]:opacity-100 [&_button.opacity-40]:border-cyber-border/40 [&_button.opacity-40>*]:opacity-40">
           {/* Compute mode is auto-determined, never a user choice here: the list
               always resolves to a single option — GPU-Full when a supported GPU
               is present (or for vLLM/SGLang, which manage the GPU internally),

@@ -68,7 +68,7 @@ export const AppManagerTitleActions: React.FC = () => {
           void api.openToolPathsConfig().catch(() => {});
         }}
         aria-label={t('btn.editPaths')}
-        className="flex items-center justify-center w-9 h-9 border border-cyber-border/50 rounded-md text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-text/10 transition-colors outline-none"
+        className="flex items-center justify-center w-9 h-9 border border-cyber-border/50 rounded-md text-cyber-text hover:bg-cyber-text/10 transition-colors outline-none"
       >
         <Settings size={16} />
       </button>

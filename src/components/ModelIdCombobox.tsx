@@ -199,7 +199,7 @@ export function ModelIdCombobox({
           type="button"
           tabIndex={-1}
           onClick={onPaste}
-          className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-xs text-cyber-text-secondary"
+          className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-cyber-text-secondary"
         >
           {pasteLabel}
         </button>
@@ -217,7 +217,7 @@ export function ModelIdCombobox({
               bottom: menuPos.dropUp ? menuPos.above : undefined,
               maxHeight: menuPos.maxHeight,
             }}
-            className="overflow-y-auto z-[1000] bg-cyber-elevated border border-cyber-border/60 rounded-button shadow-lg"
+            className="overflow-y-auto z-[1000] bg-cyber-surface border border-cyber-border/60 rounded-button shadow-lg cursor-default"
           >
             {filtered.map((opt, idx) => (
               <div
@@ -228,7 +228,7 @@ export function ModelIdCombobox({
                   pick(opt);
                 }}
                 onMouseEnter={() => setActiveIdx(idx)}
-                className={`px-2 py-1.5 cursor-pointer text-xs font-mono truncate transition-colors ${
+                className={`px-2 py-1.5 text-xs font-mono truncate transition-colors ${
                   opt === value
                     ? 'bg-cyber-text/15 text-cyber-text'
                     : idx === activeIdx
