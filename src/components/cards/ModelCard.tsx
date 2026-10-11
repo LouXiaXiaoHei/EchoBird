@@ -100,6 +100,7 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
       if (icon === 'sidrune') return './icons/models/sidrune.png';
       if (icon === 'byteplus') return './icons/models/byteplus.png';
       if (icon === 'qianwen') return './icons/models/qianwen.png';
+      if (icon === 'meta') return './icons/models/meta.png';
       return `./icons/models/${icon}.svg`;
     }
   }
