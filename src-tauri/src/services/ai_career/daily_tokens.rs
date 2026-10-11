@@ -1,6 +1,7 @@
 use super::{
     collect_dsh_paths, collect_jsonl_paths, drizzle_sessions_sql, drizzle_usage_boundary,
-    dsh_decode, dsh_owns_usage, is_unmeasured_drizzle_zero, mimo_db_path, Family, TokenUsage,
+    dsh_decode_checked, dsh_owns_usage, is_unmeasured_drizzle_zero, mimo_db_path,
+    parsed_cache_path, path_metadata, persistent_cache, sqlite_has_column, Family, TokenUsage,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -8,10 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct DailyTokenEntry {
     pub ts: i64,
     pub input_tokens: u64,
@@ -24,21 +25,21 @@ pub struct DailyTokenResponse {
     pub unavailable_families: Vec<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Sample {
     id: Option<String>,
     entry: DailyTokenEntry,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct Scan {
     samples: Vec<Sample>,
     incomplete: bool,
 }
 
+#[derive(Deserialize, Serialize)]
 struct CachedScan {
-    mtime: SystemTime,
-    size: u64,
+    stamp: persistent_cache::FileStamp,
     scan: Scan,
 }
 
@@ -67,20 +68,20 @@ fn entry(ts: Option<i64>, usage: TokenUsage) -> Option<DailyTokenEntry> {
     })
 }
 
+#[cfg(test)]
 fn scan_claude(path: &Path) -> Scan {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
+    scan_claude_checked(path).unwrap_or_else(|_| Scan {
+        incomplete: true,
+        ..Scan::default()
+    })
+}
+
+fn scan_claude_checked(path: &Path) -> Result<Scan, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut samples: HashMap<String, Option<DailyTokenEntry>> = HashMap::new();
     let mut incomplete = false;
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            incomplete = true;
-            break;
-        };
+        let line = line.map_err(|e| e.to_string())?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             if !line.trim().is_empty() {
                 incomplete = true;
@@ -124,7 +125,7 @@ fn scan_claude(path: &Path) -> Scan {
             scan.incomplete = true;
         }
     }
-    scan
+    Ok(scan)
 }
 
 struct CodexSample {
@@ -358,41 +359,39 @@ impl CodexUsage {
     }
 }
 
+#[cfg(test)]
 fn scan_codex(path: &Path) -> Scan {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
+    scan_codex_checked(path).unwrap_or_else(|_| Scan {
+        incomplete: true,
+        ..Scan::default()
+    })
+}
+
+fn scan_codex_checked(path: &Path) -> Result<Scan, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut usage = CodexUsage::default();
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else {
-            usage.incomplete = true;
-            break;
-        };
+        let line = line.map_err(|e| e.to_string())?;
         match serde_json::from_str::<Value>(&line) {
             Ok(value) => usage.consume(&value),
             Err(_) if !line.trim().is_empty() => usage.incomplete = true,
             Err(_) => {}
         }
     }
-    usage.into_scan()
+    Ok(usage.into_scan())
 }
 
+#[cfg(test)]
 fn scan_deepseek(path: &Path) -> Scan {
-    let Some(bytes) = dsh_decode(path) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
+    scan_deepseek_checked(path).unwrap_or_else(|_| Scan {
+        incomplete: true,
+        ..Scan::default()
+    })
+}
+
+fn scan_deepseek_checked(path: &Path) -> Result<Scan, String> {
+    let bytes = dsh_decode_checked(path).map_err(|e| e.to_string())?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
     let mut samples: HashMap<(u64, u64), Option<DailyTokenEntry>> = HashMap::new();
     let mut scan = Scan::default();
     let mut lines = text.lines();
@@ -401,10 +400,10 @@ fn scan_deepseek(path: &Path) -> Scan {
         .and_then(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|header| header.get("type").and_then(Value::as_str) == Some("session"))
     else {
-        return Scan {
+        return Ok(Scan {
             incomplete: true,
             ..Scan::default()
-        };
+        });
     };
     for line in lines {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -456,77 +455,104 @@ fn scan_deepseek(path: &Path) -> Scan {
             scan.incomplete = true;
         }
     }
-    scan
+    Ok(scan)
 }
 
+#[cfg(test)]
 fn cached_scan(path: &Path, family: Family) -> Scan {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return Scan {
+    cached_scan_in(scan_cache(), path, family)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| Scan {
             incomplete: true,
             ..Scan::default()
-        };
+        })
+}
+
+#[cfg(test)]
+thread_local! { static DAILY_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+fn cached_scan_in(
+    cache: &Mutex<HashMap<PathBuf, CachedScan>>,
+    path: &Path,
+    family: Family,
+) -> Result<Option<Scan>, String> {
+    let Some(metadata) = path_metadata(path).map_err(|e| e.to_string())? else {
+        cache.lock().map_err(|e| e.to_string())?.remove(path);
+        return Ok(None);
     };
-    let Ok(mtime) = metadata.modified() else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
-    let size = metadata.len();
-    if let Ok(cache) = scan_cache().lock() {
-        if let Some(cached) = cache
-            .get(path)
-            .filter(|cached| cached.mtime == mtime && cached.size == size)
-        {
-            return cached.scan.clone();
+    let stamp = persistent_cache::FileStamp::read(&metadata).map_err(|e| e.to_string())?;
+    if let Ok(cache) = cache.lock() {
+        if let Some(cached) = cache.get(path).filter(|cached| cached.stamp == stamp) {
+            return Ok(Some(cached.scan.clone()));
         }
     }
-    let scan = match family {
-        Family::Claude => scan_claude(path),
-        Family::Codex => scan_codex(path),
-        Family::DeepSeek => scan_deepseek(path),
-        _ => Scan::default(),
+    #[cfg(test)]
+    DAILY_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+    let result = match family {
+        Family::Claude => scan_claude_checked(path),
+        Family::Codex => scan_codex_checked(path),
+        Family::DeepSeek => scan_deepseek_checked(path),
+        _ => Ok(Scan::default()),
     };
-    if let Ok(mut cache) = scan_cache().lock() {
+    let mut cache = cache.lock().map_err(|e| e.to_string())?;
+    let Some(after) = path_metadata(path).map_err(|e| e.to_string())? else {
+        cache.remove(path);
+        return Ok(None);
+    };
+    let scan = result?;
+    if persistent_cache::FileStamp::read(&after).map_err(|e| e.to_string())? == stamp {
         cache.insert(
             path.to_path_buf(),
             CachedScan {
-                mtime,
-                size,
+                stamp,
                 scan: scan.clone(),
             },
         );
     }
-    scan
+    Ok(Some(scan))
 }
 
-fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
+fn table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
         [table],
         |row| row.get(0),
     )
-    .unwrap_or(false)
+    .map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 fn scan_drizzle(path: &Path, cutoff: i64) -> Scan {
-    if !path.is_file() {
-        return Scan::default();
+    scan_drizzle_checked(path, cutoff).unwrap_or_else(|_| Scan {
+        incomplete: true,
+        ..Scan::default()
+    })
+}
+
+fn scan_drizzle_checked(path: &Path, cutoff: i64) -> Result<Scan, String> {
+    if path_metadata(path).map_err(|e| e.to_string())?.is_none() {
+        return Ok(Scan::default());
     }
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    let conn = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
-    let has_v2_sessions = table_exists(&conn, "session_v2");
-    let has_v2_messages = table_exists(&conn, "session_message");
+    )
+    .map_err(|e| e.to_string())?;
+    let has_v2_sessions = table_exists(&conn, "session_v2")?;
+    let has_v2_messages = table_exists(&conn, "session_message")?;
     let mut sources = Vec::new();
+    let mut incomplete = false;
     for table in ["session_message", "message"] {
-        if !table_exists(&conn, table) {
+        if !table_exists(&conn, table)? {
+            continue;
+        }
+        let mut complete = true;
+        for column in ["data", "time_created", "time_updated"] {
+            complete &= sqlite_has_column(&conn, table, column).map_err(|e| e.to_string())?;
+        }
+        if !complete {
+            incomplete = true;
             continue;
         }
         let mut filter = String::new();
@@ -545,34 +571,33 @@ fn scan_drizzle(path: &Path, cutoff: i64) -> Scan {
         sources.push(format!("SELECT m.time_created,m.data,{legacy} FROM {table} m JOIN sessions s ON s.id=m.session_id WHERE s.time_archived IS NULL AND (m.time_created >= ?1 OR m.time_updated >= ?1){filter}{boundary}"));
     }
     if sources.is_empty() {
-        return Scan::default();
+        return Ok(Scan {
+            incomplete,
+            ..Scan::default()
+        });
     }
     let query = format!(
         "WITH sessions AS ({}) {}",
         drizzle_sessions_sql(&conn),
         sources.join(" UNION ALL ")
     );
-    let Ok(mut statement) = conn.prepare(&query) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
+    let mut statement = conn.prepare(&query).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([cutoff.saturating_mul(1000)], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let mut scan = Scan {
+        incomplete,
+        ..Scan::default()
     };
-    let Ok(rows) = statement.query_map([cutoff.saturating_mul(1000)], |row| {
-        Ok((
-            row.get::<_, Option<i64>>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, bool>(2)?,
-        ))
-    }) else {
-        return Scan {
-            incomplete: true,
-            ..Scan::default()
-        };
-    };
-    let mut scan = Scan::default();
     for row in rows {
-        let Ok((created, data, legacy)) = row else {
+        let (created, data, legacy) = row.map_err(|e| e.to_string())?;
+        let Some(data) = data else {
             scan.incomplete = true;
             continue;
         };
@@ -598,35 +623,63 @@ fn scan_drizzle(path: &Path, cutoff: i64) -> Scan {
             scan.incomplete = true;
         }
     }
-    scan
+    Ok(scan)
 }
 
-fn hermes_has_usage(path: &Path) -> bool {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+fn hermes_has_usage(path: &Path) -> Result<bool, String> {
+    if path_metadata(path).map_err(|e| e.to_string())?.is_none() {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open_with_flags(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return path.is_file();
-    };
+    )
+    .map_err(|e| e.to_string())?;
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions WHERE archived=0 AND message_count>0)",
         [],
         |row| row.get(0),
     )
-    .unwrap_or(true)
+    .map_err(|e| e.to_string())
 }
 
-pub fn daily_tokens(family: Option<Family>) -> DailyTokenResponse {
-    let Some(home) = dirs::home_dir() else {
-        return DailyTokenResponse {
-            entries: Vec::new(),
-            unavailable_families: Vec::new(),
-        };
-    };
-    daily_tokens_at(&home, family, SystemTime::now())
+pub fn daily_tokens(family: Option<Family>) -> Result<DailyTokenResponse, String> {
+    static REQUEST: Mutex<()> = Mutex::new(());
+    let _request = REQUEST.lock().map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "Home directory is unavailable".to_string())?;
+    static HYDRATED: OnceLock<()> = OnceLock::new();
+    HYDRATED.get_or_init(|| {
+        if let Ok(mut cache) = scan_cache().lock() {
+            for (path, cached) in
+                persistent_cache::read(&parsed_cache_path("ai-career-daily-tokens-v1.json"))
+            {
+                cache.entry(path).or_insert(cached);
+            }
+        }
+    });
+    let result = daily_tokens_at_checked(&home, family, SystemTime::now(), scan_cache());
+    if result.is_ok() {
+        if let Ok(cache) = scan_cache().lock() {
+            let _ = persistent_cache::write(
+                &parsed_cache_path("ai-career-daily-tokens-v1.json"),
+                &cache,
+            );
+        }
+    }
+    result
 }
 
+#[cfg(test)]
 fn daily_tokens_at(home: &Path, selected: Option<Family>, now: SystemTime) -> DailyTokenResponse {
+    daily_tokens_at_checked(home, selected, now, scan_cache()).unwrap()
+}
+
+fn daily_tokens_at_checked(
+    home: &Path,
+    selected: Option<Family>,
+    now: SystemTime,
+    cache: &Mutex<HashMap<PathBuf, CachedScan>>,
+) -> Result<DailyTokenResponse, String> {
     let cutoff_time = now
         .checked_sub(Duration::from_secs(32 * 86_400))
         .unwrap_or(UNIX_EPOCH);
@@ -646,33 +699,35 @@ fn daily_tokens_at(home: &Path, selected: Option<Family>, now: SystemTime) -> Da
         let root = family.root(home);
         let scan = match family {
             Family::Hermes => {
-                if hermes_has_usage(&root.join("state.db")) {
+                if hermes_has_usage(&root.join("state.db"))? {
                     response
                         .unavailable_families
                         .push(family.as_id().to_string());
                 }
                 continue;
             }
-            Family::OpenCode => scan_drizzle(&root.join("opencode.db"), cutoff),
-            Family::MiMo => scan_drizzle(&mimo_db_path(home), cutoff),
+            Family::OpenCode => scan_drizzle_checked(&root.join("opencode.db"), cutoff)?,
+            Family::MiMo => scan_drizzle_checked(&mimo_db_path(home), cutoff)?,
             _ => {
                 let mut candidates = Vec::new();
                 if family == Family::DeepSeek {
-                    collect_dsh_paths(&root, family, &mut candidates);
+                    collect_dsh_paths(&root, family, &mut candidates).map_err(|e| e.to_string())?;
                 } else if let Some(depth) = family.jsonl_depth() {
                     let depth = if family == Family::Claude { 4 } else { depth };
-                    collect_jsonl_paths(root.clone(), depth, family, &mut candidates);
+                    collect_jsonl_paths(root.clone(), depth, family, &mut candidates)
+                        .map_err(|e| e.to_string())?;
                 }
                 candidates.retain(|(mtime, _, _)| *mtime >= cutoff_time);
-                if let Ok(mut cache) = scan_cache().lock() {
+                let mut scan = Scan::default();
+                for (_, path, _) in &candidates {
+                    if let Some(cached) = cached_scan_in(cache, path, family)? {
+                        scan.incomplete |= cached.incomplete;
+                        scan.samples.extend(cached.samples);
+                    }
+                }
+                if let Ok(mut cache) = cache.lock() {
                     let keep: HashSet<_> = candidates.iter().map(|(_, path, _)| path).collect();
                     cache.retain(|path, _| !path.starts_with(&root) || keep.contains(path));
-                }
-                let mut scan = Scan::default();
-                for (_, path, _) in candidates {
-                    let cached = cached_scan(&path, family);
-                    scan.incomplete |= cached.incomplete;
-                    scan.samples.extend(cached.samples);
                 }
                 scan
             }
@@ -705,7 +760,7 @@ fn daily_tokens_at(home: &Path, selected: Option<Family>, now: SystemTime) -> Da
     }
     response.entries.extend(calls.into_values());
     response.entries.sort_by_key(|entry| entry.ts);
-    response
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1361,11 +1416,165 @@ mod tests {
         let hermes = dir.join("state.db");
         let conn = rusqlite::Connection::open(&hermes).unwrap();
         conn.execute_batch("CREATE TABLE sessions(archived INTEGER,message_count INTEGER); INSERT INTO sessions VALUES (0,0);").unwrap();
-        assert!(!hermes_has_usage(&hermes));
+        assert!(!hermes_has_usage(&hermes).unwrap());
         conn.execute("UPDATE sessions SET message_count=1", [])
             .unwrap();
-        assert!(hermes_has_usage(&hermes));
+        assert!(hermes_has_usage(&hermes).unwrap());
         drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_daily_summaries_reuse_partial_usage_and_recheck_native_files() {
+        let home = fixture_dir();
+        let root = Family::Claude.root(&home);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.jsonl");
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let recorded = json!({"timestamp":timestamp,"message":{"id":"call","role":"assistant","usage":{"input_tokens":10,"output_tokens":0}}});
+        let partial = json!({"timestamp":timestamp,"message":{"id":"partial","role":"assistant","usage":{"input_tokens":9}}});
+        write_rows(&path, &[recorded.clone(), partial.clone()]);
+        let now = SystemTime::now();
+        let cache = Mutex::new(HashMap::new());
+        DAILY_PARSE_COUNT.with(|count| count.set(0));
+        let first = daily_tokens_at_checked(&home, Some(Family::Claude), now, &cache).unwrap();
+        assert_eq!(first.entries.len(), 1);
+        assert_eq!(first.entries[0].output_tokens, 0);
+        assert_eq!(first.unavailable_families, ["claude"]);
+        assert_eq!(DAILY_PARSE_COUNT.with(|count| count.get()), 1);
+        let cache_path = home.join("cache.json");
+        persistent_cache::write(&cache_path, &cache.lock().unwrap()).unwrap();
+        let reloaded = Mutex::new(persistent_cache::read(&cache_path));
+        DAILY_PARSE_COUNT.with(|count| count.set(0));
+        let reused = daily_tokens_at_checked(&home, Some(Family::Claude), now, &reloaded).unwrap();
+        assert_eq!(reused.entries[0].input_tokens, 10);
+        assert_eq!(reused.unavailable_families, ["claude"]);
+        assert_eq!(DAILY_PARSE_COUNT.with(|count| count.get()), 0);
+        let new_call = json!({"timestamp":timestamp,"message":{"id":"next","role":"assistant","usage":{"input_tokens":7,"output_tokens":2}}});
+        write_rows(&path, &[recorded, partial, new_call]);
+        let changed = daily_tokens_at_checked(&home, Some(Family::Claude), now, &reloaded).unwrap();
+        assert_eq!(
+            changed
+                .entries
+                .iter()
+                .map(|entry| entry.input_tokens)
+                .sum::<u64>(),
+            17
+        );
+        assert_eq!(DAILY_PARSE_COUNT.with(|count| count.get()), 1);
+        let renamed = root.join("renamed.jsonl");
+        std::fs::rename(&path, &renamed).unwrap();
+        assert_eq!(
+            daily_tokens_at_checked(&home, Some(Family::Claude), now, &reloaded)
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+        assert!(!reloaded.lock().unwrap().contains_key(&path));
+        assert_eq!(DAILY_PARSE_COUNT.with(|count| count.get()), 2);
+        std::fs::remove_file(&renamed).unwrap();
+        assert!(
+            daily_tokens_at_checked(&home, Some(Family::Claude), now, &reloaded)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert!(reloaded.lock().unwrap().is_empty());
+        persistent_cache::write(&cache_path, &reloaded.lock().unwrap()).unwrap();
+        assert!(persistent_cache::read::<CachedScan>(&cache_path).is_empty());
+        std::fs::write(&cache_path, b"invalid cache").unwrap();
+        write_rows(
+            &path,
+            &[
+                json!({"timestamp":timestamp,"message":{"id":"rebuilt","role":"assistant","usage":{"input_tokens":4,"output_tokens":1}}}),
+            ],
+        );
+        let rebuilt = Mutex::new(persistent_cache::read(&cache_path));
+        DAILY_PARSE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            daily_tokens_at_checked(&home, Some(Family::Claude), now, &rebuilt)
+                .unwrap()
+                .entries[0]
+                .input_tokens,
+            4
+        );
+        assert_eq!(DAILY_PARSE_COUNT.with(|count| count.get()), 1);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn failed_daily_scan_preserves_cached_usage_and_saved_snapshot() {
+        let home = fixture_dir();
+        let root = Family::Claude.root(&home);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.jsonl");
+        write_rows(
+            &path,
+            &[
+                json!({"timestamp":chrono::Utc::now().to_rfc3339(),"message":{"id":"call","role":"assistant","usage":{"input_tokens":10,"output_tokens":2}}}),
+            ],
+        );
+        let cache = Mutex::new(HashMap::new());
+        let now = SystemTime::now();
+        daily_tokens_at_checked(&home, Some(Family::Claude), now, &cache).unwrap();
+        let cache_path = home.join("cache.json");
+        persistent_cache::write(&cache_path, &cache.lock().unwrap()).unwrap();
+        let saved = std::fs::read(&cache_path).unwrap();
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(daily_tokens_at_checked(&home, Some(Family::Claude), now, &cache).is_err());
+        assert_eq!(
+            totals(&cache.lock().unwrap().get(&path).unwrap().scan),
+            (10, 2)
+        );
+        assert_eq!(std::fs::read(&cache_path).unwrap(), saved);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::write(&root, b"not a directory").unwrap();
+        assert!(daily_tokens_at_checked(&home, Some(Family::Claude), now, &cache).is_err());
+        assert!(cache.lock().unwrap().contains_key(&path));
+        std::fs::remove_file(&root).unwrap();
+        assert!(
+            daily_tokens_at_checked(&home, Some(Family::Claude), now, &cache)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        assert!(cache.lock().unwrap().is_empty());
+        let db = home.join("broken.db");
+        std::fs::write(&db, b"not sqlite").unwrap();
+        assert!(scan_drizzle_checked(&db, 0).is_err());
+        assert!(hermes_has_usage(&db).is_err());
+        assert!(scan_drizzle_checked(&home.join("missing.db"), 0)
+            .unwrap()
+            .samples
+            .is_empty());
+        assert!(!hermes_has_usage(&home.join("missing.db")).unwrap());
+        assert!(!home.join("missing.db").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn old_sqlite_message_schemas_keep_unknown_usage_without_blocking_refresh() {
+        let dir = fixture_dir();
+        for (index, columns) in [
+            "session_id TEXT,time_created INTEGER,time_updated INTEGER",
+            "session_id TEXT,time_updated INTEGER,data TEXT",
+            "session_id TEXT,time_created INTEGER,data TEXT",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let path = dir.join(format!("legacy-{index}.db"));
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(&format!("CREATE TABLE message ({columns});"))
+                .unwrap();
+            drop(conn);
+            let before = std::fs::read(&path).unwrap();
+            let scan = scan_drizzle_checked(&path, 0).unwrap();
+            assert!(scan.incomplete);
+            assert!(scan.samples.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -30,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 mod daily_tokens;
+mod persistent_cache;
 pub use daily_tokens::daily_tokens;
 pub use daily_tokens::{DailyTokenEntry, DailyTokenResponse};
 
@@ -269,19 +270,32 @@ fn turns_from_messages(total_messages: u32) -> u32 {
 /// `sessionId` / `cwd` off any row, counts user+assistant messages, and uses
 /// the first real user message as the title. Files with no real user message
 /// are internal compaction/summary sub-tasks and are not user-visible sessions.
+#[cfg(test)]
 fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
+    parse_agent_jsonl_checked(file_path, family).ok().flatten()
+}
+
+fn parse_agent_jsonl_checked(
+    file_path: &Path,
+    family: Family,
+) -> Result<Option<SavedSession>, String> {
     use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
+    let file = std::fs::File::open(file_path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
 
-    let mut session_id = file_path.file_stem()?.to_string_lossy().to_string();
+    let mut session_id = file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let mut cwd = String::new();
     let mut title = String::new();
     let mut total_messages = 0u32;
     let mut real_user_messages = 0u32;
     let mut usage_by_message = HashMap::new();
 
-    for line in reader.lines().map_while(Result::ok) {
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -392,7 +406,7 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
     }
 
     if real_user_messages == 0 {
-        return None;
+        return Ok(None);
     }
 
     if title.is_empty() {
@@ -404,7 +418,7 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
     for sample in usage_by_message.into_values() {
         usage.add(sample);
     }
-    Some(SavedSession {
+    Ok(Some(SavedSession {
         id: format!("{}_native_{}", id, session_id),
         name: title,
         tool: id.to_string(),
@@ -415,7 +429,7 @@ fn parse_agent_jsonl(file_path: &Path, family: Family) -> Option<SavedSession> {
         turn_count: Some(turns_from_messages(total_messages)),
         input_tokens: usage.input,
         output_tokens: usage.output,
-    })
+    }))
 }
 
 /// Whether a Codex `session_meta` payload describes an internal sub-agent
@@ -501,19 +515,29 @@ fn strip_codex_desktop_file_preamble(text: &str) -> &str {
 /// Codex/agent mode, `"codex-tui"` for the terminal CLI; both share the
 /// same row schema). Sub-agent rollouts are filtered out here. Subsequent
 /// `response_item` / `user_message` rows hold the conversation.
+#[cfg(test)]
 fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
+    parse_codex_session_jsonl_checked(file_path).ok().flatten()
+}
+
+fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSession>, String> {
     use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
+    let file = std::fs::File::open(file_path).map_err(|e| e.to_string())?;
     let reader = std::io::BufReader::new(file);
 
-    let mut session_id = file_path.file_stem()?.to_string_lossy().to_string();
+    let mut session_id = file_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let mut cwd = String::new();
     let mut title = String::new();
     let mut total_messages = 0u32;
     let mut usage = daily_tokens::CodexUsage::default();
     let mut metadata_seen = false;
 
-    for line in reader.lines().map_while(Result::ok) {
+    for line in reader.lines() {
+        let line = line.map_err(|e| e.to_string())?;
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -534,7 +558,7 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
             // `is_codex_subagent_session` for the marker rationale.
             // `forked_from_id` is NOT a marker (user fork/resume = top-level).
             if is_codex_subagent_session(payload) {
-                return None;
+                return Ok(None);
             }
             if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
                 if !id.is_empty() {
@@ -591,7 +615,7 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
     }
     let usage = usage.total_usage();
 
-    Some(SavedSession {
+    Ok(Some(SavedSession {
         id: format!("codex_native_{}", session_id),
         name: title,
         tool: "codex".to_string(),
@@ -602,7 +626,7 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
         turn_count: Some(turns_from_messages(total_messages)),
         input_tokens: usage.input,
         output_tokens: usage.output,
-    })
+    }))
 }
 
 /// Codex appends a row to this index whenever a thread is named or renamed.
@@ -653,27 +677,44 @@ fn collect_jsonl_paths(
     depth: u8,
     family: Family,
     out: &mut Vec<(SystemTime, PathBuf, Family)>,
-) {
-    if depth == 0 || !dir.is_dir() {
-        return;
+) -> std::io::Result<()> {
+    if depth == 0 {
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let Some(entries) = read_directory(&dir)? else {
+        return Ok(());
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
-        if path.is_file() {
+        let Some(metadata) = path_metadata(&path)? else {
+            continue;
+        };
+        if metadata.is_file() {
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                let mtime = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(UNIX_EPOCH);
+                let mtime = metadata.modified()?;
                 out.push((mtime, path, family));
             }
-        } else if path.is_dir() {
-            collect_jsonl_paths(path, depth - 1, family, out);
+        } else if metadata.is_dir() {
+            collect_jsonl_paths(path, depth - 1, family, out)?;
         }
+    }
+    Ok(())
+}
+
+fn read_directory(path: &Path) -> std::io::Result<Option<std::fs::ReadDir>> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn path_metadata(path: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -772,6 +813,7 @@ fn drizzle_sessions_sql(conn: &rusqlite::Connection) -> String {
 /// (`isNull(parent_id)`) and loads them on-demand from the parent's
 /// timeline — sub-agents can't be independently resumed, so hiding them
 /// matches the canonical UX instead of flattening children into the list.
+#[cfg(test)]
 fn drizzle_history_page(
     db_path: &Path,
     tool: &str,
@@ -779,12 +821,27 @@ fn drizzle_history_page(
     offset: usize,
     limit: usize,
 ) -> Vec<SavedSession> {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    drizzle_history_page_checked(db_path, tool, label, offset, limit).unwrap_or_default()
+}
+
+fn drizzle_history_page_checked(
+    db_path: &Path,
+    tool: &str,
+    label: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<SavedSession>, String> {
+    if path_metadata(db_path)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return Vec::new();
-    };
+    )
+    .map_err(|error| error.to_string())?;
     let query = format!(
         "WITH sessions AS ({}) \
          SELECT s.id, s.title, s.directory, s.time_updated, s.msg_count, s.subpath \
@@ -792,82 +849,98 @@ fn drizzle_history_page(
          ORDER BY s.time_updated DESC, s.id ASC LIMIT ?1 OFFSET ?2",
         drizzle_sessions_sql(&conn)
     );
-    let Ok(mut stmt) = conn.prepare(&query) else {
-        return Vec::new();
-    };
+    let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
     let db_str = db_path.to_string_lossy().into_owned();
-    let rows = stmt.query_map([limit as i64, offset as i64], |row| {
-        let id: String = row.get(0)?;
-        let title: String = row
-            .get::<_, Option<String>>(1)
-            .unwrap_or(None)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("{} Session", label));
-        let directory: String = row
-            .get::<_, Option<String>>(2)
-            .unwrap_or(None)
-            .unwrap_or_default();
-        let time_updated: i64 = row.get(3).unwrap_or(0);
-        let msg_count: i64 = row.get(4).unwrap_or(0);
-        let subpath: Option<String> = row.get(5).unwrap_or(None);
-        let cwd = match subpath.filter(|path| !path.is_empty() && path != ".") {
-            Some(path) => Path::new(&directory)
-                .join(path)
-                .to_string_lossy()
-                .into_owned(),
-            None => directory,
-        };
-        let usage = drizzle_session_usage(&conn, &id);
-        Ok(SavedSession {
-            id: format!("{}_native_{}", tool, id),
-            name: title,
-            tool: tool.to_string(),
-            cwd,
-            session_token: Some(id),
-            saved_at: time_updated.to_string(),
-            file_path: Some(db_str.clone()),
-            turn_count: Some(std::cmp::max(1, msg_count / 2) as u32),
-            input_tokens: usage.input,
-            output_tokens: usage.output,
+    let rows = stmt
+        .query_map([limit as i64, offset as i64], |row| {
+            let id: String = row.get(0)?;
+            let title: String = row
+                .get::<_, Option<String>>(1)?
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("{} Session", label));
+            let directory: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            let time_updated = row.get::<_, Option<i64>>(3)?.unwrap_or(0);
+            let msg_count = row.get::<_, Option<i64>>(4)?.unwrap_or(0);
+            let subpath: Option<String> = row.get(5)?;
+            let cwd = match subpath.filter(|path| !path.is_empty() && path != ".") {
+                Some(path) => Path::new(&directory)
+                    .join(path)
+                    .to_string_lossy()
+                    .into_owned(),
+                None => directory,
+            };
+            let usage = drizzle_session_usage_checked(&conn, &id)?;
+            Ok(SavedSession {
+                id: format!("{}_native_{}", tool, id),
+                name: title,
+                tool: tool.to_string(),
+                cwd,
+                session_token: Some(id),
+                saved_at: time_updated.to_string(),
+                file_path: Some(db_str.clone()),
+                turn_count: Some(std::cmp::max(1, msg_count / 2) as u32),
+                input_tokens: usage.input,
+                output_tokens: usage.output,
+            })
         })
-    });
-    match rows {
-        Ok(iter) => iter.flatten().collect(),
-        Err(_) => Vec::new(),
-    }
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
-fn drizzle_session_usage(conn: &rusqlite::Connection, session_id: &str) -> TokenUsage {
-    let has_v2_session = conn
-        .query_row(
+fn sqlite_has_column(
+    conn: &rusqlite::Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in rows {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn drizzle_session_usage_checked(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<TokenUsage> {
+    let has_v2_session = if sqlite_has_column(conn, "session_v2", "id")? {
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id = ?1)",
             [session_id],
             |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
-    let has_v2_messages = conn
-        .query_row(
+        )?
+    } else {
+        false
+    };
+    let has_v2_messages = if sqlite_has_column(conn, "session_message", "session_id")? {
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_message WHERE session_id = ?1)",
             [session_id],
             |row| row.get::<_, bool>(0),
-        )
-        .unwrap_or(false);
+        )?
+    } else {
+        false
+    };
     let table = if has_v2_session || has_v2_messages {
         "session_message"
     } else {
         "message"
     };
+    if !sqlite_has_column(conn, table, "data")? {
+        return Ok(TokenUsage::default());
+    }
     let boundary = drizzle_usage_boundary(conn, table);
-    let Ok(mut statement) = conn.prepare(&format!(
+    let mut statement = conn.prepare(&format!(
         "SELECT m.data FROM {table} m WHERE m.session_id = ?1{boundary}"
-    )) else {
-        return TokenUsage::default();
-    };
-    let Ok(rows) = statement.query_map([session_id], |row| row.get::<_, String>(0)) else {
-        return TokenUsage::default();
-    };
+    ))?;
+    let rows = statement.query_map([session_id], |row| row.get::<_, Option<String>>(0))?;
     let mut usage = TokenUsage::default();
-    for data in rows.flatten() {
+    for data in rows {
+        let Some(data) = data? else { continue };
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
             if let Some(tokens) = value.get("tokens") {
                 let sample = TokenUsage::read(tokens, "input", "output");
@@ -877,7 +950,7 @@ fn drizzle_session_usage(conn: &rusqlite::Connection, session_id: &str) -> Token
             }
         }
     }
-    usage
+    Ok(usage)
 }
 
 fn is_unmeasured_drizzle_zero(value: &serde_json::Value, usage: TokenUsage) -> bool {
@@ -923,13 +996,27 @@ fn drizzle_usage_boundary(conn: &rusqlite::Connection, message_table: &str) -> S
 /// Drizzle/SQLite heatmap entries (timestamp + message count per session) past
 /// the cutoff. `time_updated` is milliseconds; we emit seconds. Shared by
 /// OpenCode + its MiMo Code fork.
+#[cfg(test)]
 fn collect_drizzle_heatmap_entries(db_path: &Path, cutoff_secs: i64, out: &mut Vec<HeatmapEntry>) {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    collect_drizzle_heatmap_entries_checked(db_path, cutoff_secs, out).unwrap();
+}
+
+fn collect_drizzle_heatmap_entries_checked(
+    db_path: &Path,
+    cutoff_secs: i64,
+    out: &mut Vec<HeatmapEntry>,
+) -> Result<(), String> {
+    if path_metadata(db_path)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return;
-    };
+    )
+    .map_err(|error| error.to_string())?;
     let cutoff_ms = cutoff_secs.saturating_mul(1000);
     let query = format!(
         "WITH sessions AS ({}) \
@@ -937,40 +1024,44 @@ fn collect_drizzle_heatmap_entries(db_path: &Path, cutoff_secs: i64, out: &mut V
          WHERE s.time_archived IS NULL AND s.time_updated >= ?1",
         drizzle_sessions_sql(&conn)
     );
-    let Ok(mut stmt) = conn.prepare(&query) else {
-        return;
-    };
-    let rows = stmt.query_map([cutoff_ms], |row| {
-        let ts_ms: i64 = row.get(0)?;
-        let count: i64 = row.get(1)?;
-        Ok((ts_ms, count))
-    });
-    if let Ok(iter) = rows {
-        for (ts_ms, count) in iter.flatten() {
-            if count > 0 {
-                out.push(HeatmapEntry {
-                    ts: ts_ms / 1000,
-                    count: count as u32,
-                });
-            }
+    let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([cutoff_ms], |row| {
+            let ts_ms: i64 = row.get(0)?;
+            let count: i64 = row.get(1)?;
+            Ok((ts_ms, count))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (ts_ms, count) = row.map_err(|error| error.to_string())?;
+        if count > 0 {
+            out.push(HeatmapEntry {
+                ts: ts_ms / 1000,
+                count: count as u32,
+            });
         }
     }
+    Ok(())
 }
 
 // ─── Message counting (heatmap) ──────────────────────────────────────────
 
 /// Cheap line-count for JSONL files; every non-empty line is one "turn".
 /// Capped at 32 MiB so a runaway session can't stall the scan.
+#[cfg(test)]
 fn count_jsonl_message_lines(path: &Path) -> u32 {
+    count_jsonl_message_lines_checked(path).unwrap_or(0)
+}
+
+fn count_jsonl_message_lines_checked(path: &Path) -> std::io::Result<u32> {
     use std::io::{BufRead, BufReader, Read};
-    let Ok(file) = std::fs::File::open(path) else {
-        return 0;
-    };
+    let file = std::fs::File::open(path)?;
     const MAX_BYTES: u64 = 32 * 1024 * 1024;
     let mut br = BufReader::new(file.take(MAX_BYTES));
     let mut buf: Vec<u8> = Vec::with_capacity(512);
     let mut count = 0u32;
-    while let Ok(n) = br.read_until(b'\n', &mut buf) {
+    loop {
+        let n = br.read_until(b'\n', &mut buf)?;
         if n == 0 {
             break;
         }
@@ -979,7 +1070,7 @@ fn count_jsonl_message_lines(path: &Path) -> u32 {
         }
         buf.clear();
     }
-    count
+    Ok(count)
 }
 
 // ─── Hermes (SQLite) ─────────────────────────────────────────────────────
@@ -1040,7 +1131,18 @@ fn hermes_decode_text(content: &str) -> String {
 
 /// First non-empty user-message text for a session — Hermes' title-preview
 /// source. Mirrors its SQL: earliest `role='user'` message that has content.
-fn hermes_first_user_text(conn: &rusqlite::Connection, session_id: &str) -> Option<String> {
+fn hermes_first_user_text_checked(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    use rusqlite::OptionalExtension;
+    if !conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(None);
+    }
     let content: Option<String> = conn
         .query_row(
             "SELECT content FROM messages \
@@ -1049,10 +1151,14 @@ fn hermes_first_user_text(conn: &rusqlite::Connection, session_id: &str) -> Opti
             [session_id],
             |row| row.get(0),
         )
-        .ok()?;
-    let text = hermes_decode_text(&content?);
+        .optional()?
+        .flatten();
+    let Some(content) = content else {
+        return Ok(None);
+    };
+    let text = hermes_decode_text(&content);
     let text = text.trim();
-    (!text.is_empty()).then(|| text.to_string())
+    Ok((!text.is_empty()).then(|| text.to_string()))
 }
 
 /// One page of Hermes sessions, newest first, from `state.db`. The displayed
@@ -1060,13 +1166,27 @@ fn hermes_first_user_text(conn: &rusqlite::Connection, session_id: &str) -> Opti
 /// `title` → first user-message preview → cwd basename → "New thread") — most
 /// sessions get an auto-generated `title` after their first turn, and untitled
 /// ones show the first user message rather than a generic label.
+#[cfg(test)]
 fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<SavedSession> {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    hermes_history_page_checked(db_path, offset, limit).unwrap_or_default()
+}
+
+fn hermes_history_page_checked(
+    db_path: &Path,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<SavedSession>, String> {
+    if path_metadata(db_path)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(Vec::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return Vec::new();
-    };
+    )
+    .map_err(|error| error.to_string())?;
     let db_str = db_path.to_string_lossy().into_owned();
 
     // Collect the page first so the prepared statement is dropped before we run
@@ -1080,9 +1200,10 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
         usage: TokenUsage,
     }
     let raws: Vec<Raw> = {
-        let usage_columns = if conn
-            .prepare("SELECT input_tokens, output_tokens FROM sessions LIMIT 0")
-            .is_ok()
+        let usage_columns = if sqlite_has_column(&conn, "sessions", "input_tokens")
+            .map_err(|error| error.to_string())?
+            && sqlite_has_column(&conn, "sessions", "output_tokens")
+                .map_err(|error| error.to_string())?
         {
             "input_tokens, output_tokens"
         } else {
@@ -1095,38 +1216,28 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
                      ORDER BY started_at DESC \
                      LIMIT ?1 OFFSET ?2"
         );
-        let Ok(mut stmt) = conn.prepare(&query) else {
-            return Vec::new();
-        };
-        let rows = stmt.query_map([limit as i64, offset as i64], |row| {
-            Ok(Raw {
-                id: row.get(0)?,
-                title: row
-                    .get::<_, Option<String>>(1)
-                    .unwrap_or(None)
-                    .unwrap_or_default(),
-                cwd: row
-                    .get::<_, Option<String>>(2)
-                    .unwrap_or(None)
-                    .unwrap_or_default(),
-                started_at: row.get::<_, Option<f64>>(3).unwrap_or(None).unwrap_or(0.0),
-                msg_count: row.get::<_, Option<i64>>(4).unwrap_or(None).unwrap_or(0),
-                usage: TokenUsage {
-                    input: row
-                        .get::<_, Option<i64>>(5)
-                        .unwrap_or(None)
-                        .and_then(|v| u64::try_from(v).ok()),
-                    output: row
-                        .get::<_, Option<i64>>(6)
-                        .unwrap_or(None)
-                        .and_then(|v| u64::try_from(v).ok()),
-                },
+        let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([limit as i64, offset as i64], |row| {
+                Ok(Raw {
+                    id: row.get(0)?,
+                    title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                    cwd: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    started_at: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                    msg_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    usage: TokenUsage {
+                        input: row
+                            .get::<_, Option<i64>>(5)?
+                            .and_then(|v| u64::try_from(v).ok()),
+                        output: row
+                            .get::<_, Option<i64>>(6)?
+                            .and_then(|v| u64::try_from(v).ok()),
+                    },
+                })
             })
-        });
-        match rows {
-            Ok(iter) => iter.flatten().collect(),
-            Err(_) => return Vec::new(),
-        }
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
     };
 
     raws.into_iter()
@@ -1135,7 +1246,8 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
             let name = if !explicit.is_empty() {
                 make_title(explicit)
             } else {
-                hermes_first_user_text(&conn, &r.id)
+                hermes_first_user_text_checked(&conn, &r.id)
+                    .map_err(|error| error.to_string())?
                     .map(|t| make_title(&t))
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| {
@@ -1150,7 +1262,7 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
                         }
                     })
             };
-            SavedSession {
+            Ok(SavedSession {
                 id: format!("hermes_native_{}", r.id),
                 name,
                 tool: "hermes".to_string(),
@@ -1162,39 +1274,184 @@ fn hermes_history_page(db_path: &Path, offset: usize, limit: usize) -> Vec<Saved
                 session_token: Some(r.id),
                 input_tokens: r.usage.input,
                 output_tokens: r.usage.output,
-            }
+            })
         })
         .collect()
 }
 
 /// Hermes heatmap entries: one per session past the cutoff — its `started_at`
 /// day + `message_count`. `started_at` is epoch seconds (float); we emit seconds.
-fn collect_hermes_heatmap_entries(db_path: &Path, cutoff_secs: i64, out: &mut Vec<HeatmapEntry>) {
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+fn collect_hermes_heatmap_entries_checked(
+    db_path: &Path,
+    cutoff_secs: i64,
+    out: &mut Vec<HeatmapEntry>,
+) -> Result<(), String> {
+    if path_metadata(db_path)
+        .map_err(|error| error.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
         db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return;
-    };
+    )
+    .map_err(|error| error.to_string())?;
     let query = "SELECT started_at, message_count FROM sessions \
                  WHERE archived = 0 AND started_at >= ?1";
-    let Ok(mut stmt) = conn.prepare(query) else {
-        return;
-    };
-    let rows = stmt.query_map([cutoff_secs as f64], |row| {
-        let started_at: f64 = row.get(0)?;
-        let count: i64 = row.get::<_, Option<i64>>(1).unwrap_or(None).unwrap_or(0);
-        Ok((started_at, count))
-    });
-    if let Ok(iter) = rows {
-        for (started_at, count) in iter.flatten() {
-            if count > 0 {
-                out.push(HeatmapEntry {
-                    ts: started_at as i64,
-                    count: count as u32,
-                });
-            }
+    let mut stmt = conn.prepare(query).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([cutoff_secs as f64], |row| {
+            let started_at: f64 = row.get(0)?;
+            let count: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+            Ok((started_at, count))
+        })
+        .map_err(|error| error.to_string())?;
+    for row in rows {
+        let (started_at, count) = row.map_err(|error| error.to_string())?;
+        if count > 0 {
+            out.push(HeatmapEntry {
+                ts: started_at as i64,
+                count: count as u32,
+            });
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod sqlite_cache_read_tests {
+    use super::*;
+
+    fn fixture_dir() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("echobird-sqlite-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn missing_databases_are_empty_but_unreadable_databases_are_errors() {
+        let dir = fixture_dir();
+        let path = dir.join("missing.db");
+        assert!(
+            drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(hermes_history_page_checked(&path, 0, 20)
+            .unwrap()
+            .is_empty());
+        let mut heatmap = Vec::new();
+        collect_drizzle_heatmap_entries_checked(&path, 0, &mut heatmap).unwrap();
+        collect_hermes_heatmap_entries_checked(&path, 0, &mut heatmap).unwrap();
+        assert!(!path.exists());
+        assert!(heatmap.is_empty());
+        std::fs::write(&path, b"not a sqlite database").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).is_err());
+        assert!(hermes_history_page_checked(&path, 0, 20).is_err());
+        assert!(collect_drizzle_heatmap_entries_checked(&path, 0, &mut heatmap).is_err());
+        assert!(collect_hermes_heatmap_entries_checked(&path, 0, &mut heatmap).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn sqlite_row_failures_do_not_publish_partial_history_or_usage() {
+        let dir = fixture_dir();
+        let path = dir.join("fixture.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE session (id TEXT, title TEXT, directory TEXT, time_updated, time_archived INTEGER, parent_id TEXT);
+             CREATE TABLE message (id TEXT, session_id TEXT, data);
+             INSERT INTO session VALUES ('fixture', 'Fixture task', '/fixture', 1000, NULL, NULL);
+             CREATE TABLE sessions (id TEXT, title TEXT, cwd TEXT, started_at, message_count INTEGER, archived INTEGER);
+             INSERT INTO sessions VALUES ('fixture', 'Fixture task', '/fixture', 1000, 2, 0);"
+        ).unwrap();
+        assert_eq!(
+            drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(hermes_history_page_checked(&path, 0, 20).unwrap().len(), 1);
+        connection
+            .execute_batch("UPDATE sessions SET title='';")
+            .unwrap();
+        assert_eq!(
+            hermes_history_page_checked(&path, 0, 20).unwrap()[0].name,
+            "fixture"
+        );
+        connection
+            .execute_batch("CREATE TABLE messages (session_id TEXT, content TEXT);")
+            .unwrap();
+        assert!(hermes_history_page_checked(&path, 0, 20).is_err());
+        connection.execute_batch("DROP TABLE messages;").unwrap();
+        connection
+            .execute_batch("INSERT INTO message VALUES ('unknown', 'fixture', NULL);")
+            .unwrap();
+        let unknown = drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).unwrap();
+        assert_eq!(
+            (unknown[0].input_tokens, unknown[0].output_tokens),
+            (None, None)
+        );
+        connection
+            .execute_batch("INSERT INTO message VALUES ('usage', 'fixture', 123);")
+            .unwrap();
+        assert!(drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).is_err());
+        connection.execute_batch("DELETE FROM message; UPDATE session SET time_updated='invalid'; UPDATE sessions SET started_at='invalid';").unwrap();
+        let mut heatmap = Vec::new();
+        assert!(drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).is_err());
+        assert!(hermes_history_page_checked(&path, 0, 20).is_err());
+        assert!(collect_drizzle_heatmap_entries_checked(&path, 0, &mut heatmap).is_err());
+        assert!(collect_hermes_heatmap_entries_checked(&path, 0, &mut heatmap).is_err());
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn readonly_history_reloads_wal_changes_without_a_main_database_fingerprint_change() {
+        let dir = fixture_dir();
+        let path = dir.join("wal.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+             CREATE TABLE session (id TEXT, title TEXT, directory TEXT, time_updated INTEGER, time_archived INTEGER, parent_id TEXT);
+             CREATE TABLE message (id TEXT, session_id TEXT, data TEXT);
+             INSERT INTO session VALUES ('fixture', 'Before', '/fixture', 1000, NULL, NULL);
+             INSERT INTO message VALUES ('before', 'fixture', '{\"role\":\"assistant\",\"finish\":\"stop\",\"tokens\":{\"input\":10,\"output\":2}}');"
+        ).unwrap();
+        let before = drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).unwrap();
+        assert_eq!(
+            (before[0].name.as_str(), before[0].input_tokens),
+            ("Before", Some(10))
+        );
+        let metadata = std::fs::metadata(&path).unwrap();
+        connection.execute_batch(
+            "UPDATE session SET title='After', time_updated=2000;
+             INSERT INTO message VALUES ('after', 'fixture', '{\"role\":\"assistant\",\"finish\":\"stop\",\"tokens\":{\"input\":20,\"output\":3}}');"
+        ).unwrap();
+        let after_metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.len(), after_metadata.len());
+        assert_eq!(
+            metadata.modified().unwrap(),
+            after_metadata.modified().unwrap()
+        );
+        let after = drizzle_history_page_checked(&path, "opencode", "OpenCode", 0, 20).unwrap();
+        assert_eq!(
+            (
+                after[0].name.as_str(),
+                after[0].input_tokens,
+                after[0].output_tokens
+            ),
+            ("After", Some(30), Some(5))
+        );
+        let mut heatmap = Vec::new();
+        collect_drizzle_heatmap_entries_checked(&path, 0, &mut heatmap).unwrap();
+        assert_eq!((heatmap[0].ts, heatmap[0].count), (2, 2));
+        drop(connection);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
@@ -1213,59 +1470,66 @@ fn collect_hermes_heatmap_entries(db_path: &Path, cutoff_secs: i64, out: &mut Ve
 /// Collect every DeepSeek Harness session log under `root`, i.e. all
 /// `<project>/<session>/session.jsonl` / `session.jsonl.zstd` files (depth 3).
 /// Both physical encodings are matched; the mtime tags the last append.
-fn collect_dsh_paths(root: &Path, family: Family, out: &mut Vec<(SystemTime, PathBuf, Family)>) {
-    let Ok(projects) = std::fs::read_dir(root) else {
-        return;
+fn collect_dsh_paths(
+    root: &Path,
+    family: Family,
+    out: &mut Vec<(SystemTime, PathBuf, Family)>,
+) -> std::io::Result<()> {
+    let Some(projects) = read_directory(root)? else {
+        return Ok(());
     };
-    for project in projects.flatten() {
+    for project in projects {
+        let project = project?;
         let p = project.path();
-        if !p.is_dir() {
+        if !path_metadata(&p)?.is_some_and(|metadata| metadata.is_dir()) {
             continue;
         }
-        let Ok(sessions) = std::fs::read_dir(&p) else {
+        let Some(sessions) = read_directory(&p)? else {
             continue;
         };
-        for session in sessions.flatten() {
+        for session in sessions {
+            let session = session?;
             let sp = session.path();
-            if !sp.is_dir() {
+            if !path_metadata(&sp)?.is_some_and(|metadata| metadata.is_dir()) {
                 continue;
             }
-            let Ok(files) = std::fs::read_dir(&sp) else {
+            let Some(files) = read_directory(&sp)? else {
                 continue;
             };
-            for f in files.flatten() {
+            for f in files {
+                let f = f?;
                 let path = f.path();
-                if !path.is_file() {
+                let Some(metadata) = path_metadata(&path)? else {
+                    continue;
+                };
+                if !metadata.is_file() {
                     continue;
                 }
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name == "session.jsonl" || name == "session.jsonl.zstd" {
-                    let mtime = f
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .unwrap_or(UNIX_EPOCH);
+                    let mtime = metadata.modified()?;
                     out.push((mtime, path, family));
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Decompress a DeepSeek Harness session-log artifact: `.zstd` files are
 /// concatenated checksummed Zstandard frames; `.jsonl` is raw UTF-8 text.
 /// libzstd's streaming decoder continues across frame boundaries, so one
 /// `read_to_end` yields the whole log (header + every append batch).
-fn dsh_decode(path: &Path) -> Option<Vec<u8>> {
-    let raw = std::fs::read(path).ok()?;
+fn dsh_decode_checked(path: &Path) -> std::io::Result<Vec<u8>> {
+    let raw = std::fs::read(path)?;
     if path.extension().and_then(|e| e.to_str()) == Some("zstd") {
         use std::io::Read;
-        let mut decoder = zstd::stream::read::Decoder::new(raw.as_slice()).ok()?;
+        let mut decoder = zstd::stream::read::Decoder::new(raw.as_slice())?;
         let mut out = Vec::new();
-        decoder.read_to_end(&mut out).ok()?;
-        Some(out)
+        decoder.read_to_end(&mut out)?;
+        Ok(out)
     } else {
-        Some(raw)
+        Ok(raw)
     }
 }
 
@@ -1323,11 +1587,19 @@ fn dsh_owns_usage(header: &serde_json::Value, event: &serde_json::Value) -> Opti
 /// line carries id + cwd; events are scanned for the title + turn count.
 /// `saved_at` is the artifact mtime (last append), matching the other JSONL
 /// families and the mtime-keyed heatmap cache.
+#[cfg(test)]
 fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
-    let bytes = dsh_decode(path)?;
-    let text = std::str::from_utf8(&bytes).ok()?;
+    parse_dsh_session_checked(path).ok().flatten()
+}
+
+fn parse_dsh_session_checked(path: &Path) -> Result<Option<SavedSession>, String> {
+    let bytes = dsh_decode_checked(path).map_err(|e| e.to_string())?;
+    let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
     let mut lines = text.lines();
-    let header: serde_json::Value = serde_json::from_str(lines.next()?).ok()?;
+    let Some(first) = lines.next() else {
+        return Ok(None);
+    };
+    let header: serde_json::Value = serde_json::from_str(first).map_err(|e| e.to_string())?;
     let cwd = header
         .get("cwd")
         .and_then(|v| v.as_str())
@@ -1354,7 +1626,7 @@ fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
     // and leave no events behind; drop them like Claude/Codex drop sessions
     // with no real user message (nothing to show in the history list).
     if events.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let title = dsh_title_from_events(&events);
@@ -1393,7 +1665,7 @@ fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
         usage.add(sample);
     }
 
-    Some(SavedSession {
+    Ok(Some(SavedSession {
         id: format!("deepseek_native_{}", session_id),
         name: make_title(&title),
         tool: "deepseek".to_string(),
@@ -1404,49 +1676,50 @@ fn parse_dsh_session(path: &Path) -> Option<SavedSession> {
         turn_count: (turn_count > 0).then_some(turn_count),
         input_tokens: usage.input,
         output_tokens: usage.output,
-    })
+    }))
 }
 
 /// Heatmap count for a dsh session log: number of event lines (decompressing
 /// zstd first, capped like `count_jsonl_message_lines`). The header line is
 /// excluded — it is storage metadata, not a message.
+#[cfg(test)]
 fn count_dsh_event_lines(path: &Path) -> u32 {
+    count_dsh_event_lines_checked(path).unwrap_or(0)
+}
+
+fn count_dsh_event_lines_checked(path: &Path) -> std::io::Result<u32> {
     const MAX_BYTES: u64 = 32 * 1024 * 1024;
-    if std::fs::metadata(path)
-        .map(|m| m.len() > MAX_BYTES)
-        .unwrap_or(true)
-    {
-        return 0;
+    if std::fs::metadata(path)?.len() > MAX_BYTES {
+        return Ok(0);
     }
     let bytes = if path.extension().and_then(|e| e.to_str()) == Some("zstd") {
-        match dsh_decode(path) {
-            Some(b) if (b.len() as u64) <= MAX_BYTES => b,
-            _ => return 0,
+        let bytes = dsh_decode_checked(path)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Ok(0);
         }
+        bytes
     } else {
-        match std::fs::read(path) {
-            Ok(b) => b,
-            Err(_) => return 0,
-        }
+        std::fs::read(path)?
     };
-    bytes
+    Ok(bytes
         .split(|&b| b == b'\n')
         .skip(1) // header
         .filter(|line| !line.iter().all(|&b| b.is_ascii_whitespace()))
-        .count() as u32
+        .count() as u32)
 }
 
 /// Total on-disk size of every DeepSeek session artifact under `root`
 /// (stat-only; zstd files stay compressed — the byte size is just a proxy for
 /// content volume like the other families).
-fn sum_dsh_sizes(root: &Path, cap: u64, total: &mut u64) {
+fn sum_dsh_sizes(root: &Path, cap: u64, total: &mut u64) -> std::io::Result<()> {
     let mut candidates = Vec::new();
-    collect_dsh_paths(root, Family::DeepSeek, &mut candidates);
+    collect_dsh_paths(root, Family::DeepSeek, &mut candidates)?;
     for (_, p, _) in candidates {
-        if let Ok(m) = std::fs::metadata(&p) {
+        if let Some(m) = path_metadata(&p)? {
             *total = total.saturating_add(m.len().min(cap));
         }
     }
+    Ok(())
 }
 
 // ─── Heatmap count cache ─────────────────────────────────────────────────
@@ -1459,9 +1732,9 @@ struct CachedCount {
     size: u64,
 }
 
+#[derive(Serialize, Deserialize)]
 struct CachedSession {
-    mtime: SystemTime,
-    size: u64,
+    stamp: persistent_cache::FileStamp,
     session: Option<SavedSession>,
 }
 
@@ -1470,34 +1743,88 @@ fn session_cache() -> &'static Mutex<HashMap<PathBuf, CachedSession>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[cfg(test)]
 fn parse_session_cached(path: &Path, family: Family) -> Option<SavedSession> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let mtime = metadata.modified().ok()?;
-    let size = metadata.len();
-    if let Ok(cache) = session_cache().lock() {
+    parse_session_cached_in(session_cache(), path, family)
+        .ok()
+        .flatten()
+}
+
+fn parse_session_cached_in(
+    cache: &Mutex<HashMap<PathBuf, CachedSession>>,
+    path: &Path,
+    family: Family,
+) -> Result<Option<SavedSession>, String> {
+    let Some(metadata) = path_metadata(path).map_err(|e| e.to_string())? else {
+        if let Ok(mut entries) = cache.lock() {
+            entries.remove(path);
+        }
+        return Ok(None);
+    };
+    let stamp = persistent_cache::FileStamp::read(&metadata).map_err(|e| e.to_string())?;
+    if let Ok(cache) = cache.lock() {
         if let Some(entry) = cache.get(path) {
-            if entry.mtime == mtime && entry.size == size {
-                return entry.session.clone();
+            if entry.stamp == stamp {
+                return Ok(entry.session.clone());
             }
         }
     }
-    let session = match family {
-        Family::Claude => parse_agent_jsonl(path, family),
-        Family::Codex => parse_codex_session_jsonl(path),
-        Family::DeepSeek => parse_dsh_session(path),
-        _ => None,
+    #[cfg(test)]
+    SESSION_PARSE_COUNT.with(|count| count.set(count.get() + 1));
+    let result = match family {
+        Family::Claude => parse_agent_jsonl_checked(path, family),
+        Family::Codex => parse_codex_session_jsonl_checked(path),
+        Family::DeepSeek => parse_dsh_session_checked(path),
+        _ => Ok(None),
     };
-    if let Ok(mut cache) = session_cache().lock() {
-        cache.insert(
+    let mut guard = cache
+        .lock()
+        .map_err(|_| "session cache lock failed".to_string())?;
+    let Some(after) = path_metadata(path).map_err(|e| e.to_string())? else {
+        guard.remove(path);
+        return Ok(None);
+    };
+    let session = result?;
+    if persistent_cache::FileStamp::read(&after).map_err(|e| e.to_string())? == stamp {
+        guard.insert(
             path.to_path_buf(),
             CachedSession {
-                mtime,
-                size,
+                stamp,
                 session: session.clone(),
             },
         );
     }
-    session
+    Ok(session)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SESSION_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn parsed_cache_path(name: &str) -> PathBuf {
+    crate::utils::platform::echobird_dir()
+        .join("cache")
+        .join(name)
+}
+
+fn hydrate_session_cache() {
+    static HYDRATED: OnceLock<()> = OnceLock::new();
+    HYDRATED.get_or_init(|| {
+        if let Ok(mut cache) = session_cache().lock() {
+            for (path, value) in
+                persistent_cache::read(&parsed_cache_path("ai-career-sessions-v1.json"))
+            {
+                cache.entry(path).or_insert(value);
+            }
+        }
+    });
+}
+
+fn flush_session_cache() {
+    if let Ok(cache) = session_cache().lock() {
+        let _ = persistent_cache::write(&parsed_cache_path("ai-career-sessions-v1.json"), &cache);
+    }
 }
 
 fn count_cache_path() -> PathBuf {
@@ -1514,11 +1841,8 @@ fn read_count_cache(path: &Path) -> HashMap<String, CachedCount> {
 }
 
 fn write_count_cache(path: &Path, map: &HashMap<String, CachedCount>) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
     if let Ok(json) = serde_json::to_string(map) {
-        let _ = std::fs::write(path, json);
+        let _ = persistent_cache::replace(path, json.as_bytes());
     }
 }
 
@@ -1526,27 +1850,46 @@ fn write_count_cache(path: &Path, map: &HashMap<String, CachedCount>) {
 
 /// One page of a single family's session history, newest first. Per-family
 /// scanning keeps the payload small; the frontend pages in more on scroll.
-pub fn family_history(family: Family, offset: usize, limit: usize) -> Vec<SavedSession> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    family_history_at(&home, family, offset, limit)
+pub fn family_history(
+    family: Family,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<SavedSession>, String> {
+    static REQUEST: Mutex<()> = Mutex::new(());
+    let _request = REQUEST.lock().map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "home directory unavailable".to_string())?;
+    hydrate_session_cache();
+    let result = family_history_at_checked(&home, family, offset, limit);
+    if result.is_ok() {
+        flush_session_cache();
+    }
+    result
 }
 
+#[cfg(test)]
 fn family_history_at(
     home: &Path,
     family: Family,
     offset: usize,
     limit: usize,
 ) -> Vec<SavedSession> {
+    family_history_at_checked(home, family, offset, limit).unwrap()
+}
+
+fn family_history_at_checked(
+    home: &Path,
+    family: Family,
+    offset: usize,
+    limit: usize,
+) -> Result<Vec<SavedSession>, String> {
     if limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // OpenCode + MiMo (its fork) + Hermes keep sessions in a SQLite db, not flat
     // files. OpenCode/MiMo share one reader (`drizzle_*`); Hermes has its own.
     if family == Family::OpenCode {
-        return drizzle_history_page(
+        return drizzle_history_page_checked(
             &Family::OpenCode.root(home).join("opencode.db"),
             "opencode",
             "OpenCode",
@@ -1555,57 +1898,91 @@ fn family_history_at(
         );
     }
     if family == Family::MiMo {
-        return drizzle_history_page(&mimo_db_path(home), "mimo", "MiMo", offset, limit);
+        return drizzle_history_page_checked(&mimo_db_path(home), "mimo", "MiMo", offset, limit);
     }
     if family == Family::Hermes {
-        return hermes_history_page(&Family::Hermes.root(home).join("state.db"), offset, limit);
+        return hermes_history_page_checked(
+            &Family::Hermes.root(home).join("state.db"),
+            offset,
+            limit,
+        );
     }
+    family_history_files_at(&family.root(home), family, offset, limit, session_cache())
+}
+
+fn family_history_files_at(
+    root: &Path,
+    family: Family,
+    offset: usize,
+    limit: usize,
+    cache: &Mutex<HashMap<PathBuf, CachedSession>>,
+) -> Result<Vec<SavedSession>, String> {
     // DeepSeek Harness keeps one event log per session (`session.jsonl.zstd`
     // by default) — collect + parse those directly.
     let mut candidates: Vec<(SystemTime, PathBuf, Family)> = Vec::new();
     match family {
         Family::Claude | Family::Codex => {
             if let Some(depth) = family.jsonl_depth() {
-                collect_jsonl_paths(family.root(home), depth, family, &mut candidates);
+                collect_jsonl_paths(root.to_path_buf(), depth, family, &mut candidates)
+                    .map_err(|e| e.to_string())?;
             }
         }
-        Family::DeepSeek => collect_dsh_paths(&family.root(home), family, &mut candidates),
+        Family::DeepSeek => {
+            collect_dsh_paths(root, family, &mut candidates).map_err(|e| e.to_string())?
+        }
         Family::OpenCode | Family::Hermes | Family::MiMo => unreachable!(),
     }
 
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    if let Ok(mut cache) = session_cache().lock() {
+    let mut sessions = Vec::new();
+    let mut valid = 0;
+    for (_, path, _) in &candidates {
+        if let Some(session) = parse_session_cached_in(cache, path, family)? {
+            if valid >= offset {
+                sessions.push(session);
+            }
+            valid += 1;
+            if sessions.len() == limit {
+                break;
+            }
+        }
+    }
+    if let Ok(mut cache) = cache.lock() {
         let keep: HashSet<_> = candidates.iter().map(|(_, path, _)| path).collect();
-        let root = family.root(home);
-        cache.retain(|path, _| !path.starts_with(&root) || keep.contains(path));
+        cache.retain(|path, _| !path.starts_with(root) || keep.contains(path));
     }
-    let mut sessions: Vec<_> = candidates
-        .into_iter()
-        .filter_map(|(_, path, _)| parse_session_cached(&path, family))
-        .skip(offset)
-        .take(limit)
-        .collect();
     if family == Family::Codex {
-        apply_codex_thread_names(&family.root(home), &mut sessions);
+        apply_codex_thread_names(root, &mut sessions);
     }
-    sessions
+    Ok(sessions)
 }
 
 /// Contribution-heatmap entries across all six families, 210-day lookback.
 /// Past session files are immutable once their mtime settles, so per-file
 /// counts are cached on disk and skipped on subsequent scans.
-pub fn message_heatmap(selected_family: Option<Family>) -> Vec<HeatmapEntry> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    message_heatmap_at(&home, selected_family, &count_cache_path())
+pub fn message_heatmap(selected_family: Option<Family>) -> Result<Vec<HeatmapEntry>, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home directory unavailable".to_string())?;
+    message_heatmap_at_checked(&home, selected_family, &count_cache_path())
 }
 
+#[cfg(test)]
 fn message_heatmap_at(
     home: &Path,
     selected_family: Option<Family>,
     cache_path: &Path,
 ) -> Vec<HeatmapEntry> {
+    message_heatmap_at_checked(home, selected_family, cache_path).unwrap()
+}
+
+fn message_heatmap_at_checked(
+    home: &Path,
+    selected_family: Option<Family>,
+    cache_path: &Path,
+) -> Result<Vec<HeatmapEntry>, String> {
+    static REQUEST: Mutex<()> = Mutex::new(());
+    let _request = REQUEST
+        .lock()
+        .map_err(|_| "count cache lock failed".to_string())?;
     const LOOKBACK_SECS: u64 = 210 * 86_400;
     let now = SystemTime::now();
     let cutoff = now
@@ -1622,11 +1999,13 @@ fn message_heatmap_at(
         match family {
             Family::Claude | Family::Codex => {
                 if let Some(depth) = family.jsonl_depth() {
-                    collect_jsonl_paths(family.root(home), depth, family, &mut candidates);
+                    collect_jsonl_paths(family.root(home), depth, family, &mut candidates)
+                        .map_err(|e| e.to_string())?;
                 }
             }
             Family::DeepSeek => {
-                collect_dsh_paths(&family.root(home), family, &mut candidates);
+                collect_dsh_paths(&family.root(home), family, &mut candidates)
+                    .map_err(|e| e.to_string())?;
             }
             Family::OpenCode | Family::Hermes | Family::MiMo => {}
         }
@@ -1646,8 +2025,11 @@ fn message_heatmap_at(
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let key = path.to_string_lossy().into_owned();
+        let Some(metadata) = path_metadata(path).map_err(|e| e.to_string())? else {
+            continue;
+        };
         keep.insert(key.clone());
-        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        let size = metadata.len();
         let stamp = mtime
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
@@ -1658,19 +2040,32 @@ fn message_heatmap_at(
             _ => {
                 // DeepSeek logs are zstd by default — count via its own
                 // decompress-then-count path; everyone else counts lines.
-                let c = match family {
-                    Family::DeepSeek => count_dsh_event_lines(path),
-                    _ => count_jsonl_message_lines(path),
+                let result = match family {
+                    Family::DeepSeek => count_dsh_event_lines_checked(path),
+                    _ => count_jsonl_message_lines_checked(path),
                 };
-                cache.insert(
-                    key.clone(),
-                    CachedCount {
-                        mtime: stamp,
-                        count: c,
-                        size,
-                    },
-                );
-                cache_dirty = true;
+                let c = match result {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        keep.remove(&key);
+                        continue;
+                    }
+                    result => result.map_err(|e| e.to_string())?,
+                };
+                let Some(after) = path_metadata(path).map_err(|e| e.to_string())? else {
+                    keep.remove(&key);
+                    continue;
+                };
+                if after.modified().map_err(|e| e.to_string())? == *mtime && after.len() == size {
+                    cache.insert(
+                        key.clone(),
+                        CachedCount {
+                            mtime: stamp,
+                            count: c,
+                            size,
+                        },
+                    );
+                    cache_dirty = true;
+                }
                 c
             }
         };
@@ -1688,9 +2083,6 @@ fn message_heatmap_at(
     if cache.len() != before {
         cache_dirty = true;
     }
-    if cache_dirty {
-        write_count_cache(cache_path, &cache);
-    }
 
     // SQLite second pass — OpenCode, MiMo (its fork), and Hermes keep sessions
     // in a SQLite db (not flat files). Each collector opens its db read-only and
@@ -1700,24 +2092,27 @@ fn message_heatmap_at(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     if selected_family.map_or(true, |family| family == Family::OpenCode) {
-        collect_drizzle_heatmap_entries(
+        collect_drizzle_heatmap_entries_checked(
             &Family::OpenCode.root(home).join("opencode.db"),
             cutoff_secs,
             &mut out,
-        );
+        )?;
     }
     if selected_family.map_or(true, |family| family == Family::MiMo) {
-        collect_drizzle_heatmap_entries(&mimo_db_path(home), cutoff_secs, &mut out);
+        collect_drizzle_heatmap_entries_checked(&mimo_db_path(home), cutoff_secs, &mut out)?;
     }
     if selected_family.map_or(true, |family| family == Family::Hermes) {
-        collect_hermes_heatmap_entries(
+        collect_hermes_heatmap_entries_checked(
             &Family::Hermes.root(home).join("state.db"),
             cutoff_secs,
             &mut out,
-        );
+        )?;
     }
 
-    out
+    if cache_dirty {
+        write_count_cache(cache_path, &cache);
+    }
+    Ok(out)
 }
 
 /// Rough "≈ N tokens" estimate: sum the on-disk byte size of every session
@@ -1725,14 +2120,20 @@ fn message_heatmap_at(
 /// divides by a bytes-per-token ratio. Deliberately approximate — it measures
 /// content volume, so it works even when a provider doesn't report real usage
 /// (third-party models often log 0 tokens). Stat-only (no file reads), cheap.
-pub fn estimate_token_bytes(selected_family: Option<Family>) -> u64 {
-    let Some(home) = dirs::home_dir() else {
-        return 0;
-    };
-    estimate_token_bytes_at(&home, selected_family)
+pub fn estimate_token_bytes(selected_family: Option<Family>) -> Result<u64, String> {
+    let home = dirs::home_dir().ok_or_else(|| "home directory unavailable".to_string())?;
+    estimate_token_bytes_at_checked(&home, selected_family).map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 fn estimate_token_bytes_at(home: &Path, selected_family: Option<Family>) -> u64 {
+    estimate_token_bytes_at_checked(home, selected_family).unwrap()
+}
+
+fn estimate_token_bytes_at_checked(
+    home: &Path,
+    selected_family: Option<Family>,
+) -> std::io::Result<u64> {
     const MAX_PER_FILE: u64 = 32 * 1024 * 1024;
     let mut total: u64 = 0;
     for family in Family::ALL {
@@ -1743,57 +2144,60 @@ fn estimate_token_bytes_at(home: &Path, selected_family: Option<Family>) -> u64 
             Family::Hermes => {
                 // Hermes keeps all sessions in one SQLite db; its file size
                 // stands in for the family's content volume.
-                if let Ok(m) = std::fs::metadata(family.root(home).join("state.db")) {
+                if let Some(m) = path_metadata(&family.root(home).join("state.db"))? {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::Claude | Family::Codex => {
                 if let Some(depth) = family.jsonl_depth() {
-                    sum_jsonl_sizes(family.root(home), depth, MAX_PER_FILE, &mut total);
+                    sum_jsonl_sizes(family.root(home), depth, MAX_PER_FILE, &mut total)?;
                 }
             }
             Family::OpenCode => {
                 // One shared DB holds every OpenCode session; its file size
                 // stands in for the family's content volume.
-                if let Ok(m) = std::fs::metadata(family.root(home).join("opencode.db")) {
+                if let Some(m) = path_metadata(&family.root(home).join("opencode.db"))? {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::MiMo => {
                 // MiMo Code's SQLite db (its OpenCode fork's `mimocode.db`).
-                if let Ok(m) = std::fs::metadata(mimo_db_path(home)) {
+                if let Some(m) = path_metadata(&mimo_db_path(home))? {
                     total = total.saturating_add(m.len());
                 }
             }
             Family::DeepSeek => {
                 // One event-log file per DeepSeek session (`session.jsonl.zstd`
                 // by default); their sizes stand in for the family's volume.
-                sum_dsh_sizes(&family.root(home), MAX_PER_FILE, &mut total);
+                sum_dsh_sizes(&family.root(home), MAX_PER_FILE, &mut total)?;
             }
         }
     }
-    total
+    Ok(total)
 }
 
-fn sum_jsonl_sizes(dir: PathBuf, depth: u8, cap: u64, total: &mut u64) {
-    if depth == 0 || !dir.is_dir() {
-        return;
+fn sum_jsonl_sizes(dir: PathBuf, depth: u8, cap: u64, total: &mut u64) -> std::io::Result<()> {
+    if depth == 0 {
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let Some(entries) = read_directory(&dir)? else {
+        return Ok(());
     };
-    for e in entries.flatten() {
+    for e in entries {
+        let e = e?;
         let p = e.path();
-        if p.is_file() {
+        let Some(m) = path_metadata(&p)? else {
+            continue;
+        };
+        if m.is_file() {
             if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-                if let Ok(m) = e.metadata() {
-                    *total = total.saturating_add(m.len().min(cap));
-                }
+                *total = total.saturating_add(m.len().min(cap));
             }
-        } else if p.is_dir() {
-            sum_jsonl_sizes(p, depth - 1, cap, total);
+        } else if m.is_dir() {
+            sum_jsonl_sizes(p, depth - 1, cap, total)?;
         }
     }
+    Ok(())
 }
 
 fn resolve_session_file(path: &Path) -> Result<PathBuf, String> {
@@ -2082,6 +2486,173 @@ mod tests {
         assert!(message_heatmap_at(&home, Some(Family::Claude), &cache_path).is_empty());
         assert!(read_count_cache(&cache_path).contains_key(codex.to_str().unwrap()));
         assert!(!read_count_cache(&cache_path).contains_key(claude.to_str().unwrap()));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn persisted_sessions_reuse_summaries_then_follow_changes_and_deletions() {
+        let dir = fixture_dir();
+        let root = dir.join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                serde_json::json!({"type":"session_meta","payload":{"id":"fixture","cwd":"/fixture","source":"cli"}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Original title"}]}}),
+                serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}),
+            ],
+        );
+        let cache = Mutex::new(HashMap::new());
+        SESSION_PARSE_COUNT.with(|count| count.set(0));
+        let first = family_history_files_at(&root, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(first[0].input_tokens, Some(10));
+        assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 1);
+        let cache_path = dir.join("cache.json");
+        persistent_cache::write(&cache_path, &cache.lock().unwrap()).unwrap();
+        let reloaded = Mutex::new(persistent_cache::read(&cache_path));
+        SESSION_PARSE_COUNT.with(|count| count.set(0));
+        assert_eq!(
+            family_history_files_at(&root, Family::Codex, 0, 20, &reloaded).unwrap()[0].name,
+            "Original title"
+        );
+        assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 0);
+        // Index names are applied after cache reuse, so native renames stay fresh.
+        std::fs::write(
+            dir.join("session_index.jsonl"),
+            "{\"id\":\"fixture\",\"thread_name\":\"Renamed thread\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            family_history_files_at(&root, Family::Codex, 0, 20, &reloaded).unwrap()[0].name,
+            "Renamed thread"
+        );
+        assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 0);
+        let original = std::fs::read_to_string(&path).unwrap();
+        let appended = serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"output_tokens":3}}}});
+        std::fs::write(&path, format!("{original}{appended}\n")).unwrap();
+        assert_eq!(
+            family_history_files_at(&root, Family::Codex, 0, 20, &reloaded).unwrap()[0]
+                .input_tokens,
+            Some(15)
+        );
+        assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 1);
+        let renamed = root.join("renamed.jsonl");
+        std::fs::rename(&path, &renamed).unwrap();
+        assert_eq!(
+            family_history_files_at(&root, Family::Codex, 0, 20, &reloaded)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!reloaded.lock().unwrap().contains_key(&path));
+        assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 2);
+        std::fs::remove_file(&renamed).unwrap();
+        assert!(
+            family_history_files_at(&root, Family::Codex, 0, 20, &reloaded)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(reloaded.lock().unwrap().is_empty());
+        persistent_cache::write(&cache_path, &reloaded.lock().unwrap()).unwrap();
+        assert!(persistent_cache::read::<CachedSession>(&cache_path).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_session_scan_preserves_summary_and_saved_cache() {
+        let dir = fixture_dir();
+        let root = dir.join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.jsonl");
+        write_jsonl(
+            &path,
+            &[serde_json::json!({"message":{"role":"user","content":"Known title"}})],
+        );
+        let cache = Mutex::new(HashMap::new());
+        family_history_files_at(&root, Family::Claude, 0, 20, &cache).unwrap();
+        let cache_path = dir.join("cache.json");
+        persistent_cache::write(&cache_path, &cache.lock().unwrap()).unwrap();
+        let saved = std::fs::read(&cache_path).unwrap();
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(family_history_files_at(&root, Family::Claude, 0, 20, &cache).is_err());
+        assert_eq!(
+            cache
+                .lock()
+                .unwrap()
+                .get(&path)
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .name,
+            "Known title"
+        );
+        assert_eq!(std::fs::read(&cache_path).unwrap(), saved);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::write(&root, b"not a directory").unwrap();
+        assert!(family_history_files_at(&root, Family::Claude, 0, 20, &cache).is_err());
+        assert!(cache.lock().unwrap().contains_key(&path));
+        std::fs::remove_file(&root).unwrap();
+        assert!(
+            family_history_files_at(&root, Family::Claude, 0, 20, &cache)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(cache.lock().unwrap().is_empty());
+        std::fs::write(&cache_path, b"invalid cache").unwrap();
+        assert!(persistent_cache::read::<CachedSession>(&cache_path).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_count_scan_keeps_previous_disk_cache() {
+        let home = fixture_dir();
+        let root = Family::Claude.root(&home);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("fixture.jsonl");
+        std::fs::write(&path, "{}\n").unwrap();
+        let cache_path = home.join("counts.json");
+        assert_eq!(
+            message_heatmap_at_checked(&home, Some(Family::Claude), &cache_path).unwrap()[0].count,
+            1
+        );
+        let saved = std::fs::read(&cache_path).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::write(&root, b"not a directory").unwrap();
+        assert!(message_heatmap_at_checked(&home, Some(Family::Claude), &cache_path).is_err());
+        assert_eq!(std::fs::read(&cache_path).unwrap(), saved);
+        std::fs::remove_file(&root).unwrap();
+        assert!(
+            message_heatmap_at_checked(&home, Some(Family::Claude), &cache_path)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(read_count_cache(&cache_path).is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn concurrent_family_count_requests_preserve_both_scopes() {
+        let home = fixture_dir();
+        let claude = Family::Claude.root(&home).join("fixture.jsonl");
+        let codex = Family::Codex.root(&home).join("fixture.jsonl");
+        for path in [&claude, &codex] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}\n").unwrap();
+        }
+        let cache_path = home.join("counts.json");
+        std::thread::scope(|scope| {
+            let first = scope
+                .spawn(|| message_heatmap_at_checked(&home, Some(Family::Claude), &cache_path));
+            let second =
+                scope.spawn(|| message_heatmap_at_checked(&home, Some(Family::Codex), &cache_path));
+            assert_eq!(first.join().unwrap().unwrap()[0].count, 1);
+            assert_eq!(second.join().unwrap().unwrap()[0].count, 1);
+        });
+        let saved = read_count_cache(&cache_path);
+        assert!(saved.contains_key(claude.to_str().unwrap()));
+        assert!(saved.contains_key(codex.to_str().unwrap()));
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -2642,14 +3213,18 @@ mod tests {
             "echobird-opencode-missing-{}.db",
             uuid::Uuid::new_v4()
         ));
-        assert!(drizzle_history_page(&db, "opencode", "OpenCode", 0, 30).is_empty());
+        assert!(
+            drizzle_history_page_checked(&db, "opencode", "OpenCode", 0, 30)
+                .unwrap()
+                .is_empty()
+        );
         let mut entries = Vec::new();
-        collect_drizzle_heatmap_entries(&db, 0, &mut entries);
+        collect_drizzle_heatmap_entries_checked(&db, 0, &mut entries).unwrap();
         assert!(entries.is_empty());
         assert!(!db.exists());
         std::fs::write(&db, b"invalid sqlite fixture").unwrap();
-        assert!(drizzle_history_page(&db, "opencode", "OpenCode", 0, 30).is_empty());
-        collect_drizzle_heatmap_entries(&db, 0, &mut entries);
+        assert!(drizzle_history_page_checked(&db, "opencode", "OpenCode", 0, 30).is_err());
+        assert!(collect_drizzle_heatmap_entries_checked(&db, 0, &mut entries).is_err());
         assert!(entries.is_empty());
         assert_eq!(std::fs::read(&db).unwrap(), b"invalid sqlite fixture");
         std::fs::remove_file(db).unwrap();
@@ -2899,9 +3474,7 @@ mod tests {
 
     #[test]
     fn dsh_family_history_reads_session_store() {
-        // Point DSH_HOME at a scratch root so the full collect+parse path runs
-        // against a synthetic store, independent of the machine's real ~/.dsh.
-        let dsh = std::env::temp_dir().join("echobird_ai_career_test_dsh_home");
+        let dsh = fixture_dir();
         let sroot = dsh.join("sessions").join("--proj--");
         let _ = std::fs::create_dir_all(sroot.join("session-test-1111"));
         let zfile = sroot.join("session-test-1111").join("session.jsonl.zstd");
@@ -2916,13 +3489,9 @@ mod tests {
                           {\"type\":\"user/message\",\"seq\":1,\"time\":1786841053000,\"data\":{\"turn\":0,\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"plain prompt\"}]},\"surfaceOp\":\"append\"}\n";
         std::fs::write(&pfile, plain_body).unwrap();
 
-        let prev = std::env::var("DSH_HOME").ok();
-        std::env::set_var("DSH_HOME", &dsh);
-        let rows = family_history(Family::DeepSeek, 0, 30);
-        match prev {
-            Some(v) => std::env::set_var("DSH_HOME", v),
-            None => std::env::remove_var("DSH_HOME"),
-        }
+        let cache = Mutex::new(HashMap::new());
+        let rows = family_history_files_at(&dsh.join("sessions"), Family::DeepSeek, 0, 30, &cache)
+            .unwrap();
 
         // Both encodings surface through the shared collect+parse path.
         assert_eq!(rows.len(), 2);

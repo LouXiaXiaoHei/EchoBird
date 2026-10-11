@@ -20,7 +20,7 @@
 import { useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { buildGrid, DAYS, WEEKS, type DayBuckets } from './heatmapData';
+import { buildGrid, DAYS, WEEKS, localDayKey, type DayBuckets } from './heatmapData';
 import { CareerTooltip } from './CareerTooltip';
 
 // Rest colours (theme-tracking var strings): empty day is a faint wash of the
@@ -113,9 +113,16 @@ interface TipState {
   top: number; // y, relative to the grid root
 }
 
-export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
+export function ContributionHeatmap({
+  buckets,
+  refreshKey,
+}: {
+  buckets: DayBuckets;
+  refreshKey: number;
+}) {
   const { t, locale } = useI18n();
-  const grid = useMemo(() => buildGrid(buckets), [buckets]);
+  const today = localDayKey(new Date());
+  const grid = useMemo(() => buildGrid(buckets, new Date(`${today}T00:00:00`)), [buckets, today]);
   // Column-major flatten: grid[col][row] → fills the CSS grid top-to-bottom
   // then left-to-right (gridAutoFlow: column).
   const cells = useMemo(() => grid.flat(), [grid]);
@@ -126,6 +133,7 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
   const [tip, setTip] = useState<TipState | null>(null);
   const [tipLeft, setTipLeft] = useState(0);
   const activePage = useNavigationStore((s) => s.activePage);
+  const hasSessions = buckets.sessions.size > 0;
 
   // Per-cell intro metadata: right→left stagger delay + random loading
   // brightness. Stable for a given grid (recomputed only when buckets change).
@@ -141,17 +149,25 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
       }),
     [cells]
   );
+  const introRef = useRef(intro);
+  const repaintRef = useRef<(() => void) | null>(null);
+
+  useLayoutEffect(() => {
+    introRef.current = intro;
+    // React may apply a new rest colour; keep the current reveal before paint.
+    if (repaintRef.current) repaintRef.current();
+    else
+      intro.forEach((cell, i) => {
+        const el = cellRefs.current[i];
+        if (el) el.style.backgroundColor = cell.future ? 'transparent' : LEVEL_BG[cell.level];
+      });
+  }, [intro]);
 
   // The intro: enter (propagate loading coral) → exit (reveal real) → done.
-  // Replays whenever there's data and we're on the page — mount, a refresh
-  // (fresh `buckets`), or navigating back. A LAYOUT effect commits the grey
-  // start synchronously, before the browser paints, so the real data never
-  // flashes for a frame before the reveal. React renders each cell's rest
-  // colour via its style prop; since that value is constant across the intro,
-  // React never re-applies it, so our per-frame `el.style.backgroundColor`
-  // writes are not clobbered by tooltip re-renders.
+  // Replay on entry or manual refresh. Background data updates the reveal
+  // target without restarting the animation. Commit the grey start before paint.
   useLayoutEffect(() => {
-    if (activePage !== 'aiCareer' || buckets.sessions.size === 0) return;
+    if (activePage !== 'aiCareer' || !hasSessions) return;
     const root = rootRef.current;
     if (!root) return;
     const els = cellRefs.current;
@@ -164,18 +180,11 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
       lvl === 0 ? grey : [accent[0], accent[1], accent[2], LEVEL_ALPHA[lvl]];
     const FADE = CELL_FADE * 1000;
 
-    // 1) Commit the enter-start (faint grey) synchronously, before first paint.
-    for (let i = 0; i < intro.length; i++) {
-      const el = els[i];
-      if (el && !intro[i].future) el.style.backgroundColor = rgbaStr(grey);
-    }
-
-    // 2) Drive every cell's colour per frame.
     let raf = 0;
     let start = 0;
-    const frame = (ts: number) => {
-      if (!start) start = ts;
-      const elapsed = ts - start;
+    let elapsed = 0;
+    const paint = () => {
+      const intro = introRef.current;
       for (let i = 0; i < intro.length; i++) {
         const el = els[i];
         const m = intro[i];
@@ -184,29 +193,32 @@ export function ContributionHeatmap({ buckets }: { buckets: DayBuckets }) {
           // enter: faint grey → this cell's random loading coral
           const p = easeOut(clamp01((elapsed - m.delayMs) / FADE));
           el.style.backgroundColor = lerpRgba(grey, loadOf(m.loadAlpha), p);
-        } else {
+        } else if (elapsed < SWEEP_MS * 2) {
           // exit: loading coral → the cell's real colour (usage revealed now)
           const p = easeOut(clamp01((elapsed - SWEEP_MS - m.delayMs) / FADE));
           el.style.backgroundColor = lerpRgba(loadOf(m.loadAlpha), realOf(m.level), p);
+        } else {
+          // Rest colours track theme changes after the reveal.
+          el.style.backgroundColor = LEVEL_BG[m.level];
         }
       }
-      if (elapsed >= SWEEP_MS * 2) {
-        // 3) Settle on the theme-tracking var strings so the rest colours
-        // follow later theme changes (the resolved rgba above wouldn't).
-        for (let i = 0; i < intro.length; i++) {
-          const el = els[i];
-          if (el && !intro[i].future) el.style.backgroundColor = LEVEL_BG[intro[i].level];
-        }
-        return;
-      }
+    };
+    repaintRef.current = paint;
+    paint();
+    const frame = (ts: number) => {
+      if (!start) start = ts;
+      elapsed = ts - start;
+      paint();
+      if (elapsed >= SWEEP_MS * 2) return;
       raf = window.requestAnimationFrame(frame);
     };
     raf = window.requestAnimationFrame(frame);
 
     return () => {
       window.cancelAnimationFrame(raf);
+      repaintRef.current = null;
     };
-  }, [buckets, activePage, intro]);
+  }, [activePage, hasSessions, refreshKey]);
 
   // Clamp the tooltip horizontally so its full box stays inside the grid
   // width. Runs before paint, so there's no flash at the unclamped spot.

@@ -1,6 +1,6 @@
 // AI-career overview and per-family dashboards.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useI18n } from '../../hooks/useI18n';
@@ -12,7 +12,6 @@ import {
   aiCareerDailyTokens,
   getAvatar,
   setAvatar,
-  type DailyTokenResponse,
 } from '../../api/aiCareer';
 import {
   deriveStats,
@@ -30,14 +29,8 @@ const TOKENS_PER_BYTE = 12;
 const EMPTY_BUCKETS: DayBuckets = { messages: new Map(), sessions: new Map() };
 const DEFAULT_AVATAR = '/default-avatar.webp';
 
-interface DashboardData {
-  buckets: DayBuckets;
-  tokenBytes: number;
-}
-
 interface TokenResult {
   key: string;
-  data?: DailyTokenResponse;
   failed: boolean;
 }
 
@@ -49,20 +42,36 @@ export function AiCareerMain() {
   const refreshKey = useAiCareerStore((s) => s.refreshKey);
   const refresh = useAiCareerStore((s) => s.refresh);
   const setRefreshing = useAiCareerStore((s) => s.setRefreshing);
+  const cacheDashboard = useAiCareerStore((s) => s.cacheDashboard);
+  const cacheDailyTokens = useAiCareerStore((s) => s.cacheDailyTokens);
   const activePage = useNavigationStore((s) => s.activePage);
-  const [dashboards, setDashboards] = useState<Record<string, DashboardData>>({});
   const [settledKey, setSettledKey] = useState('');
   const [failedKey, setFailedKey] = useState('');
   const [tokenResults, setTokenResults] = useState<Record<string, TokenResult>>({});
+  const [tokenRetry, setTokenRetry] = useState(0);
+  const visitRef = useRef(0);
+  const tokenRequestRef = useRef('');
+  const explicitTokenRetryRef = useRef(false);
   const [avatar, setAvatarUrl] = useState<string | null>(null);
   const scope = selectedFamily ?? 'overview';
   const currentKey = scope + '::' + refreshKey;
-  const dashboard = dashboards[scope];
+  const snapshot = useAiCareerStore((s) => s.cachedScopes[scope]);
+  const cachedDashboard = snapshot?.dashboard;
+  const dashboard = useMemo(
+    () =>
+      cachedDashboard
+        ? {
+            buckets: entriesToBuckets(cachedDashboard.heatmapEntries),
+            tokenBytes: cachedDashboard.tokenBytes,
+          }
+        : undefined,
+    [cachedDashboard]
+  );
   const buckets = dashboard?.buckets ?? EMPTY_BUCKETS;
   const tokenResult = tokenResults[scope];
   const tokenDays = useMemo(() => {
     const days = new Map<string, { input: number; output: number }>();
-    for (const entry of tokenResult?.data?.entries ?? []) {
+    for (const entry of snapshot?.dailyTokens?.entries ?? []) {
       const key = localDayKey(new Date(entry.ts * 1000));
       const previous = days.get(key);
       days.set(key, {
@@ -71,54 +80,64 @@ export function AiCareerMain() {
       });
     }
     return days;
-  }, [tokenResult?.data]);
+  }, [snapshot?.dailyTokens]);
 
   useEffect(() => {
-    if (activePage !== 'aiCareer' || settledKey === currentKey) return;
+    visitRef.current += 1;
+    if (activePage !== 'aiCareer') return;
     let cancelled = false;
+    const explicit = useAiCareerStore.getState().refreshing;
+    const cached = useAiCareerStore.getState().cachedScopes[scope]?.dashboard;
     Promise.all([aiCareerHeatmap(selectedFamily), aiCareerTokenBytes(selectedFamily)])
       .then(([entries, tokenBytes]) => {
         if (cancelled) return;
-        setDashboards((previous) => ({
-          ...previous,
-          [scope]: { buckets: entriesToBuckets(entries), tokenBytes },
-        }));
+        cacheDashboard(selectedFamily, entries, tokenBytes);
         setFailedKey('');
         setSettledKey(currentKey);
       })
       .catch(() => {
         if (cancelled) return;
-        setFailedKey(currentKey);
+        setFailedKey(explicit || !cached ? currentKey : '');
         setSettledKey(currentKey);
       });
     return () => {
       cancelled = true;
     };
-  }, [activePage, selectedFamily, scope, currentKey, settledKey]);
+  }, [activePage, selectedFamily, scope, currentKey, cacheDashboard]);
 
   useEffect(() => {
-    if (activePage !== 'aiCareer' || chartMetric !== 'tokens' || tokenResult?.key === currentKey)
-      return;
+    if (activePage !== 'aiCareer' || chartMetric !== 'tokens') return;
+    const requestKey = `${visitRef.current}::${currentKey}::${tokenRetry}`;
+    if (tokenRequestRef.current === requestKey) return;
+    tokenRequestRef.current = requestKey;
     let cancelled = false;
+    let settled = false;
+    const explicit = useAiCareerStore.getState().refreshing || explicitTokenRetryRef.current;
+    explicitTokenRetryRef.current = false;
+    const cached = useAiCareerStore.getState().cachedScopes[scope]?.dailyTokens;
     aiCareerDailyTokens(selectedFamily)
       .then((data) => {
+        settled = true;
         if (cancelled) return;
+        cacheDailyTokens(selectedFamily, data);
         setTokenResults((previous) => ({
           ...previous,
-          [scope]: { key: currentKey, data, failed: false },
+          [scope]: { key: currentKey, failed: false },
         }));
       })
       .catch(() => {
+        settled = true;
         if (cancelled) return;
         setTokenResults((previous) => ({
           ...previous,
-          [scope]: { key: currentKey, data: previous[scope]?.data, failed: true },
+          [scope]: { key: currentKey, failed: explicit || !cached },
         }));
       });
     return () => {
       cancelled = true;
+      if (!settled && tokenRequestRef.current === requestKey) tokenRequestRef.current = '';
     };
-  }, [activePage, chartMetric, selectedFamily, scope, currentKey, tokenResult]);
+  }, [activePage, chartMetric, selectedFamily, scope, currentKey, tokenRetry, cacheDailyTokens]);
 
   useEffect(() => {
     if (
@@ -166,7 +185,10 @@ export function AiCareerMain() {
   ];
 
   return (
-    <div key={scope} className="min-w-0 min-h-0 flex-1 overflow-y-auto slim-scroll pr-1">
+    <div
+      key={scope}
+      className="min-w-0 min-h-0 flex-1 overflow-y-auto slim-scroll pr-1 cursor-default"
+    >
       <div
         className={
           'max-w-3xl mx-auto min-h-full flex flex-col items-center gap-8 py-2 ' +
@@ -220,7 +242,7 @@ export function AiCareerMain() {
 
         {selectedFamily === null && (
           <div className="w-full flex-shrink-0 -mb-2">
-            <ContributionHeatmap buckets={buckets} />
+            <ContributionHeatmap buckets={buckets} refreshKey={refreshKey} />
           </div>
         )}
         <div className="w-full flex-shrink-0">
@@ -233,18 +255,20 @@ export function AiCareerMain() {
               tokenStatus={
                 chartMetric !== 'tokens'
                   ? 'idle'
-                  : tokenResult?.key !== currentKey
-                    ? 'loading'
-                    : tokenResult.failed
-                      ? 'error'
-                      : 'ready'
+                  : tokenResult?.key === currentKey && tokenResult.failed
+                    ? 'error'
+                    : snapshot?.dailyTokens
+                      ? 'ready'
+                      : 'loading'
               }
-              onTokenRetry={() =>
+              onTokenRetry={() => {
+                explicitTokenRetryRef.current = true;
                 setTokenResults((previous) => ({
                   ...previous,
-                  [scope]: { key: '', data: previous[scope]?.data, failed: false },
-                }))
-              }
+                  [scope]: { key: '', failed: false },
+                }));
+                setTokenRetry((previous) => previous + 1);
+              }}
             />
           )}
         </div>

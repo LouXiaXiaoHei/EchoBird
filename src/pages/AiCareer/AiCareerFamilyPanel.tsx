@@ -26,7 +26,7 @@ export function AiCareerFamilyPanel() {
   return (
     <nav
       aria-label={t('aiCareer.families')}
-      className="flex-1 min-h-0 px-2 pb-2 overflow-y-auto slim-scroll space-y-2"
+      className="flex-1 min-h-0 px-2 pb-2 overflow-y-auto slim-scroll space-y-2 cursor-default"
     >
       <button
         type="button"

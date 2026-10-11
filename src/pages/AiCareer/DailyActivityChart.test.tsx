@@ -113,6 +113,12 @@ describe('daily activity chart', () => {
     useAiCareerStore.setState(useAiCareerStore.getInitialState());
     useNavigationStore.setState({ activePage: 'aiCareer' });
     vi.clearAllMocks();
+    vi.mocked(api.aiCareerDailyTokens).mockResolvedValueOnce({
+      entries: [
+        { ts: new Date(2026, 2, 2, 12).getTime() / 1000, input_tokens: 20, output_tokens: 5 },
+      ],
+      unavailable_families: [],
+    });
     await act(async () => {
       renderer = create(<AiCareerMain />, {
         createNodeMock: () => ({ offsetWidth: 100 }),
@@ -124,11 +130,21 @@ describe('daily activity chart', () => {
     await act(async () => useNavigationStore.getState().setActivePage('apps'));
     expect(renderer.root.findAllByType(CareerTooltip)).toHaveLength(0);
     expect(renderer.root.findAllByType(DailyActivityChart)).toHaveLength(0);
+    vi.setSystemTime(new Date(2026, 2, 3, 12));
+    vi.mocked(api.aiCareerDailyTokens).mockReturnValueOnce(new Promise(() => {}));
     await act(async () => useNavigationStore.getState().setActivePage('aiCareer'));
     expect(renderer.root.findAllByType(CareerTooltip)).toHaveLength(0);
     expect(renderer.root.findAllByType(DailyActivityChart)).toHaveLength(1);
-    expect(api.aiCareerDailyTokens).toHaveBeenCalledExactlyOnceWith(null);
+    expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(2);
     expect(useAiCareerStore.getState().chartMetric).toBe('tokens');
+    const currentColumns = renderer.root.findAllByProps({ role: 'img' });
+    expect(currentColumns[28].props['aria-label']).toBe(
+      'Mar 2, 2026 · Input 20 · Output 5 · Total 25'
+    );
+    expect(currentColumns[29].props['aria-label']).toBe(
+      'Mar 3, 2026 · Input — · Output — · Total —'
+    );
+    expect(renderer.root.findByProps({ role: 'tabpanel' }).props['aria-busy']).toBe(false);
   });
 
   it('includes leap day in its calendar range', () => {

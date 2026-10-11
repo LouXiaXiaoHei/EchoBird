@@ -103,8 +103,13 @@ export function AiCareerPanel({ family }: { family: AiCareerFamily }) {
 function FamilySessions({ family }: { family: AiCareerFamily }) {
   const { t, locale } = useI18n();
   const { showToast } = useToast();
-  const [rows, setRows] = useState<Row[]>([]);
+  const [initial] = useState(() => {
+    const state = useAiCareerStore.getState();
+    return { sessions: state.cachedScopes[family]?.sessions, explicit: state.refreshing };
+  });
+  const [rows, setRows] = useState<Row[]>(() => toRows(initial.sessions ?? []));
   const [loading, setLoading] = useState(true);
+  const [firstPageReady, setFirstPageReady] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [failed, setFailed] = useState(false);
   const [copiedAction, setCopiedAction] = useState<string | null>(null);
@@ -117,24 +122,38 @@ function FamilySessions({ family }: { family: AiCareerFamily }) {
   const sentinelRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
 
-  const loadPage = useCallback(async () => {
-    if (!activeRef.current || pendingRef.current) return;
-    pendingRef.current = true;
-    setLoading(true);
-    setFailed(false);
-    try {
-      const list = await aiCareerFamilyHistory(family, offsetRef.current, PAGE);
-      if (!activeRef.current) return;
-      setRows((previous) => [...previous, ...toRows(list)]);
-      offsetRef.current += list.length;
-      setHasMore(list.length === PAGE);
-    } catch {
-      if (activeRef.current) setFailed(true);
-    } finally {
-      pendingRef.current = false;
-      if (activeRef.current) setLoading(false);
-    }
-  }, [family]);
+  const loadPage = useCallback(
+    async (explicit = false) => {
+      if (!activeRef.current || pendingRef.current) return;
+      pendingRef.current = true;
+      const offset = offsetRef.current;
+      setLoading(true);
+      setFailed(false);
+      try {
+        const list = await aiCareerFamilyHistory(family, offset, PAGE);
+        if (!activeRef.current) return;
+        if (offset === 0) {
+          setRows(toRows(list));
+          setFirstPageReady(true);
+          useAiCareerStore.getState().cacheSessions(family, list);
+        } else {
+          setRows((previous) => [...previous, ...toRows(list)]);
+        }
+        offsetRef.current = offset + list.length;
+        setHasMore(list.length === PAGE);
+      } catch {
+        if (
+          activeRef.current &&
+          (offset > 0 || initial.sessions === undefined || initial.explicit || explicit)
+        )
+          setFailed(true);
+      } finally {
+        pendingRef.current = false;
+        if (activeRef.current) setLoading(false);
+      }
+    },
+    [family, initial]
+  );
 
   useEffect(() => {
     activeRef.current = true;
@@ -279,6 +298,7 @@ function FamilySessions({ family }: { family: AiCareerFamily }) {
       })}
 
       {loading &&
+        (firstPageReady || initial.sessions === undefined) &&
         (rows.length ? SKELETON_WIDTHS.slice(0, 3) : SKELETON_WIDTHS).map((width, i) => (
           <SkeletonRow key={`loading-${i}`} w={width} />
         ))}
@@ -287,14 +307,14 @@ function FamilySessions({ family }: { family: AiCareerFamily }) {
           <span>{t(rows.length ? 'aiCareer.loadMoreFailed' : 'aiCareer.sessionLoadFailed')}</span>
           <button
             type="button"
-            onClick={() => void loadPage()}
+            onClick={() => void loadPage(true)}
             className="rounded-md border border-cyber-border px-3 py-1 text-cyber-text hover:bg-cyber-text/10"
           >
             {t('aiCareer.retry')}
           </button>
         </div>
       )}
-      {!loading && !failed && rows.length === 0 && (
+      {(!loading || initial.sessions !== undefined) && !failed && rows.length === 0 && (
         <p className="py-8 text-cyber-text-secondary text-center">{t('aiCareer.noSessions')}</p>
       )}
       {hasMore && !failed && <div ref={sentinelRef} style={{ height: 1 }} />}

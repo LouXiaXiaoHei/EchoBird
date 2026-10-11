@@ -63,13 +63,16 @@ vi.mock('./AiCareerPanel', () => ({
 }));
 
 let renderer: ReactTestRenderer;
+const writeSnapshot = vi.fn();
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function mount() {
@@ -111,12 +114,14 @@ const entries = (count: number) => [{ ts: 1_791_676_800, count }];
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.clearAllMocks();
+  vi.stubGlobal('localStorage', { getItem: () => null, setItem: writeSnapshot });
   i18n.t = (key: string) => key;
   useAiCareerStore.setState({
     selectedFamily: null,
     chartMetric: 'messages',
     refreshKey: 0,
     refreshing: false,
+    cachedScopes: {},
   });
   useNavigationStore.setState({ activePage: 'aiCareer' });
   vi.mocked(api.aiCareerHeatmap).mockResolvedValue(entries(12));
@@ -215,7 +220,7 @@ it('ignores pending statistics after leaving and unmounts the session list', asy
   expect(api.aiCareerHeatmap).toHaveBeenLastCalledWith('claude');
 });
 
-it('loads Token usage on selection, keeps the mode on family switches and reuses scoped data', async () => {
+it('loads Token usage on selection and revalidates cached scopes while retaining the mode', async () => {
   await mount();
   await selectTokens();
   expect(api.aiCareerDailyTokens).toHaveBeenCalledExactlyOnceWith(null);
@@ -226,11 +231,11 @@ it('loads Token usage on selection, keeps the mode on family switches and reuses
   expect(api.aiCareerDailyTokens).toHaveBeenLastCalledWith('claude');
   expect([...tokenDays().values()][0].input).toBe(42);
   await act(async () => useAiCareerStore.getState().setSelectedFamily(null));
-  expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(2);
+  expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(3);
   expect([...tokenDays().values()][0].input).toBe(10);
   await act(async () => useAiCareerStore.getState().setChartMetric('messages'));
   await selectTokens();
-  expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(2);
+  expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(3);
 });
 
 it('aggregates native timestamps into local days and preserves recorded zero and absent days', async () => {
@@ -311,9 +316,101 @@ it('does not refetch on translation changes and finishes refresh after both curr
   vi.mocked(api.aiCareerDailyTokens).mockReturnValueOnce(pending.promise);
   await act(async () => useAiCareerStore.getState().refresh());
   expect(useAiCareerStore.getState().refreshing).toBe(true);
-  expect(chart().props['data-token-status']).toBe('loading');
+  expect(chart().props['data-token-status']).toBe('ready');
   expect([...tokenDays().values()][0].input).toBe(10);
   await act(async () => pending.resolve(tokenData(50)));
   expect(useAiCareerStore.getState().refreshing).toBe(false);
   expect([...tokenDays().values()][0].input).toBe(50);
+});
+
+it('shows successful cached statistics and Tokens before a fresh response replaces them', async () => {
+  useAiCareerStore.getState().cacheDashboard(null, entries(88), 200);
+  useAiCareerStore.getState().cacheDailyTokens(null, tokenData(24));
+  useAiCareerStore.setState({ chartMetric: 'tokens' });
+  const pendingStats = deferred<api.HeatmapEntry[]>();
+  const pendingTokens = deferred<api.DailyTokenResponse>();
+  vi.mocked(api.aiCareerHeatmap).mockReturnValueOnce(pendingStats.promise);
+  vi.mocked(api.aiCareerDailyTokens).mockReturnValueOnce(pendingTokens.promise);
+  writeSnapshot.mockClear();
+  await mount();
+  expect(chartCount()).toBe(88);
+  expect(heatmapCount()).toBe(88);
+  expect([...tokenDays().values()][0].input).toBe(24);
+  expect(chart().props['data-token-status']).toBe('ready');
+  expect(api.aiCareerHeatmap).toHaveBeenCalledExactlyOnceWith(null);
+  expect(api.aiCareerDailyTokens).toHaveBeenCalledExactlyOnceWith(null);
+  expect(writeSnapshot).not.toHaveBeenCalled();
+  await act(async () => {
+    pendingStats.resolve(entries(18));
+    pendingTokens.resolve(tokenData(40));
+  });
+  expect(chartCount()).toBe(18);
+  expect([...tokenDays().values()][0].input).toBe(40);
+  expect(writeSnapshot).toHaveBeenCalledTimes(2);
+});
+
+it('treats cached empty responses as ready and preserves them after a background failure', async () => {
+  useAiCareerStore.getState().cacheDashboard(null, [], 0);
+  useAiCareerStore.getState().cacheDailyTokens(null, { entries: [], unavailable_families: [] });
+  useAiCareerStore.setState({ chartMetric: 'tokens' });
+  vi.mocked(api.aiCareerHeatmap).mockRejectedValueOnce(new Error('background failure'));
+  vi.mocked(api.aiCareerDailyTokens).mockRejectedValueOnce(new Error('background failure'));
+  writeSnapshot.mockClear();
+  await mount();
+  expect(chartCount()).toBe(0);
+  expect(chart().props['data-token-status']).toBe('ready');
+  expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
+  expect(useAiCareerStore.getState().cachedScopes.overview).toEqual({
+    dashboard: { heatmapEntries: [], tokenBytes: 0 },
+    dailyTokens: { entries: [], unavailable_families: [] },
+  });
+  expect(writeSnapshot).not.toHaveBeenCalled();
+});
+
+it('revalidates a reentered page while preserving cached values and rejects its late result after exit', async () => {
+  useAiCareerStore.setState({ chartMetric: 'tokens' });
+  await mount();
+  await act(async () => useNavigationStore.getState().setActivePage('apps'));
+  const pendingStats = deferred<api.HeatmapEntry[]>();
+  const pendingTokens = deferred<api.DailyTokenResponse>();
+  vi.mocked(api.aiCareerHeatmap).mockReturnValueOnce(pendingStats.promise);
+  vi.mocked(api.aiCareerDailyTokens).mockReturnValueOnce(pendingTokens.promise);
+  writeSnapshot.mockClear();
+  await act(async () => useNavigationStore.getState().setActivePage('aiCareer'));
+  expect(chartCount()).toBe(12);
+  expect([...tokenDays().values()][0].input).toBe(10);
+  expect(chart().props['data-token-status']).toBe('ready');
+  expect(api.aiCareerHeatmap).toHaveBeenCalledTimes(2);
+  expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(2);
+  await act(async () => useNavigationStore.getState().setActivePage('apps'));
+  await act(async () => {
+    pendingStats.resolve(entries(999));
+    pendingTokens.resolve(tokenData(999));
+  });
+  expect(useAiCareerStore.getState().cachedScopes.overview?.dashboard?.heatmapEntries).toEqual(
+    entries(12)
+  );
+  expect(useAiCareerStore.getState().cachedScopes.overview?.dailyTokens).toEqual(tokenData(10));
+  expect(writeSnapshot).not.toHaveBeenCalled();
+});
+
+it('does not publish or persist a late family refresh over the current generation', async () => {
+  useAiCareerStore.setState({ selectedFamily: 'claude', chartMetric: 'tokens' });
+  const oldStats = deferred<api.HeatmapEntry[]>();
+  const oldTokens = deferred<api.DailyTokenResponse>();
+  vi.mocked(api.aiCareerHeatmap).mockReturnValueOnce(oldStats.promise);
+  vi.mocked(api.aiCareerDailyTokens).mockReturnValueOnce(oldTokens.promise);
+  await mount();
+  await act(async () => useAiCareerStore.getState().refresh());
+  expect(chartCount()).toBe(12);
+  expect([...tokenDays().values()][0].input).toBe(10);
+  const writes = writeSnapshot.mock.calls.length;
+  await act(async () => {
+    oldStats.resolve(entries(999));
+    oldTokens.resolve(tokenData(999));
+  });
+  expect(chartCount()).toBe(12);
+  expect([...tokenDays().values()][0].input).toBe(10);
+  expect(writeSnapshot).toHaveBeenCalledTimes(writes);
+  expect(useAiCareerStore.getState().cachedScopes.claude?.dailyTokens).toEqual(tokenData(10));
 });

@@ -93,7 +93,12 @@ describe('career family sessions', () => {
         disconnect = disconnect;
       }
     );
-    useAiCareerStore.setState({ selectedFamily: 'codex', refreshKey: 0 });
+    useAiCareerStore.setState({
+      selectedFamily: 'codex',
+      refreshKey: 0,
+      refreshing: false,
+      cachedScopes: {},
+    });
     vi.mocked(api.aiCareerFamilyHistory).mockResolvedValue([]);
     vi.mocked(api.revealAiCareerSessionFile).mockResolvedValue();
     vi.mocked(copyText).mockResolvedValue(true);
@@ -123,6 +128,145 @@ describe('career family sessions', () => {
     expect(observe).toHaveBeenCalled();
     expect(disconnect).toHaveBeenCalled();
   });
+
+  it('shows the cached first page while revalidating, replaces it, then paginates from twenty', async () => {
+    const cached = Array.from({ length: 20 }, (_, index) =>
+      session(index, { name: `Cached ${index}` })
+    );
+    const fresh = Array.from({ length: 20 }, (_, index) =>
+      session(index + 100, { name: `Fresh ${index}` })
+    );
+    const firstPage = deferred<SavedSession[]>();
+    const nextPage = deferred<SavedSession[]>();
+    useAiCareerStore.setState({ cachedScopes: { codex: { sessions: cached } } });
+    vi.mocked(api.aiCareerFamilyHistory)
+      .mockReturnValueOnce(firstPage.promise)
+      .mockReturnValueOnce(nextPage.promise);
+    await open();
+    expect(text()).toContain('Cached 0');
+    expect(text()).not.toContain('animate-pulse');
+    expect(api.aiCareerFamilyHistory).toHaveBeenCalledExactlyOnceWith('codex', 0, 20);
+    expect(observe).not.toHaveBeenCalled();
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual(cached);
+
+    await act(async () => firstPage.resolve(fresh));
+    expect(text()).toContain('Fresh 0');
+    expect(text()).not.toContain('Cached 0');
+    expect(observe).toHaveBeenCalled();
+    act(() => {
+      scroll();
+      scroll();
+    });
+    expect(api.aiCareerFamilyHistory).toHaveBeenCalledTimes(2);
+    expect(api.aiCareerFamilyHistory).toHaveBeenLastCalledWith('codex', 20, 20);
+    await act(async () => nextPage.resolve([session(200, { name: 'Next page' })]));
+    expect(text()).toContain('Next page');
+    expect(text()).toContain('Fresh 0');
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual(fresh);
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toHaveLength(20);
+  });
+
+  it('treats a cached empty first page as ready while its real request is pending', async () => {
+    const firstPage = deferred<SavedSession[]>();
+    useAiCareerStore.setState({ cachedScopes: { codex: { sessions: [] } } });
+    vi.mocked(api.aiCareerFamilyHistory).mockReturnValueOnce(firstPage.promise);
+    await open();
+    expect(text()).toContain('aiCareer.noSessions');
+    expect(text()).not.toContain('animate-pulse');
+    expect(api.aiCareerFamilyHistory).toHaveBeenCalledExactlyOnceWith('codex', 0, 20);
+    expect(observe).not.toHaveBeenCalled();
+    await act(async () => firstPage.resolve([session(3)]));
+    expect(text()).toContain('Session 3');
+    expect(text()).not.toContain('aiCareer.noSessions');
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual([session(3)]);
+  });
+
+  it('shows initial skeletons only when no successful first page is cached', async () => {
+    const firstPage = deferred<SavedSession[]>();
+    vi.mocked(api.aiCareerFamilyHistory).mockReturnValueOnce(firstPage.promise);
+    await open();
+    expect(text()).toContain('animate-pulse');
+    expect(text()).not.toContain('aiCareer.noSessions');
+    await act(async () => firstPage.resolve([]));
+    expect(text()).not.toContain('animate-pulse');
+    expect(text()).toContain('aiCareer.noSessions');
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual([]);
+  });
+
+  it('retains cached rows without a new error when background revalidation fails', async () => {
+    const cached = [session(4)];
+    useAiCareerStore.setState({ cachedScopes: { codex: { sessions: cached } } });
+    vi.mocked(api.aiCareerFamilyHistory).mockRejectedValueOnce(new Error('background failure'));
+    await open();
+    expect(text()).toContain('Session 4');
+    expect(text()).not.toContain('animate-pulse');
+    expect(text()).not.toContain('aiCareer.loadMoreFailed');
+    expect(text()).not.toContain('aiCareer.sessionLoadFailed');
+    expect(text()).not.toContain('aiCareer.retry');
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual(cached);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('keeps explicit refresh and retry failures visible over the cache until fresh data succeeds', async () => {
+    const firstPage = deferred<SavedSession[]>();
+    useAiCareerStore.setState({
+      refreshing: true,
+      cachedScopes: { codex: { sessions: [session(4)] } },
+    });
+    vi.mocked(api.aiCareerFamilyHistory)
+      .mockReturnValueOnce(firstPage.promise)
+      .mockRejectedValueOnce(new Error('retry failure'))
+      .mockResolvedValueOnce([session(5)]);
+    await open();
+    expect(text()).toContain('Session 4');
+    expect(text()).not.toContain('animate-pulse');
+    await act(async () => {
+      useAiCareerStore.setState({ refreshing: false });
+      firstPage.reject(new Error('refresh failure'));
+    });
+    expect(text()).toContain('aiCareer.loadMoreFailed');
+    const retry = () =>
+      renderer.root
+        .findAllByType('button')
+        .find((button) => button.children.includes('aiCareer.retry'))!;
+    await act(async () => retry().props.onClick());
+    expect(api.aiCareerFamilyHistory).toHaveBeenLastCalledWith('codex', 0, 20);
+    expect(text()).toContain('Session 4');
+    expect(text()).toContain('aiCareer.loadMoreFailed');
+    await act(async () => retry().props.onClick());
+    expect(text()).toContain('Session 5');
+    expect(text()).not.toContain('Session 4');
+    expect(text()).not.toContain('aiCareer.loadMoreFailed');
+    expect(useAiCareerStore.getState().cachedScopes.codex?.sessions).toEqual([session(5)]);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it.each(['family', 'refresh', 'leave'] as const)(
+    'does not persist a late first page after %s',
+    async (kind) => {
+      const oldPage = deferred<SavedSession[]>();
+      vi.mocked(api.aiCareerFamilyHistory)
+        .mockReturnValueOnce(oldPage.promise)
+        .mockResolvedValueOnce([session(100, { name: 'Current session' })]);
+      await open();
+      await act(async () => {
+        if (kind === 'family') renderer.update(<AiCareerPanel family="claude" />);
+        else if (kind === 'refresh') useAiCareerStore.setState({ refreshKey: 1 });
+        else renderer.unmount();
+      });
+      const currentCache = useAiCareerStore.getState().cachedScopes;
+      if (kind !== 'leave') {
+        expect(text()).toContain('Current session');
+        expect(currentCache[kind === 'family' ? 'claude' : 'codex']?.sessions).toEqual([
+          session(100, { name: 'Current session' }),
+        ]);
+      }
+      await act(async () => oldPage.resolve([session(999, { name: 'Stale session' })]));
+      expect(useAiCareerStore.getState().cachedScopes).toBe(currentCache);
+      expect(JSON.stringify(currentCache)).not.toContain('Stale session');
+      if (kind !== 'leave') expect(text()).not.toContain('Stale session');
+    }
+  );
 
   it('updates translated relative times without fetching when a language pack becomes ready', async () => {
     const savedAt = new Date().toISOString();
