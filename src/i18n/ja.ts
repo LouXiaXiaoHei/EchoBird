@@ -303,10 +303,11 @@ const ja: Partial<Translations> = {
   'server.selectConfigStart': 'モデル選択 → 設定 → 起動',
   'server.tier.entry': 'エントリー',
   'server.tier.recommended': '推奨',
-  'server.tier.flagship': 'フラッグシップ',
+  'server.tier.flagship': '上級',
   'server.tier.minSpec':
-    'CUDA モジュールとエンジンはメジャーバージョンを揃える必要があります — 先にモジュールを、次にエンジンを',
-  'server.tier.minSpecAuto': 'macOS / Linux は CUDA を自動管理 — エンジンをインストールするだけ',
+    '家庭用ハードウェアの目安 · 記載の量子化を使用し、コンテキストとシステム用のメモリを確保',
+  'server.tier.minSpecAuto':
+    '家庭用ハードウェアの目安 · 記載の量子化を使用し、コンテキストとシステム用のメモリを確保',
   'server.enginePicker.title': 'エンジンバージョンを選択',
   'server.enginePicker.hint':
     '行をクリックするとインストールが開始されます。GPU モードを使うには、エンジンの CUDA メジャーバージョン(12.x / 13.x)が既存の CUDA モジュールと一致する必要があります。',

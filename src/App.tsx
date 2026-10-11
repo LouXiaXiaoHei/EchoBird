@@ -239,6 +239,11 @@ function AppContent() {
     document.documentElement.classList.toggle('window-maximized', isMaximized);
   }, [isMaximized]);
 
+  useEffect(() => {
+    document.documentElement.classList.toggle('local-llm-page', activePage === 'localLlm');
+    return () => document.documentElement.classList.remove('local-llm-page');
+  }, [activePage]);
+
   const is = (p: PageType) => activePage === p;
 
   return (

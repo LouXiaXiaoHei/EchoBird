@@ -439,6 +439,11 @@ textarea:not(:disabled),
   cursor: text;
 }
 
+html.local-llm-page,
+html.local-llm-page * {
+  cursor: default !important;
+}
+
 /* html/body/#root must stay transparent so the rounded outer shell in App.tsx
    carries the only visible background. Windows 11 DWM rounds undecorated
    windows at the OS level, masking any opaque body bg, but Linux Mutter and
@@ -691,6 +696,10 @@ html.is-macos .page-scroll::-webkit-scrollbar {
 [data-theme='dark'] img[src*='/icons/tools/grok.svg'],
 [data-theme='dark'] img[src*='/icons/tools/openscience.svg'] {
   filter: invert(1) brightness(0.92);
+}
+
+[data-theme='dark'] img[src*='/icons/models/liquid.svg'] {
+  filter: invert(1);
 }
 
 img[src*='/icons/tools/openscience.svg'] {

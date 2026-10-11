@@ -297,10 +297,11 @@ const en: Translations = {
   'server.selectConfigStart': 'select model \u2192 configure \u2192 START',
   'server.tier.entry': 'Entry',
   'server.tier.recommended': 'Recommended',
-  'server.tier.flagship': 'Flagship',
+  'server.tier.flagship': 'Advanced',
   'server.tier.minSpec':
-    'CUDA modules and the engine must share the same major version — install modules first, then the engine',
-  'server.tier.minSpecAuto': 'macOS / Linux — CUDA is auto-managed; just install the engine',
+    'Home hardware reference · Listed quantizations; leave memory for context and the system',
+  'server.tier.minSpecAuto':
+    'Home hardware reference · Listed quantizations; leave memory for context and the system',
   'server.enginePicker.title': 'Choose engine version',
   'server.enginePicker.hint':
     "Click a row to start installing. The engine's CUDA major version (12.x / 13.x) must match your installed CUDA modules for GPU mode to work.",

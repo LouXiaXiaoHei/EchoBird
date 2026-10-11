@@ -21,6 +21,7 @@ import { useDownload } from '../../components/DownloadContext';
 import * as api from '../../api/tauri';
 import type { SystemInfo } from '../../api/tauri';
 import { normalizeStoreModels, type StoreModel } from '../../api/types';
+import bundledStoreModels from '../../data/localModelStore.json';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { LocalServerContext, useLocalServer } from './context';
@@ -41,11 +42,13 @@ export const LocalServerProvider: React.FC<{ children: React.ReactNode }> = ({ c
   const [serverModelName, setServerModelName] = useState('');
   const [serverApiKey, setServerApiKey] = useState('');
 
-  const rescanModels = useCallback(async (rt?: string) => {
+  const scanRuntime = useRef(runtime);
+  const scanRequest = useRef(0);
+  const rescanModels = useCallback(async (rt = scanRuntime.current) => {
+    const request = ++scanRequest.current;
     setIsScanning(true);
     try {
       const dirs = await api.getModelsDirs();
-      setModelsDirs(dirs);
       const allFiles: GgufFileEntry[] = [];
       const isHfRuntime = rt === 'vllm' || rt === 'sglang';
       for (const dir of dirs) {
@@ -71,18 +74,32 @@ export const LocalServerProvider: React.FC<{ children: React.ReactNode }> = ({ c
           }
         }
       }
-      setGgufFiles(allFiles);
+      if (request === scanRequest.current) {
+        setModelsDirs(dirs);
+        setGgufFiles(Array.from(new Map(allFiles.map((file) => [file.filePath, file])).values()));
+      }
     } catch (e) {
       console.error('[LocalServer] Failed to scan models:', e);
     }
-    setIsScanning(false);
+    if (request === scanRequest.current) setIsScanning(false);
   }, []);
 
-  // Initial scan
+  // Scan the current format and ignore earlier requests after switching engines.
+  const previousRuntime = useRef(runtime);
   useEffect(() => {
+    scanRuntime.current = runtime;
+    if (previousRuntime.current !== runtime) {
+      setSelectedModelPath(null);
+      setGgufFiles([]);
+      previousRuntime.current = runtime;
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     rescanModels();
-  }, [rescanModels]);
+    const requests = scanRequest;
+    return () => {
+      requests.current++;
+    };
+  }, [runtime, rescanModels]);
 
   return (
     <LocalServerContext.Provider
@@ -112,6 +129,22 @@ export const LocalServerProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
 // ─── Helper: Parse model info from file path ───
 
+function isNewerEngineVersion(installed: string, latest: string): boolean {
+  const parse = (value: string) =>
+    value
+      .match(/^[bv]?(\d+(?:\.\d+)*)$/)?.[1]
+      .split('.')
+      .map(Number);
+  const current = parse(installed);
+  const available = parse(latest);
+  if (!current || !available) return false;
+  for (let i = 0; i < Math.max(current.length, available.length); i++) {
+    const difference = (available[i] || 0) - (current[i] || 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return false;
+}
+
 function parseModelInfo(filePath: string) {
   if (!filePath) return { name: 'NO MODEL SELECTED', quant: '', shortPath: '' };
   const fileName = filePath.replace(/\\/g, '/').split('/').pop() || '';
@@ -129,7 +162,6 @@ export const LocalServerMain: React.FC = () => {
   const {
     selectedModelPath,
     setSelectedModelPath,
-    rescanModels,
     serverRunning: isRunning,
     setServerRunning: setIsRunning,
     serverPort,
@@ -151,11 +183,6 @@ export const LocalServerMain: React.FC = () => {
   // work at all." Users on small GPUs can still drop back to 4K/8K manually
   // for non-agent workloads. (See issue #50.)
   const [contextSize, setContextSize] = useState<number>(32768);
-
-  // Rescan models when runtime changes (GGUF vs HuggingFace)
-  useEffect(() => {
-    rescanModels(runtime);
-  }, [runtime, rescanModels]);
 
   // System info: OS / arch / GPU — used for runtime filtering and COMPUTE option
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
@@ -194,11 +221,14 @@ export const LocalServerMain: React.FC = () => {
 
   // Linux + GPU: default runtime swaps from llama-server to vllm so the
   // selected card matches the first option in the recommended order.
+  const runtimeDefaulted = useRef(false);
   useEffect(() => {
+    if (!systemInfo || runtimeDefaulted.current) return;
+    runtimeDefaulted.current = true;
     if (isLinux && (hasNvidiaGpu || hasAmdGpu) && runtime === 'llama-server') {
       setRuntime('vllm');
     }
-  }, [isLinux, hasNvidiaGpu, hasAmdGpu, runtime, setRuntime]);
+  }, [systemInfo, isLinux, hasNvidiaGpu, hasAmdGpu, runtime, setRuntime]);
 
   // No-GPU + llama-server: snap gpuLayers from the -1 default (GPU-Auto)
   // down to 0 (CPU only) once systemInfo lands. Without this the COMPUTE
@@ -228,6 +258,8 @@ export const LocalServerMain: React.FC = () => {
   const [engineInstallDir, setEngineInstallDir] = useState<string>('');
   const [engineBinaryNames, setEngineBinaryNames] = useState<string[]>([]);
   const [engineVersion, setEngineVersion] = useState<string>('');
+  const [engineCheckRevision, setEngineCheckRevision] = useState(0);
+  const activeEngineRuntime = useRef(runtime);
 
   // Engine version picker (Windows + NVIDIA + llama-server only).
   // macOS/Linux + non-NVIDIA stay on the original auto-latest install
@@ -276,6 +308,7 @@ export const LocalServerMain: React.FC = () => {
 
   // Check engine on mount AND when runtime changes
   useEffect(() => {
+    activeEngineRuntime.current = runtime;
     // Guard against a slower earlier check resolving after a newer one (rapid
     // runtime switches) and overwriting engineStatus with the wrong runtime's
     // data — mirrors the cancelled guard on the version-picker effect below.
@@ -292,7 +325,10 @@ export const LocalServerMain: React.FC = () => {
         setEngineVersion(entry?.version || '');
         if (!entry?.installed) {
           setEngineStatus('not-installed');
-        } else if (entry.latestVersion && entry.version && entry.version !== entry.latestVersion) {
+        } else if (
+          entry.latestVersion &&
+          isNewerEngineVersion(entry.version, entry.latestVersion)
+        ) {
           setEngineStatus('update-available');
         } else {
           setEngineStatus('ready');
@@ -305,7 +341,7 @@ export const LocalServerMain: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [runtime]);
+  }, [runtime, engineCheckRevision]);
 
   // Pre-fetch the version picker options on mount (Windows + NVIDIA
   // only). Done eagerly so opening the modal feels instant; empty
@@ -341,7 +377,7 @@ export const LocalServerMain: React.FC = () => {
     } else if (engineDl.status === 'completed') {
       setEngineStatus('ready');
     } else if (engineDl.status === 'cancelled') {
-      setEngineStatus('not-installed');
+      setEngineCheckRevision((value) => value + 1);
     } else if (engineDl.status === 'error') {
       setEngineStatus('error');
     }
@@ -364,13 +400,15 @@ export const LocalServerMain: React.FC = () => {
     setEngineStatus('downloading');
     try {
       await api.installLocalEngine(runtime);
-      setEngineStatus('ready');
+      if (activeEngineRuntime.current === runtime) setEngineStatus('ready');
     } catch (err) {
-      setEngineStatus('error');
+      if (activeEngineRuntime.current === runtime) setEngineStatus('error');
       setLogs((prev) => [
         ...prev,
         `[Error] Engine install failed: ${err instanceof Error ? err.message : String(err)}`,
       ]);
+    } finally {
+      if (activeEngineRuntime.current === runtime) setEngineCheckRevision((value) => value + 1);
     }
   };
 
@@ -382,13 +420,15 @@ export const LocalServerMain: React.FC = () => {
         version: opt.tag,
         cudaVersion: opt.cudaVersion,
       });
-      setEngineStatus('ready');
+      if (activeEngineRuntime.current === runtime) setEngineStatus('ready');
     } catch (err) {
-      setEngineStatus('error');
+      if (activeEngineRuntime.current === runtime) setEngineStatus('error');
       setLogs((prev) => [
         ...prev,
         `[Error] Engine install failed: ${err instanceof Error ? err.message : String(err)}`,
       ]);
+    } finally {
+      if (activeEngineRuntime.current === runtime) setEngineCheckRevision((value) => value + 1);
     }
   };
 
@@ -627,7 +667,7 @@ export const LocalServerMain: React.FC = () => {
     // bg + shadow keeps the box identical across all three.
     const btnActive =
       'bg-cyber-accent text-white hover:bg-cyber-accent-secondary shadow-lg shadow-cyber-accent/30';
-    const btnDisabled = 'bg-cyber-border/60 text-cyber-text-secondary cursor-not-allowed';
+    const btnDisabled = 'bg-cyber-border/60 text-cyber-text-secondary';
     const btnStop = 'bg-red-500 text-white hover:bg-red-600 shadow-[0_0_8px_rgba(239,68,68,0.2)]';
 
     const startStopBtn = (
@@ -982,9 +1022,9 @@ export const LocalServerMain: React.FC = () => {
                             {t('server.tier.entry')}
                           </td>
                           <td className="px-3 py-4 align-top space-y-1">
-                            <div>RTX 4090 24GB / Apple M4 Pro 48GB</div>
+                            <div>4–6GB GPU / Apple Silicon 16GB</div>
                             <div className="text-cyber-text-muted/80 text-xs">
-                              Qwen3.5 9B、Granite 4.1 8B、Gemma 4 E4B
+                              Qwen3.5 2B/4B、MiniCPM5 1B/2B、Granite 4.2 3B（Q4）
                             </div>
                           </td>
                         </tr>
@@ -993,9 +1033,9 @@ export const LocalServerMain: React.FC = () => {
                             {t('server.tier.recommended')}
                           </td>
                           <td className="px-3 py-4 align-top space-y-1">
-                            <div>RTX 5090 32GB / Apple M4 Max 64–96GB</div>
+                            <div>8GB GPU / Apple Silicon 16–24GB</div>
                             <div className="text-cyber-text-muted/80 text-xs">
-                              Granite 4.1 30B(MoE)、Qwen3.6 35B-A3B(MoE)、Gemma 4 31B
+                              Qwen3.5 9B、Gemma 4 E4B、LFM2.5 8B-A1B（Q4）
                             </div>
                           </td>
                         </tr>
@@ -1004,9 +1044,9 @@ export const LocalServerMain: React.FC = () => {
                             {t('server.tier.flagship')}
                           </td>
                           <td className="px-3 py-4 align-top space-y-1">
-                            <div>H100 80GB / H200 / A100 / Mac Studio M3 Ultra 192GB+</div>
+                            <div>12–16GB GPU / Apple Silicon 24–32GB</div>
                             <div className="text-cyber-text-muted/80 text-xs">
-                              Qwen3.6 27B、Qwen3.6 27B Opus Distill v2、Nemotron 3 Nano Omni 30B-A3B
+                              Qwen3.5 9B（Q6/Q8）、Gemma 4 12B（Q4/Q6）
                             </div>
                           </td>
                         </tr>
@@ -1020,13 +1060,13 @@ export const LocalServerMain: React.FC = () => {
                     <div className="flex justify-center gap-3 mt-4">
                       <button
                         onClick={() => goToMother(t('mother.hintDetectCuda'))}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors cursor-pointer"
+                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
                       >
                         {t('mother.hintDetectCuda')}
                       </button>
                       <button
                         onClick={() => goToMother(t('mother.hintInstallCuda'))}
-                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors cursor-pointer"
+                        className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
                       >
                         {t('mother.hintInstallCuda')}
                       </button>
@@ -1218,6 +1258,7 @@ function getVramFitness(
 
 // Known model names for icon detection
 const KNOWN_MODELS = [
+  'minicpm',
   'qwen',
   'llama',
   'deepseek',
@@ -1236,6 +1277,7 @@ const KNOWN_MODELS = [
 
 function guessIconFromFileName(fileName: string): string | null {
   const lower = fileName.toLowerCase();
+  if (lower.includes('lfm')) return 'liquid';
   for (const name of KNOWN_MODELS) {
     if (lower.includes(name)) return name;
   }
@@ -1274,7 +1316,10 @@ export const LocalServerPanel: React.FC = () => {
   const [downloadDir, setDownloadDir] = useState('');
 
   // Global download state from context
-  const { downloads, startDownload } = useDownload();
+  const { downloads, startDownload, isDownloading } = useDownload();
+  const downloadDirectoryLocked = Array.from(downloads.values()).some(
+    (download) => download.repo && ['downloading', 'speed_test', 'paused'].includes(download.status)
+  );
 
   // Rescan models after download completes
   useEffect(() => {
@@ -1319,8 +1364,9 @@ export const LocalServerPanel: React.FC = () => {
       .catch(() => {});
   }, []);
 
-  // Fetch store models: backend (remote→cache) then fallback to static JSON
+  // Fetch store models: backend (remote→cache) then the bundled catalog.
   useEffect(() => {
+    let cancelled = false;
     if (activeTab === 'store' && storeModels.length === 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsLoadingStore(true);
@@ -1328,31 +1374,32 @@ export const LocalServerPanel: React.FC = () => {
         .getStoreModels()
         .then((data: unknown) => {
           const normalized = normalizeStoreModels(data);
-          if (normalized.length > 0) {
-            setStoreModels(normalized);
-          } else {
-            // Fallback to static JSON
-            return fetch('./api/store/models.json')
-              .then((r) => r.json())
-              .then((fallback: unknown) => setStoreModels(normalizeStoreModels(fallback)));
+          if (!cancelled) {
+            setStoreModels(
+              normalized.length ? normalized : normalizeStoreModels(bundledStoreModels)
+            );
+            setIsLoadingStore(false);
           }
         })
         .catch(() => {
-          // Double fallback
-          fetch('./api/store/models.json')
-            .then((r) => r.json())
-            .then((fallback: unknown) => setStoreModels(normalizeStoreModels(fallback)))
-            .catch((e) => console.error('[ModelStore] All sources failed:', e));
-        })
-        .finally(() => setIsLoadingStore(false));
+          if (!cancelled) {
+            setStoreModels(normalizeStoreModels(bundledStoreModels));
+            setIsLoadingStore(false);
+          }
+        });
     }
+    return () => {
+      cancelled = true;
+    };
   }, [activeTab, storeModels.length]);
 
   // Change download directory
   const handleChangeDownloadDir = async () => {
+    if (downloadDirectoryLocked) return;
     try {
       const newDir = await api.setDownloadDir();
       setDownloadDir(newDir);
+      rescanModels();
     } catch (e) {
       console.error('[ModelStore] Set download dir failed:', e);
     }
@@ -1372,12 +1419,22 @@ export const LocalServerPanel: React.FC = () => {
         single.push(f);
         continue;
       }
-      const key = `${m[1]}-of-${m[2]}`;
+      const path = f.filePath.replace(/\\/g, '/');
+      const key = `${path.slice(0, path.lastIndexOf('/'))}/${m[1]}-of-${m[2]}`;
       (shardGroups[key] ||= []).push(f);
     }
     const out: GgufFileEntry[] = [...single];
     for (const shards of Object.values(shardGroups)) {
       shards.sort((a, b) => a.fileName.localeCompare(b.fileName));
+      const expected = Number(shards[0].fileName.match(/-of-(\d{5})\.gguf$/i)?.[1]);
+      if (
+        shards.length !== expected ||
+        !shards.every(
+          (file, index) =>
+            Number(file.fileName.match(/-(\d{5})-of-\d{5}\.gguf$/i)?.[1]) === index + 1
+        )
+      )
+        continue;
       const first = shards[0];
       const totalSize = shards.reduce((s, x) => s + x.fileSize, 0);
       out.push({ ...first, fileSize: totalSize });
@@ -1387,9 +1444,16 @@ export const LocalServerPanel: React.FC = () => {
 
   // Group local files by model name, with sourceDir
   const localGroups = (() => {
+    const catalog = [...storeModels, ...bundledStoreModels];
     const map: Record<
       string,
-      { modelName: string; icon: string | null; sourceDir: string; variants: GgufFileEntry[] }
+      {
+        id: string;
+        modelName: string;
+        icon: string | null;
+        sourceDir: string;
+        variants: GgufFileEntry[];
+      }
     > = {};
     for (const f of consolidatedFiles) {
       const base = f.fileName
@@ -1399,29 +1463,48 @@ export const LocalServerPanel: React.FC = () => {
         // single-file variants of the same model under one card.
         .replace(/-\d{5}-of-\d{5}$/i, '')
         .replace(/[-.](?:q[0-9_]+[a-z_]*|f16|f32|fp16|bf16)$/i, '');
-      if (!map[base]) {
-        const displayName = base.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      const catalogModel = catalog.find((model) =>
+        model.variants.some((variant) =>
+          variant.files.some((file) => file.split('/').pop() === f.fileName)
+        )
+      );
+      const key = catalogModel?.id || base;
+      if (!map[key]) {
+        const displayName =
+          catalogModel?.name || base.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
         // Find which directory this file belongs to
         const sourceDir =
           localDirs.find((d) => f.filePath.replace(/\\/g, '/').startsWith(d.replace(/\\/g, '/'))) ||
           '';
-        map[base] = {
+        map[key] = {
+          id: key,
           modelName: displayName,
-          icon: guessIconFromFileName(f.fileName),
+          icon: catalogModel?.icon || guessIconFromFileName(f.fileName),
           sourceDir,
           variants: [],
         };
       }
-      map[base].variants.push(f);
+      map[key].variants.push(f);
     }
     return Object.values(map);
   })();
 
-  // Filter store models by current runtime
-  const filteredStoreModels = storeModels.filter((model) => {
-    const modelRuntimes = model.runtimes || ['llama-server'];
-    return modelRuntimes.includes(runtime);
-  });
+  // Keep small downloads first, including catalogs returned by older servers.
+  const filteredStoreModels = storeModels
+    .filter((model) => (model.runtimes || ['llama-server']).includes(runtime))
+    .sort((a, b) => {
+      const smallestA = Math.min(
+        ...a.variants.map((v) =>
+          Number.isFinite(v.fileSize) && v.fileSize > 0 ? v.fileSize : Infinity
+        )
+      );
+      const smallestB = Math.min(
+        ...b.variants.map((v) =>
+          Number.isFinite(v.fileSize) && v.fileSize > 0 ? v.fileSize : Infinity
+        )
+      );
+      return smallestA - smallestB;
+    });
 
   // Strip any HF subdir prefix from a catalog filename (sharded unsloth GGUFs
   // are listed as "UD-Q4_K_XL/foo-00001-of-00010.gguf" but stored flat).
@@ -1432,8 +1515,20 @@ export const LocalServerPanel: React.FC = () => {
 
   // Check if every file in a variant exists locally. Single-file variants pass
   // a one-element array; multi-shard variants pass the full shard list.
-  const isDownloaded = (files: string[]) =>
-    files.length > 0 && files.every((path) => ggufFiles.some((f) => f.fileName === basename(path)));
+  const isDownloaded = (files: string[]) => {
+    const first = basename(files[0] || '');
+    return (
+      files.length > 0 &&
+      ggufFiles.some((candidate) => {
+        if (candidate.fileName !== first) return false;
+        const path = candidate.filePath.replace(/\\/g, '/');
+        const dir = path.slice(0, path.lastIndexOf('/') + 1);
+        return files.every((file) =>
+          ggufFiles.some((entry) => entry.filePath.replace(/\\/g, '/') === dir + basename(file))
+        );
+      })
+    );
+  };
 
   // ─── Handlers ───
 
@@ -1542,7 +1637,7 @@ export const LocalServerPanel: React.FC = () => {
                     className={`text-xs font-mono font-bold transition-colors ml-auto ${
                       deleteSelection.size > 0
                         ? 'text-red-400 hover:text-red-300'
-                        : 'text-cyber-text-secondary/50 cursor-not-allowed'
+                        : 'text-cyber-text-secondary/50'
                     }`}
                   >
                     [{t('store.remove')}({deleteSelection.size})]
@@ -1558,7 +1653,7 @@ export const LocalServerPanel: React.FC = () => {
             ) : localGroups.length > 0 ? (
               <div className="space-y-2">
                 {localGroups.map((group) => {
-                  const groupKey = group.modelName;
+                  const groupKey = group.id;
                   const isExpanded = expandedLocalGroup === groupKey;
                   const selected = group.variants.find((v) => v.filePath === selectedModelPath);
                   const isGroupSelected = isDeleteMode && deleteSelection.has(group.sourceDir);
@@ -1578,7 +1673,7 @@ export const LocalServerPanel: React.FC = () => {
                     >
                       {/* Card Header */}
                       <div
-                        className="flex items-center gap-3 cursor-pointer"
+                        className="flex items-center gap-3"
                         onClick={() => {
                           if (isDeleteMode) {
                             // Delete mode: Toggle directory selection
@@ -1686,7 +1781,7 @@ export const LocalServerPanel: React.FC = () => {
                             return (
                               <div
                                 key={v.filePath}
-                                className={`flex items-center gap-3 p-2 rounded cursor-pointer transition-colors ${isSelected ? 'bg-cyber-elevated' : 'hover:bg-cyber-elevated'}`}
+                                className={`flex items-center gap-3 p-2 rounded transition-colors ${isSelected ? 'bg-cyber-elevated' : 'hover:bg-cyber-elevated'}`}
                                 onClick={() => setSelectedModelPath(v.filePath)}
                               >
                                 <span
@@ -1754,7 +1849,8 @@ export const LocalServerPanel: React.FC = () => {
             {/* Download directory — clickable to change */}
             {downloadDir && (
               <div
-                className="mb-3 text-[10px] text-cyber-text-secondary p-2 bg-cyber-surface border border-cyber-border rounded truncate cursor-pointer hover:bg-cyber-elevated transition-colors"
+                className="mb-3 text-[10px] text-cyber-text-secondary p-2 bg-cyber-surface border border-cyber-border rounded truncate hover:bg-cyber-elevated transition-colors"
+                aria-disabled={downloadDirectoryLocked}
                 onClick={handleChangeDownloadDir}
               >
                 <FolderOpen className="w-3 h-3 inline mr-1" />
@@ -1777,11 +1873,12 @@ export const LocalServerPanel: React.FC = () => {
                 {filteredStoreModels.map((model) => {
                   const isExpanded = expandedModelId === model.id;
                   const hasDownloaded = model.variants.some((v) => isDownloaded(v.files));
+                  const icon = model.icon || guessIconFromFileName(model.name);
 
                   return (
                     <div
                       key={model.id}
-                      className={`p-3 rounded cursor-pointer transition-colors border bg-cyber-surface ${
+                      className={`p-3 rounded transition-colors border bg-cyber-surface ${
                         isExpanded
                           ? 'border-cyber-accent'
                           : 'border-transparent hover:bg-cyber-elevated'
@@ -1790,15 +1887,19 @@ export const LocalServerPanel: React.FC = () => {
                     >
                       {/* Card Header */}
                       <div className="flex items-center gap-3">
-                        <img
-                          src={`./icons/models/${model.icon}.svg`}
-                          alt={model.name}
-                          className="w-6 h-6 flex-shrink-0"
-                          onError={(e) => {
-                            const target = e.target as HTMLImageElement;
-                            target.style.display = 'none';
-                          }}
-                        />
+                        {icon ? (
+                          <img
+                            src={`./icons/models/${icon}.svg`}
+                            alt={model.name}
+                            className="w-6 h-6 flex-shrink-0"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.style.display = 'none';
+                            }}
+                          />
+                        ) : (
+                          <HardDrive className="w-6 h-6 flex-shrink-0 text-cyber-text-secondary" />
+                        )}
                         <div className="flex-1 min-w-0 flex flex-col justify-center">
                           <div className="flex items-center justify-between gap-2">
                             <div className="text-sm font-bold truncate leading-none text-cyber-text flex-1 min-w-0">
@@ -1874,6 +1975,7 @@ export const LocalServerPanel: React.FC = () => {
                                       </span>
                                     ) : (
                                       <button
+                                        disabled={isDownloading}
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           startDownload(model.huggingfaceRepo, variant.files);
@@ -1924,7 +2026,7 @@ export const LocalServerBottom: React.FC = () => {
     <div className="flex-shrink-0 border-t border-cyber-border/30">
       <div className="flex items-center gap-4 py-2 text-xs font-mono">
         <div
-          className="flex items-center gap-1.5 cursor-pointer hover:text-cyber-text transition-colors"
+          className="flex items-center gap-1.5 hover:text-cyber-text transition-colors"
           onClick={() => handleCopy('openai', `http://127.0.0.1:${serverPort}/v1`)}
         >
           <span className="text-cyber-text-secondary/80">OpenAI:</span>
@@ -1935,7 +2037,7 @@ export const LocalServerBottom: React.FC = () => {
         </div>
         <span className="text-cyber-border">|</span>
         <div
-          className="flex items-center gap-1.5 cursor-pointer hover:text-cyber-text transition-colors"
+          className="flex items-center gap-1.5 hover:text-cyber-text transition-colors"
           onClick={() => handleCopy('anthropic', `http://127.0.0.1:${serverPort}/anthropic`)}
         >
           <span className="text-cyber-text-secondary/80">Anthropic:</span>
