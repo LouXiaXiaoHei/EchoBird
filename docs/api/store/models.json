@@ -50,34 +50,6 @@
     "runtimes": ["llama-server"]
   },
   {
-    "id": "minicpm5-1b-claude-fable5",
-    "name": "MiniCPM5 1B Distill (Fable 5)",
-    "icon": "minicpm",
-    "description": "GnLOLot 社区蒸馏 — 基于 OpenBMB MiniCPM5 1B，发布者使用 Fable 5 风格推理数据训练，默认思考模式；文本 GGUF",
-    "huggingfaceRepo": "GnLOLot/MiniCPM5-1B-Claude-Opus-Fable5-Thinking-GGUF",
-    "variants": [
-      {
-        "quantization": "Q4_K_M",
-        "files": ["MiniCPM5-1B-Claude-Opus-Fable5-Thinking-Q4_K_M.gguf"],
-        "fileSize": 688066496,
-        "recommendedVRAM": "2 GB"
-      },
-      {
-        "quantization": "Q5_K_M",
-        "files": ["MiniCPM5-1B-Claude-Opus-Fable5-Thinking-Q5_K_M.gguf"],
-        "fileSize": 786862016,
-        "recommendedVRAM": "2 GB"
-      },
-      {
-        "quantization": "Q8_0",
-        "files": ["MiniCPM5-1B-Claude-Opus-Fable5-Thinking-Q8_0.gguf"],
-        "fileSize": 1153529792,
-        "recommendedVRAM": "2 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
     "id": "lfm2.5-1.2b-instruct",
     "name": "LFM2.5 1.2B Instruct",
     "icon": "",
@@ -172,44 +144,6 @@
         "quantization": "Q8_0",
         "files": ["Qwen3.5-2B-Q8_0.gguf"],
         "fileSize": 2012012800,
-        "recommendedVRAM": "4 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
-    "id": "granite-4.1-3b",
-    "name": "Granite 4.1 3B",
-    "icon": "granite",
-    "description": "IBM smallest — lightweight tool-use & instruction following, runs on CPU",
-    "huggingfaceRepo": "unsloth/granite-4.1-3b-GGUF",
-    "variants": [
-      {
-        "quantization": "UD-IQ2_M",
-        "fileName": "granite-4.1-3b-UD-IQ2_M.gguf",
-        "files": ["granite-4.1-3b-UD-IQ2_M.gguf"],
-        "fileSize": 1285053760,
-        "recommendedVRAM": "2 GB"
-      },
-      {
-        "quantization": "Q4_K_M",
-        "fileName": "granite-4.1-3b-Q4_K_M.gguf",
-        "files": ["granite-4.1-3b-Q4_K_M.gguf"],
-        "fileSize": 2099502400,
-        "recommendedVRAM": "3 GB"
-      },
-      {
-        "quantization": "Q6_K",
-        "fileName": "granite-4.1-3b-Q6_K.gguf",
-        "files": ["granite-4.1-3b-Q6_K.gguf"],
-        "fileSize": 2795617600,
-        "recommendedVRAM": "4 GB"
-      },
-      {
-        "quantization": "Q8_0",
-        "fileName": "granite-4.1-3b-Q8_0.gguf",
-        "files": ["granite-4.1-3b-Q8_0.gguf"],
-        "fileSize": 3619691840,
         "recommendedVRAM": "4 GB"
       }
     ],
@@ -398,32 +332,32 @@
     "runtimes": ["llama-server"]
   },
   {
-    "id": "qwen3.5-4b-opus-distill-v2",
-    "name": "Qwen3.5 4B Distill (Opus V2)",
+    "id": "qwopus3.5-4b-v3",
+    "name": "Qwopus3.5 4B V3 (Community)",
     "icon": "qwen",
-    "description": "Jackrong 社区推理蒸馏 V2 — 基于 Qwen3.5 4B，发布者使用 Opus 4.6 风格数据，侧重数学、逻辑和较精简思考；文本 GGUF",
-    "huggingfaceRepo": "Jackrong/Qwen3.5-4B-Claude-4.6-Opus-Reasoning-Distilled-v2-GGUF",
+    "description": "Qwen3.5 4B 社区结构化推理微调 — 发布者标为 Opus V2 后继，侧重可验证的分步推理和任务泛化；思考通常比 V2 更长，实验性文本 GGUF",
+    "huggingfaceRepo": "mradermacher/Qwopus3.5-4B-v3-GGUF",
+    "runtimes": ["llama-server"],
     "variants": [
       {
         "quantization": "Q4_K_M",
-        "files": ["Qwen3.5-4B.Q4_K_M.gguf"],
-        "fileSize": 2708800320,
+        "files": ["Qwopus3.5-4B-v3.Q4_K_M.gguf"],
+        "fileSize": 2708801120,
         "recommendedVRAM": "6 GB"
       },
       {
         "quantization": "Q6_K",
-        "files": ["Qwen3.5-4B.Q6_K.gguf"],
-        "fileSize": 3464051520,
+        "files": ["Qwopus3.5-4B-v3.Q6_K.gguf"],
+        "fileSize": 3464052320,
         "recommendedVRAM": "6 GB"
       },
       {
         "quantization": "Q8_0",
-        "files": ["Qwen3.5-4B.Q8_0.gguf"],
-        "fileSize": 4482399040,
+        "files": ["Qwopus3.5-4B-v3.Q8_0.gguf"],
+        "fileSize": 4482399840,
         "recommendedVRAM": "8 GB"
       }
-    ],
-    "runtimes": ["llama-server"]
+    ]
   },
   {
     "id": "negentropy-opus-4.7-4b",
@@ -468,44 +402,6 @@
         "files": ["NVIDIA-Nemotron3-Nano-4B-Q4_K_M.gguf"],
         "fileSize": 2837072864,
         "recommendedVRAM": "4 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
-    "id": "granite-4.1-8b",
-    "name": "Granite 4.1 8B",
-    "icon": "granite",
-    "description": "IBM 8B — strong tool-use, fits on 8 GB VRAM, Apache 2.0",
-    "huggingfaceRepo": "unsloth/granite-4.1-8b-GGUF",
-    "variants": [
-      {
-        "quantization": "UD-IQ2_M",
-        "fileName": "granite-4.1-8b-UD-IQ2_M.gguf",
-        "files": ["granite-4.1-8b-UD-IQ2_M.gguf"],
-        "fileSize": 3272078720,
-        "recommendedVRAM": "4 GB"
-      },
-      {
-        "quantization": "Q4_K_M",
-        "fileName": "granite-4.1-8b-Q4_K_M.gguf",
-        "files": ["granite-4.1-8b-Q4_K_M.gguf"],
-        "fileSize": 5347915136,
-        "recommendedVRAM": "8 GB"
-      },
-      {
-        "quantization": "Q6_K",
-        "fileName": "granite-4.1-8b-Q6_K.gguf",
-        "files": ["granite-4.1-8b-Q6_K.gguf"],
-        "fileSize": 7216477568,
-        "recommendedVRAM": "10 GB"
-      },
-      {
-        "quantization": "Q8_0",
-        "fileName": "granite-4.1-8b-Q8_0.gguf",
-        "files": ["granite-4.1-8b-Q8_0.gguf"],
-        "fileSize": 9345611136,
-        "recommendedVRAM": "12 GB"
       }
     ],
     "runtimes": ["llama-server"]
@@ -619,51 +515,6 @@
         "fileName": "gemma-4-12b-it-Q8_0.gguf",
         "files": ["gemma-4-12b-it-Q8_0.gguf"],
         "fileSize": 12669647680,
-        "recommendedVRAM": "16 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
-    "id": "gemma-4-12b-coder-fable5",
-    "name": "Gemma 4 12B Coder Distill",
-    "icon": "google",
-    "description": "yuxinlu1 社区 Python 编程蒸馏 — 基于 Gemma 4 12B，主训练数据来自 Composer 2.5，Fable 5 提供纠错数据；文本 GGUF",
-    "huggingfaceRepo": "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF",
-    "variants": [
-      {
-        "quantization": "Q2_K",
-        "fileName": "gemma4-coding-Q2_K.gguf",
-        "files": ["gemma4-coding-Q2_K.gguf"],
-        "fileSize": 4830147104,
-        "recommendedVRAM": "6 GB"
-      },
-      {
-        "quantization": "Q3_K_M",
-        "fileName": "gemma4-coding-Q3_K_M.gguf",
-        "files": ["gemma4-coding-Q3_K_M.gguf"],
-        "fileSize": 6087086624,
-        "recommendedVRAM": "8 GB"
-      },
-      {
-        "quantization": "Q4_K_M",
-        "fileName": "gemma4-coding-Q4_K_M.gguf",
-        "files": ["gemma4-coding-Q4_K_M.gguf"],
-        "fileSize": 7381381664,
-        "recommendedVRAM": "10 GB"
-      },
-      {
-        "quantization": "Q6_K",
-        "fileName": "gemma4-coding-Q6_K.gguf",
-        "files": ["gemma4-coding-Q6_K.gguf"],
-        "fileSize": 9786020384,
-        "recommendedVRAM": "12 GB"
-      },
-      {
-        "quantization": "Q8_0",
-        "fileName": "gemma4-coding-Q8_0.gguf",
-        "files": ["gemma4-coding-Q8_0.gguf"],
-        "fileSize": 12669645344,
         "recommendedVRAM": "16 GB"
       }
     ],
@@ -844,39 +695,29 @@
     "runtimes": ["llama-server"]
   },
   {
-    "id": "granite-4.1-30b",
-    "name": "Granite 4.1 30B (MoE)",
-    "icon": "granite",
-    "description": "IBM enterprise MoE — top tool-use & function calling, Apache 2.0",
-    "huggingfaceRepo": "unsloth/granite-4.1-30b-GGUF",
+    "id": "gemma-4-12b-agentic-fable5-v2",
+    "name": "Gemma 4 12B Agentic Distill V2",
+    "icon": "gemma",
+    "description": "yuxinlu1 社区蒸馏 V2 — 基于 Gemma 4 12B，承接原 Coder V1，增强代码、终端和工具调用；英语为主，文本 GGUF",
+    "huggingfaceRepo": "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF",
     "variants": [
       {
-        "quantization": "UD-IQ2_M",
-        "fileName": "granite-4.1-30b-UD-IQ2_M.gguf",
-        "files": ["granite-4.1-30b-UD-IQ2_M.gguf"],
-        "fileSize": 9943574464,
+        "quantization": "Q4_K_M",
+        "files": ["gemma4-v2-Q4_K_M.gguf"],
+        "fileSize": 7381381664,
         "recommendedVRAM": "12 GB"
       },
       {
-        "quantization": "Q4_K_M",
-        "fileName": "granite-4.1-30b-Q4_K_M.gguf",
-        "files": ["granite-4.1-30b-Q4_K_M.gguf"],
-        "fileSize": 17490241472,
-        "recommendedVRAM": "24 GB"
-      },
-      {
         "quantization": "Q6_K",
-        "fileName": "granite-4.1-30b-Q6_K.gguf",
-        "files": ["granite-4.1-30b-Q6_K.gguf"],
-        "fileSize": 23684179904,
-        "recommendedVRAM": "32 GB"
+        "files": ["gemma4-v2-Q6_K.gguf"],
+        "fileSize": 9786020384,
+        "recommendedVRAM": "16 GB"
       },
       {
         "quantization": "Q8_0",
-        "fileName": "granite-4.1-30b-Q8_0.gguf",
-        "files": ["granite-4.1-30b-Q8_0.gguf"],
-        "fileSize": 30674970560,
-        "recommendedVRAM": "40 GB"
+        "files": ["gemma4-v2-Q8_0.gguf"],
+        "fileSize": 12669645344,
+        "recommendedVRAM": "20 GB"
       }
     ],
     "runtimes": ["llama-server"]
@@ -986,6 +827,34 @@
     "runtimes": ["llama-server"]
   },
   {
+    "id": "granite-4.2-30b",
+    "name": "Granite 4.2 30B",
+    "icon": "granite",
+    "description": "IBM 官方 30B 密集推理模型 — 原生 128K 上下文，支持中文等多语言，面向代码和通用文本任务",
+    "huggingfaceRepo": "ibm-granite/granite-4.2-30b-GGUF",
+    "variants": [
+      {
+        "quantization": "Q4_K_M",
+        "files": ["granite-4.2-30b-Q4_K_M.gguf"],
+        "fileSize": 17721455328,
+        "recommendedVRAM": "24 GB"
+      },
+      {
+        "quantization": "Q6_K",
+        "files": ["granite-4.2-30b-Q6_K.gguf"],
+        "fileSize": 24021365472,
+        "recommendedVRAM": "32 GB"
+      },
+      {
+        "quantization": "Q8_0",
+        "files": ["granite-4.2-30b-Q8_0.gguf"],
+        "fileSize": 31111705312,
+        "recommendedVRAM": "48 GB"
+      }
+    ],
+    "runtimes": ["llama-server"]
+  },
+  {
     "id": "nemotron-3-nano-omni-30b",
     "name": "Nemotron 3 Nano Omni 30B-A3B",
     "icon": "nemotron",
@@ -1072,60 +941,6 @@
         ],
         "fileSize": 111334654784,
         "recommendedVRAM": "128 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
-    "id": "deepseek-v4-flash-0731",
-    "name": "DeepSeek V4 Flash (MoE)",
-    "icon": "deepseek",
-    "description": "DeepSeek's fastest MoE — 304B total params, FP8, 6 active experts, top reasoning & coding at workstation RAM",
-    "huggingfaceRepo": "unsloth/DeepSeek-V4-Flash-0731-GGUF",
-    "variants": [
-      {
-        "quantization": "UD-IQ1_S",
-        "files": [
-          "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00001-of-00003.gguf",
-          "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00002-of-00003.gguf",
-          "UD-IQ1_S/DeepSeek-V4-Flash-0731-UD-IQ1_S-00003-of-00003.gguf"
-        ],
-        "fileSize": 82539237792,
-        "recommendedVRAM": "96 GB"
-      },
-      {
-        "quantization": "UD-IQ2_XXS",
-        "files": [
-          "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00001-of-00003.gguf",
-          "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00002-of-00003.gguf",
-          "UD-IQ2_XXS/DeepSeek-V4-Flash-0731-UD-IQ2_XXS-00003-of-00003.gguf"
-        ],
-        "fileSize": 90860736928,
-        "recommendedVRAM": "96 GB"
-      },
-      {
-        "quantization": "UD-Q4_K_XL",
-        "files": [
-          "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00001-of-00005.gguf",
-          "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00002-of-00005.gguf",
-          "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00003-of-00005.gguf",
-          "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00004-of-00005.gguf",
-          "UD-Q4_K_XL/DeepSeek-V4-Flash-0731-UD-Q4_K_XL-00005-of-00005.gguf"
-        ],
-        "fileSize": 155095241120,
-        "recommendedVRAM": "160 GB"
-      },
-      {
-        "quantization": "UD-Q8_K_XL",
-        "files": [
-          "UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00001-of-00005.gguf",
-          "UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00002-of-00005.gguf",
-          "UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00003-of-00005.gguf",
-          "UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00004-of-00005.gguf",
-          "UD-Q8_K_XL/DeepSeek-V4-Flash-0731-UD-Q8_K_XL-00005-of-00005.gguf"
-        ],
-        "fileSize": 161869615520,
-        "recommendedVRAM": "176 GB"
       }
     ],
     "runtimes": ["llama-server"]
@@ -1236,47 +1051,6 @@
     "runtimes": ["llama-server"]
   },
   {
-    "id": "glm-5.2",
-    "name": "GLM 5.2 (MoE)",
-    "icon": "glm",
-    "description": "智谱 GLM 旗舰 MoE — 中文+coding 顶级,thinking mode;multi-shard GGUF,需 256 GB+ 内存",
-    "huggingfaceRepo": "unsloth/GLM-5.2-GGUF",
-    "variants": [
-      {
-        "quantization": "UD-IQ2_M",
-        "files": [
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00001-of-00006.gguf",
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00002-of-00006.gguf",
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00003-of-00006.gguf",
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00004-of-00006.gguf",
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00005-of-00006.gguf",
-          "UD-IQ2_M/GLM-5.2-UD-IQ2_M-00006-of-00006.gguf"
-        ],
-        "fileSize": 238577580768,
-        "recommendedVRAM": "256 GB"
-      },
-      {
-        "quantization": "UD-Q4_K_M",
-        "files": [
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00001-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00002-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00003-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00004-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00005-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00006-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00007-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00008-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00009-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00010-of-00011.gguf",
-          "UD-Q4_K_M/GLM-5.2-UD-Q4_K_M-00011-of-00011.gguf"
-        ],
-        "fileSize": 465825525088,
-        "recommendedVRAM": "480 GB"
-      }
-    ],
-    "runtimes": ["llama-server"]
-  },
-  {
     "id": "glm-5.3",
     "name": "GLM 5.3 (MoE)",
     "icon": "glm",
@@ -1318,47 +1092,38 @@
     "runtimes": ["llama-server"]
   },
   {
-    "id": "mimo-v2.5-pro",
-    "name": "MiMo V2.5 Pro (MoE)",
+    "id": "mimo-v2.6-pro-mopd",
+    "name": "MiMo V2.6 Pro MOPD (MoE)",
     "icon": "xiaomi",
-    "description": "小米 MiMo 旗舰 MoE — reasoning + coding 强,长上下文;multi-shard GGUF,需 320 GB+ 内存",
-    "huggingfaceRepo": "unsloth/MiMo-V2.5-Pro-GGUF",
+    "description": "小米 MiMo V2.6 Pro 官方升级版 — 1.02T 总参数、42B 激活，改善工具调用重复；本页仅文本推理，需 512 GB+ 内存",
+    "huggingfaceRepo": "ggml-org/MiMo-V2.6-Pro-MOPD-GGUF",
     "variants": [
       {
-        "quantization": "UD-IQ2_XXS",
+        "quantization": "Q2_K",
         "files": [
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00001-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00002-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00003-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00004-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00005-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00006-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00007-of-00008.gguf",
-          "UD-IQ2_XXS/MiMo-V2.5-Pro-UD-IQ2_XXS-00008-of-00008.gguf"
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00001-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00002-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00003-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00004-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00005-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00006-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-Q2_K-00007-of-00007.gguf"
         ],
-        "fileSize": 317152759232,
-        "recommendedVRAM": "320 GB"
+        "fileSize": 418769300160,
+        "recommendedVRAM": "512 GB"
       },
       {
-        "quantization": "UD-Q4_K_XL",
+        "quantization": "MXFP4",
         "files": [
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00001-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00002-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00003-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00004-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00005-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00006-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00007-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00008-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00009-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00010-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00011-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00012-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00013-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00014-of-00015.gguf",
-          "UD-Q4_K_XL/MiMo-V2.5-Pro-UD-Q4_K_XL-00015-of-00015.gguf"
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00001-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00002-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00003-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00004-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00005-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00006-of-00007.gguf",
+          "MiMo-V2.6-Pro-MOPD-MXFP4-00007-of-00007.gguf"
         ],
-        "fileSize": 631047926144,
+        "fileSize": 554211764672,
         "recommendedVRAM": "640 GB"
       }
     ],
