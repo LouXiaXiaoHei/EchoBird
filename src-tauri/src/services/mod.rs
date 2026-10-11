@@ -39,6 +39,7 @@ pub mod model_directory;
 pub mod model_manager;
 #[cfg(any(windows, test))]
 pub(crate) mod msix;
+pub mod musecode_proxy;
 pub mod parasite;
 pub mod process_manager;
 pub mod pulse_archive;

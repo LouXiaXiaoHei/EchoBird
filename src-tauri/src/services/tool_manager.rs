@@ -1614,6 +1614,8 @@ fn model_config_path(def: &ToolDefinition) -> Result<PathBuf, String> {
     }
     if def.id == "vscode" {
         Ok(super::tool_config_manager::vscode::settings_path())
+    } else if def.id == "musecode" {
+        Ok(super::tool_config_manager::musecode::settings_path())
     } else if matches!(def.id.as_str(), "cline" | "clinedesktop") {
         Ok(super::tool_config_manager::cline::config_path())
     } else {
@@ -2094,6 +2096,49 @@ mod tests {
             assert!(super::detect_tool(&definition).await.is_none());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn muse_cli_uses_the_shared_detector_and_never_a_stale_config_directory() {
+        use std::fs;
+        let mut paths: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/musecode/paths.json")).unwrap();
+        assert_eq!(paths.category, "CLI Code");
+        assert_eq!(paths.command, "muse");
+        assert_eq!(paths.start_command.as_deref(), Some("muse"));
+        assert_eq!(paths.api_protocol, vec!["openai"]);
+        assert!(!paths.require_config_file);
+        assert!(!paths.paths.win32.as_ref().unwrap().is_empty());
+        assert!(!paths.paths.darwin.as_ref().unwrap().is_empty());
+        assert!(!paths.paths.linux.as_ref().unwrap().is_empty());
+        let root =
+            std::env::temp_dir().join(format!("echobird-muse-detect-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let fixture_command = format!("muse-fixture-{}", uuid::Uuid::new_v4());
+        let binary = root.join(if cfg!(windows) {
+            format!("{fixture_command}.cmd")
+        } else {
+            fixture_command.clone()
+        });
+        fs::write(&binary, "fixture launcher").unwrap();
+        let declared = Some(vec![binary.to_string_lossy().into_owned()]);
+        paths.paths = crate::models::tool::PlatformPaths {
+            win32: declared.clone(),
+            darwin: declared.clone(),
+            linux: declared,
+        };
+        paths.command = fixture_command;
+        paths.detect_by_config_dir = true;
+        paths.config_dir = root.to_string_lossy().into_owned();
+        assert_eq!(
+            super::find_tool_executable(&paths, false).as_deref(),
+            binary.to_str()
+        );
+        assert_eq!(super::detect_tool(&paths).await.as_deref(), binary.to_str());
+        fs::remove_file(&binary).unwrap();
+        assert!(root.exists());
+        assert!(super::detect_tool(&paths).await.is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

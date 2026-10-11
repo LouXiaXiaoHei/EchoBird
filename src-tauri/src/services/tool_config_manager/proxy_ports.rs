@@ -59,6 +59,9 @@ fn migrate_paths(
             }
         }
     }
+    if let Err(error) = super::musecode::migrate_proxy_port(old, new) {
+        errors.push(error);
+    }
     if errors.is_empty() {
         Ok(())
     } else {

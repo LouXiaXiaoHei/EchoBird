@@ -8,6 +8,7 @@ import { AppManagerProvider } from './AppManagerProvider';
 import { AppManagerContext, useAppManager } from './context';
 import { AppManagerBottom } from './AppManagerComponents';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import museCodeDefinition from '../../../tools/musecode/paths.json';
 
 vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('../../utils/platform', () => ({ IS_WINDOWS: false }));
@@ -526,6 +527,172 @@ describe.each(['cline', 'clinedesktop'])('%s API model workflow', (tool) => {
       tool === 'cline' ? '/fixture' : undefined
     );
     expect(openDialog).toHaveBeenCalledTimes(tool === 'cline' ? 1 : 0);
+  });
+});
+
+describe('Muse Code API model workflow', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools([
+      { ...museCodeDefinition, id: 'musecode', installed: true, activeModel: 'before' },
+      { id: 'muse', name: 'Muse', category: 'Cloud Agent', installed: true, noModelConfig: true },
+    ]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'fixture-model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture-key',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+    vi.mocked(openDialog).mockResolvedValue('/fixture');
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    act(() => context.setSelectedTool('musecode'));
+  };
+
+  it('keeps selection, tool, tab and page navigation passive, including an uninstalled client', async () => {
+    await mount();
+    act(() => context.handleSelectModel('musecode', 'fixture'));
+    act(() => context.setSelectedTool('muse'));
+    act(() => context.setViewMode('install'));
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() =>
+      useToolsStore
+        .getState()
+        .setDetectedTools([{ ...museCodeDefinition, id: 'musecode', installed: false }])
+    );
+    act(() => {
+      useNavigationStore.getState().setActivePage('apps');
+      context.setSelectedTool('musecode');
+    });
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(api.listCodexAccounts).not.toHaveBeenCalled();
+    expect(api.listCursorAccounts).not.toHaveBeenCalled();
+    expect(api.startCodexLogin).not.toHaveBeenCalled();
+    expect(api.refreshCodexAccountQuota).not.toHaveBeenCalled();
+    expect(context.applyError).toBeNull();
+  });
+
+  it('applies the pending model explicitly without launching when launch is unchecked', async () => {
+    await mount();
+    act(() => {
+      context.handleSelectModel('musecode', 'fixture');
+      context.setLaunchAfterApply(false);
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledExactlyOnceWith('musecode', {
+      id: 'fixture',
+      name: 'Fixture',
+      baseUrl: 'https://example.test/v1',
+      apiKey: 'fixture-key',
+      model: 'fixture-model',
+      protocol: 'openai',
+    });
+    expect(context.detectedTools.find((tool) => tool.id === 'musecode')?.activeModel).toBe(
+      'fixture-model'
+    );
+    expect(context.toolModelConfig.muse).toBeUndefined();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it('waits for configuration before choosing a working folder and launching', async () => {
+    await mount();
+    act(() => context.handleSelectModel('musecode', 'fixture'));
+    let resolve!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(() => new Promise((r) => (resolve = r)));
+    let pending!: Promise<void>;
+    act(() => {
+      pending = context.handleLaunch();
+    });
+    expect(context.isLaunching).toBe(true);
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+    await act(async () => {
+      resolve({ success: true, message: 'ok' });
+      await pending;
+    });
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith('musecode', 'muse', '/fixture');
+    expect(openDialog).toHaveBeenCalledExactlyOnceWith({ directory: true, multiple: false });
+    expect(vi.mocked(api.applyModelToTool).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(api.startTool).mock.invocationCallOrder[0]
+    );
+  });
+
+  it('preserves the applied model and stops launch when configuration fails', async () => {
+    await mount();
+    act(() => context.handleSelectModel('musecode', 'fixture'));
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'Native storage unavailable',
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.applyError).toBe('Native storage unavailable');
+    expect(context.isLaunching).toBe(false);
+    expect(context.toolModelConfig.musecode).toBe('fixture');
+    expect(context.detectedTools.find((tool) => tool.id === 'musecode')?.activeModel).toBe(
+      'before'
+    );
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it('can launch without a model and aborts when the working folder is cancelled', async () => {
+    await mount();
+    vi.mocked(openDialog).mockResolvedValueOnce(null);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(context.isLaunching).toBe(false);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith('musecode', 'muse', '/fixture');
   });
 });
 

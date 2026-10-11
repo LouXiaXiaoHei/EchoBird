@@ -14,6 +14,7 @@ mod kimicode;
 mod mimocode;
 mod mimodesktop;
 pub(crate) mod minimaxcode;
+pub(crate) mod musecode;
 mod omp;
 mod openclaw;
 mod opencode;
@@ -291,6 +292,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         "mimocode" => return apply_mimocode(&model_info),
         "mimodesktop" => return mimodesktop::apply(&model_info),
         "minimaxcode" | "minimaxdesktop" => return minimaxcode::apply(&model_info),
+        "musecode" => return musecode::apply(&model_info),
         "cline" | "clinedesktop" => {
             return cline::apply(&model_info, tool_id == "clinedesktop").await
         }
@@ -408,6 +410,9 @@ pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
     if matches!(tool_id, "minimaxcode" | "minimaxdesktop") {
         return minimaxcode::restore();
     }
+    if tool_id == "musecode" {
+        return musecode::restore();
+    }
     if tool_id == "kimidesktop" {
         return restore_kimidesktop_to_official();
     }
@@ -484,6 +489,7 @@ pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
         "mimocode" => return read_mimocode(),
         "mimodesktop" => return mimodesktop::read(),
         "minimaxcode" | "minimaxdesktop" => return minimaxcode::read(),
+        "musecode" => return musecode::read(),
         "cline" | "clinedesktop" => return cline::read(tool_id == "clinedesktop"),
         "kimidesktop" => return read_kimidesktop(),
         "kilo" => return read_kilo(),

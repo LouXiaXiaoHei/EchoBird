@@ -79,6 +79,10 @@ static BUNDLED: BundledAssets = BundledAssets {
             include_str!("../../docs/api/tools/install/qwencode.json"),
         ),
         (
+            "musecode",
+            include_str!("../../docs/api/tools/install/musecode.json"),
+        ),
+        (
             "aider",
             include_str!("../../docs/api/tools/install/aider.json"),
         ),
@@ -788,6 +792,7 @@ pub fn run() {
             // Bind and publish actual loopback ports before the UI can read
             // them. Logging and tool paths must be ready for URL migration.
             services::anthropic_proxy::spawn_proxy_task();
+            services::musecode_proxy::spawn_proxy_task();
             services::smart_router::spawn_proxy_task();
 
             // Register shell plugin (open external URLs, folders)

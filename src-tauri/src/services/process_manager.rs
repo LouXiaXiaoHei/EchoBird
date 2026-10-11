@@ -356,9 +356,10 @@ impl ProcessManager {
         }
 
         // Codex carries its upstream in ~/.codex/config.toml + auth.json.
+        // Muse keeps the real upstream in EchoBird and reads only its local URL.
         // Configuration and launch are separate concerns, so do not inject
         // duplicate OPENAI_* environment variables.
-        if tool_id == "codex" {
+        if matches!(tool_id, "codex" | "musecode") {
             api_key_env = None;
             base_url_env = None;
             custom_api_key_env_name = None;
@@ -390,8 +391,13 @@ impl ProcessManager {
             // (npm-installed tools like openclaw.cmd, codex.cmd, opencode.cmd).
             // Resolve cmd.exe via %COMSPEC% / %SystemRoot%\System32 instead of
             // relying on PATH — some users have System32 stripped from PATH.
-            let mut cmd = Command::new(resolve_cmd_exe());
-            cmd.args(["/C", &full_command]);
+            let mut cmd = if tool_id == "musecode" {
+                musecode_windows_terminal(&full_command, &work_dir)
+            } else {
+                let mut cmd = Command::new(resolve_cmd_exe());
+                cmd.args(["/C", &full_command]);
+                cmd
+            };
             cmd.current_dir(&work_dir);
 
             // Augment PATH with the detected tool's bin dir so a bare
@@ -436,24 +442,31 @@ impl ProcessManager {
                 cmd.env("OPENAI_BASE_URL", url);
             }
 
-            // CREATE_NEW_CONSOLE: visible terminal window for TUI tools
-            // CREATE_NEW_PROCESS_GROUP: independent process
-            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE);
-
-            match cmd.spawn() {
-                Ok(child) => {
-                    let pid = child.id();
-                    log::info!(
-                        "[ProcessManager] Tool {} started with PID: {}",
-                        tool_id,
-                        pid
-                    );
-                    self.processes
-                        .insert(tool_id.to_string(), ProcessInfo::new(pid));
-                    Ok(())
+            let pid = if tool_id == "musecode" {
+                let output = cmd.output().map_err(|e| format!("Spawn error: {e}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "Failed to launch Muse Code: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
                 }
-                Err(e) => Err(format!("Spawn error: {}", e)),
-            }
+                String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .map_err(|e| format!("Failed to read Muse Code terminal PID: {e}"))?
+            } else {
+                // Visible terminal window, independent of the parent process.
+                cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE);
+                cmd.spawn().map_err(|e| format!("Spawn error: {e}"))?.id()
+            };
+            log::info!(
+                "[ProcessManager] Tool {} started with PID: {}",
+                tool_id,
+                pid
+            );
+            self.processes
+                .insert(tool_id.to_string(), ProcessInfo::new(pid));
+            Ok(())
         }
 
         // Non-Windows: TUI tools (claude/codex/opencode etc.) need a real
@@ -463,6 +476,18 @@ impl ProcessManager {
         // the Codex native path can share the exact same mechanism.
         #[cfg(not(windows))]
         {
+            let full_command = if tool_id == "musecode" {
+                let executable = crate::services::tool_manager::get_tool_declared_exe_path(tool_id)
+                    .map(std::path::PathBuf::from);
+                musecode_unix_command(
+                    &full_command,
+                    crate::services::tool_config_manager::musecode::managed_config_home()
+                        .as_deref(),
+                    executable.as_deref(),
+                )
+            } else {
+                full_command
+            };
             let mut env_pairs: Vec<(String, String)> = Vec::new();
             if let Some(ref key) = api_key_env {
                 env_pairs.push(("OPENAI_API_KEY".to_string(), key.clone()));
@@ -1156,13 +1181,55 @@ fn resolve_cmd_exe() -> std::path::PathBuf {
     std::path::PathBuf::from("cmd")
 }
 
+#[cfg(windows)]
+fn musecode_windows_terminal(command: &str, cwd: &std::path::Path) -> Command {
+    // CREATE_NEW_CONSOLE alone still inherits a development client's log pipes.
+    // Start-Process creates console handles for Muse's TUI and trust prompt.
+    let powershell = std::env::var_os("SystemRoot")
+        .map(|root| {
+            std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe")
+        })
+        .unwrap_or_else(|| "powershell.exe".into());
+    let mut launcher = crate::utils::process::command(powershell);
+    launcher
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "$ErrorActionPreference='Stop'; $child=Start-Process -FilePath $env:ECHOBIRD_CLI_CMD_EXE -ArgumentList ('/D /S /C \"' + $env:ECHOBIRD_CLI_COMMAND + '\"') -WorkingDirectory $env:ECHOBIRD_CLI_CWD -WindowStyle Normal -PassThru; Write-Output $child.Id",
+        ])
+        .env("ECHOBIRD_CLI_CMD_EXE", resolve_cmd_exe())
+        .env("ECHOBIRD_CLI_COMMAND", command)
+        .env("ECHOBIRD_CLI_CWD", cwd);
+    launcher
+}
+
 // Single-quote-wrap a string for safe inclusion in a POSIX shell command
 // line. Embedded single quotes become '\''. Used to quote binary paths and
 // env values that get spliced into `shell -c` strings (macOS launch script
 // and the Codex CLI native path).
-#[cfg(not(windows))]
+#[cfg(any(not(windows), test))]
 fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(any(not(windows), test))]
+fn musecode_unix_command(
+    command: &str,
+    config_home: Option<&std::path::Path>,
+    executable: Option<&std::path::Path>,
+) -> String {
+    let command = match (command, executable) {
+        ("muse", Some(path)) => shell_single_quote(&path.to_string_lossy()),
+        _ => command.to_string(),
+    };
+    match config_home {
+        Some(home) => format!(
+            "XDG_CONFIG_HOME={} {command}",
+            shell_single_quote(&home.to_string_lossy())
+        ),
+        None => command,
+    }
 }
 
 // Wrap a user command so the terminal stays open when the tool exits quickly
@@ -1356,6 +1423,162 @@ mod tests {
 
     #[cfg(windows)]
     use super::openscience_windows_data_dir_for;
+
+    #[cfg(windows)]
+    #[test]
+    fn muse_windows_terminal_has_console_handles_with_a_piped_parent() {
+        use std::os::windows::process::CommandExt;
+        use std::time::{Duration, Instant};
+
+        let dir =
+            std::env::temp_dir().join(format!("echobird-muse-launch-{}", uuid::Uuid::new_v4()));
+        let cwd = dir.join("项目 folder & O'Brien");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let result = dir.join("result.json");
+        std::fs::write(
+            dir.join("probe.ps1"),
+            r#"param([string]$Label)
+Add-Type 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int id); [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr handle, out uint mode); }'
+$handles = @(-10,-11,-12) | ForEach-Object { $mode=0; [ConsoleProbe]::GetConsoleMode([ConsoleProbe]::GetStdHandle($_),[ref]$mode) }
+$result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:ECHOBIRD_LAUNCH_FIXTURE } | ConvertTo-Json -Compress
+[IO.File]::WriteAllText($env:ECHOBIRD_LAUNCH_RESULT,$result)
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("probe.cmd"),
+            "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -ExecutionPolicy Bypass -File \"%~dp0probe.ps1\" %*\r\n",
+        )
+        .unwrap();
+        let marker = "argument space & O'Brien";
+        for (command, independent) in [
+            ("probe".to_string(), false),
+            (format!("probe \"{marker}\""), true),
+            (
+                format!("\"{}\" \"{marker}\"", dir.join("probe.cmd").display()),
+                true,
+            ),
+        ] {
+            let mut launcher = if independent {
+                super::musecode_windows_terminal(&command, &cwd)
+            } else {
+                let mut launcher = std::process::Command::new(super::resolve_cmd_exe());
+                launcher.args(["/C", &command]).creation_flags(0x00000210);
+                launcher
+            };
+            let mut path = dir.as_os_str().to_os_string();
+            path.push(";");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            let output = launcher
+                .current_dir(&cwd)
+                .env("PATH", path)
+                .env("ECHOBIRD_LAUNCH_FIXTURE", "preserved")
+                .env("ECHOBIRD_LAUNCH_RESULT", &result)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if independent {
+                let pid = String::from_utf8_lossy(&output.stdout)
+                    .trim()
+                    .parse::<u32>()
+                    .unwrap();
+                let waited = crate::utils::process::command(launcher.get_program())
+                    .args([
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "Get-Process -Id $env:ECHOBIRD_LAUNCH_PID -ErrorAction SilentlyContinue | Wait-Process -Timeout 10 -ErrorAction Stop",
+                    ])
+                    .env("ECHOBIRD_LAUNCH_PID", pid.to_string())
+                    .output()
+                    .unwrap();
+                assert!(waited.status.success());
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let value: serde_json::Value = loop {
+                if let Ok(value) = std::fs::read(&result)
+                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(std::io::Error::other))
+                {
+                    break value;
+                }
+                assert!(Instant::now() < deadline, "console probe did not finish");
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            std::fs::remove_file(&result).unwrap();
+            assert_eq!(
+                value["handles"],
+                serde_json::json!([independent, independent, independent])
+            );
+            assert_eq!(value["cwd"], cwd.to_string_lossy().as_ref());
+            assert_eq!(value["label"], if independent { marker } else { "" });
+            assert_eq!(value["marker"], "preserved");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn muse_managed_unix_command_pins_the_selected_config_after_login_shell_setup() {
+        let selected = std::path::Path::new("/selected config/it's mine");
+        assert_eq!(
+            super::musecode_unix_command("muse", Some(selected), None),
+            "XDG_CONFIG_HOME='/selected config/it'\\''s mine' muse"
+        );
+        assert_eq!(super::musecode_unix_command("muse", None, None), "muse");
+        let executable = std::path::Path::new("/home/user's tools/.local/bin/muse");
+        assert_eq!(
+            super::musecode_unix_command("muse", Some(selected), Some(executable)),
+            "XDG_CONFIG_HOME='/selected config/it'\\''s mine' '/home/user'\\''s tools/.local/bin/muse'"
+        );
+        assert_eq!(
+            super::musecode_unix_command("muse", None, Some(executable)),
+            "'/home/user'\\''s tools/.local/bin/muse'"
+        );
+        assert_eq!(
+            super::musecode_unix_command("/custom/muse --model custom", None, Some(executable)),
+            "/custom/muse --model custom"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn muse_unix_launch_uses_detected_executable_outside_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("echobird-muse-launch-{}", uuid::Uuid::new_v4()));
+        let bin = root.join("user's tools");
+        let cwd = root.join("项目 folder");
+        let config = root.join("selected config");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let executable = bin.join("muse");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$PWD\" \"$XDG_CONFIG_HOME\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                &super::musecode_unix_command("muse", Some(&config), Some(&executable)),
+            ])
+            .env("PATH", "/usr/bin:/bin")
+            .env("XDG_CONFIG_HOME", "/other/config")
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{}\n{}\n", cwd.display(), config.display())
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn workbuddy_process_matching_is_scoped_to_the_resolved_executable() {
