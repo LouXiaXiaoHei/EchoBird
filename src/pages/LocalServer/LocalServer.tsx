@@ -176,12 +176,8 @@ export const LocalServerMain: React.FC = () => {
   // Configuration state
   const setServerPort = (v: number) => setServerPortCtx(v);
   const [gpuLayers, setGpuLayers] = useState<number>(-1);
-  // Default to 32K so Mother Agent works out of the box. The agent's system
-  // prompt + bundled tool definitions weigh ~22K tokens; 4K (the previous
-  // default) caused an instant `exceed_context_size_error` from llama-server
-  // on the very first user message, which read in chat as "the app doesn't
-  // work at all." Users on small GPUs can still drop back to 4K/8K manually
-  // for non-agent workloads. (See issue #50.)
+  // Default to 32K for Mother Agent's system prompt and tool definitions.
+  // Smaller contexts are available for lightweight non-agent workloads.
   const [contextSize, setContextSize] = useState<number>(32768);
 
   // System info: OS / arch / GPU — used for runtime filtering and COMPUTE option
@@ -913,11 +909,8 @@ export const LocalServerMain: React.FC = () => {
               onChange={(v) => setContextSize(Number(v))}
               disabled={isRunning}
               options={[
-                // 32K is the minimum: every model in our store advertises
-                // tool calling, and Mother Agent's system prompt + tool
-                // definitions weigh ~22K tokens. Anything below 32K
-                // dead-ends users with `exceed_context_size_error` the
-                // moment they try to use the agent flow.
+                { id: '8192', label: '8K' },
+                { id: '16384', label: '16K' },
                 { id: '32768', label: '32K' },
                 { id: '65536', label: '64K' },
                 { id: '131072', label: '128K' },
