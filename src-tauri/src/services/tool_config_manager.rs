@@ -23,6 +23,7 @@ mod proxy_ports;
 mod qwencode;
 mod relay;
 mod vibe_trading;
+pub(crate) mod vscode;
 mod workbuddy;
 mod zcode;
 
@@ -276,6 +277,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 
     // Dispatch custom tools to their own handlers
     match tool_id {
+        "vscode" => return vscode::apply(&model_info),
         // OpenClaw: direct write to ~/.openclaw/openclaw.json (no patch needed since v2026.3.13)
         "openclaw" => return apply_openclaw(&model_info),
 
@@ -361,6 +363,9 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 /// the tool itself regenerates a fresh, vendor-default config on next launch.
 /// Used by the App Desktop "restore to official" flow.
 pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
+    if tool_id == "vscode" {
+        return vscode::restore();
+    }
     if matches!(tool_id, "cline" | "clinedesktop") {
         return ApplyResult {
             success: false,
@@ -473,6 +478,7 @@ pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
 
 pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
     match tool_id {
+        "vscode" => return vscode::read(),
         "openclaw" => return read_openclaw(),
         "opencode" | "opencodedesktop" => return read_opencode(),
         "mimocode" => return read_mimocode(),

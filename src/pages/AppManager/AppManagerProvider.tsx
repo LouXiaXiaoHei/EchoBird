@@ -149,6 +149,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       ? detectedTools.some((tool) => ids.includes(tool.id) && tool.installed)
       : accountsEnabled && ids.includes(selectedTool ?? '');
   const [isLaunching, setIsLaunching] = useState(false);
+  const launchGeneration = useRef(0);
   const [applyError, setApplyError] = useState<string | null>(null);
   const isCodexTool = selectedTool === 'codex' || selectedTool === 'chatgptdesktop';
   const codexManaged = useCodexAccounts(
@@ -670,11 +671,19 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
     if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) return;
+    const generation = ++launchGeneration.current;
+    const finishLaunch = () => {
+      if (launchGeneration.current === generation) setIsLaunching(false);
+    };
+    const startCooldown = () => {
+      setTimeout(finishLaunch, 3000);
+    };
     setIsLaunching(true);
     const switchingClaudeAccount =
       (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
       (selectedTool === 'claudedesktop' && !!claudeDesktopAccounts.selectedId);
     if (
+      selectedTool !== 'vscode' &&
       !switchingClaudeAccount &&
       !(workBuddyEdition && workBuddyAccounts.selectedId) &&
       !((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) &&
@@ -690,7 +699,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         antigravityAccounts.selectedId
       )
     )
-      setTimeout(() => setIsLaunching(false), 3000); // 3 second cooldown
+      startCooldown();
 
     const toolData = detectedTools.find((t) => t.id === selectedTool);
     const isLaunchable = !!toolData?.launchFile;
@@ -708,17 +717,17 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         await antigravityAccounts.reload();
       } catch (error) {
         setApplyError(accountError(error, t));
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
-      setTimeout(() => setIsLaunching(false), 3000);
+      startCooldown();
     } else if (isCodexTool && selectedCodexAccountId) {
       const restoreResult = await applyRestore(selectedTool);
       if (restoreResult !== true) {
         setApplyError(
           typeof restoreResult === 'string' ? accountError(restoreResult, t) : t('key.destroyed')
         );
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
       try {
@@ -726,7 +735,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         await loadCodexAccounts();
       } catch (error) {
         setApplyError(accountError(error, t));
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
     } else if (selectedTool === 'dsh' && deepSeekAccounts.selectedId) {
@@ -740,7 +749,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (selectedTool === 'grokbot' && grokBotAccounts.selectedId) {
@@ -751,7 +760,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (selectedTool === 'cursor' && cursorAccounts.selectedId) {
@@ -762,7 +771,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (
@@ -775,7 +784,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (selectedTool === 'grok' && grokAccounts.selectedId) {
@@ -784,10 +793,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         if (restored !== true)
           throw new Error(typeof restored === 'string' ? restored : t('key.destroyed'));
         await grokAccounts.switchAccount();
-        setTimeout(() => setIsLaunching(false), 3000);
+        startCooldown();
       } catch (error) {
         setApplyError(accountError(error, t));
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
     } else if (selectedTool === 'zcode' && zcodeAccounts.selectedId) {
@@ -801,7 +810,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (workBuddyEdition && workBuddyAccounts.selectedId) {
@@ -812,7 +821,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) {
@@ -838,7 +847,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
-        setIsLaunching(false);
+        finishLaunch();
       }
       return;
     } else if (selectedTool === 'claudecode' && claudeCodeAccounts.selectedId) {
@@ -848,10 +857,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           throw new Error(typeof restored === 'string' ? restored : t('key.destroyed'));
         await api.switchClaudeCodeAccount(claudeCodeAccounts.selectedId);
         await claudeCodeAccounts.reload();
-        setTimeout(() => setIsLaunching(false), 3000);
+        startCooldown();
       } catch (error) {
         setApplyError(accountError(error, t));
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
     } else if (
@@ -866,7 +875,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         : await applyModelConfig(selectedTool, pending);
       if (applyResult !== true) {
         setApplyError(typeof applyResult === 'string' ? applyResult : t('key.destroyed'));
-        setIsLaunching(false);
+        finishLaunch();
         return;
       }
       // Only Xiaomi's MiMo models get the apply pulse + sound; every other model
@@ -930,14 +939,14 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           try {
             const picked = await openDialog({ directory: true, multiple: false });
             if (typeof picked !== 'string' || !picked) {
-              setIsLaunching(false);
+              finishLaunch();
               return;
             }
             cwd = picked;
           } catch (e) {
             console.error('[AppManager] folder picker failed:', e);
             setApplyError(e instanceof Error ? e.message : String(e));
-            setIsLaunching(false);
+            finishLaunch();
             return;
           }
         }
@@ -949,6 +958,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         }
       }
     }
+    if (selectedTool === 'vscode') startCooldown();
   };
 
   return (

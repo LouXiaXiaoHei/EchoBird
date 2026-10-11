@@ -1612,7 +1612,9 @@ fn model_config_path(def: &ToolDefinition) -> Result<PathBuf, String> {
         return super::zcode_paths::resolve()
             .map(|paths| paths.config_dir.join("provider_config.json"));
     }
-    if matches!(def.id.as_str(), "cline" | "clinedesktop") {
+    if def.id == "vscode" {
+        Ok(super::tool_config_manager::vscode::settings_path())
+    } else if matches!(def.id.as_str(), "cline" | "clinedesktop") {
         Ok(super::tool_config_manager::cline::config_path())
     } else {
         Ok(expand_path(&def.config_mapping.config_file))
@@ -1864,7 +1866,11 @@ async fn scan_single_tool(def: ToolDefinition) -> DetectedTool {
         // implement a CLI fast-path for --version, so invoking it just opens
         // the main window. noModelConfig is the right gate — it's already the
         // marker for "this is a launch-only desktop app, not a CLI we query".
-        if version.is_none() && !pc.command.is_empty() && !pc.no_model_config {
+        if def.id == "vscode" {
+            version = get_tool_exe_path("vscode").and_then(|path| {
+                super::tool_config_manager::vscode::installed_version(Path::new(&path))
+            });
+        } else if version.is_none() && !pc.command.is_empty() && !pc.no_model_config {
             version = platform::get_version(&pc.command).await;
         }
         // Desktop GUI apps have no CLI `--version` (their `command` is empty),

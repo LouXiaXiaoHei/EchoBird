@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import type { LocalTool, ModelConfig } from '../../api/types';
 import type { TKey } from '../../i18n';
+import vscodeDefinition from '../../../tools/vscode/paths.json';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { AppManagerContext, type AppManagerContextType } from './context';
 import { AccountSectionRow } from './AccountSectionPrimitives';
@@ -186,6 +187,57 @@ describe('ModelListSection', () => {
     expect(markup).not.toContain('api.x.ai');
     expect(markup).toContain('Cloud Model');
     expect(markup).toContain('Local Model');
+  });
+});
+
+describe('VS Code model panel', () => {
+  it.each([false, true])('shows compatible models only when installed: %s', async (installed) => {
+    vi.stubGlobal('__APP_EDITION__', 'full');
+    const { AppManagerPanel, AppManagerBottom } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    useNavigationStore.setState({ activePage: 'apps' });
+    const context = {
+      selectedTool: 'vscode',
+      selectedToolData: { ...vscodeDefinition, id: 'vscode', installed },
+      smartRouterEnabled: true,
+      userModels: [
+        ...models,
+        {
+          internalId: 'anthropic-model',
+          name: 'Anthropic Model',
+          modelId: 'anthropic-model-id',
+          baseUrl: '',
+          anthropicUrl: 'https://example.test/anthropic',
+          apiKey: '',
+        },
+      ],
+      toolModelConfig: { vscode: 'cloud-model' },
+      handleSelectModel: vi.fn(),
+      viewMode: 'desktop',
+      launchAfterApply: false,
+      agreedConfigPolicy: true,
+      isLaunching: false,
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+            <AppManagerBottom />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    for (const name of ['Cloud Model', 'Local Model', 'Auto Router', 'Anthropic Model']) {
+      expect(markup.includes(name)).toBe(installed);
+    }
+    expect(markup).not.toContain('agent.noModelConfig');
+    expect(markup).not.toContain('agent.addAccount');
+    expect(markup).not.toContain('role="switch"');
+    expect(markup).not.toContain('agent.restore');
+    expect(markup).toContain(installed ? 'btn.modifyOnly' : 'btn.installOneClick');
+    expect(context.handleSelectModel).not.toHaveBeenCalled();
   });
 });
 

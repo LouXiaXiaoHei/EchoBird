@@ -529,6 +529,408 @@ describe.each(['cline', 'clinedesktop'])('%s API model workflow', (tool) => {
   });
 });
 
+describe('VS Code API model workflow', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools([
+      {
+        id: 'vscode',
+        name: 'Visual Studio Code',
+        category: 'IDE',
+        installed: true,
+        activeModel: 'before',
+        apiProtocol: ['openai', 'anthropic'],
+      },
+      {
+        id: 'cline',
+        name: 'Cline',
+        category: 'CLI Code',
+        installed: true,
+        activeModel: 'cline-before',
+      },
+    ]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'fixture-model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture-key',
+      },
+      {
+        internalId: 'anthropic-fixture',
+        name: 'Anthropic Fixture',
+        modelId: 'anthropic-model',
+        baseUrl: '',
+        anthropicUrl: 'https://example.test/anthropic',
+        apiKey: 'fixture-key',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    act(() => context.setSelectedTool('vscode'));
+  };
+
+  it('keeps selection and tool, tab and page navigation passive, including an uninstalled client', async () => {
+    await mount();
+    act(() => context.handleSelectModel('vscode', 'fixture'));
+    act(() => context.setSelectedTool('cline'));
+    act(() => context.setViewMode('install'));
+    act(() => useNavigationStore.getState().setActivePage('myProjects'));
+    act(() =>
+      useToolsStore
+        .getState()
+        .setDetectedTools([
+          { id: 'vscode', name: 'Visual Studio Code', category: 'IDE', installed: false },
+        ])
+    );
+    act(() => {
+      useNavigationStore.getState().setActivePage('apps');
+      context.setViewMode('desktop');
+      context.setSelectedTool('vscode');
+    });
+    await act(async () => {
+      await vi.runOnlyPendingTimersAsync();
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(api.listCodexAccounts).not.toHaveBeenCalled();
+    expect(api.listCursorAccounts).not.toHaveBeenCalled();
+    expect(api.startCodexLogin).not.toHaveBeenCalled();
+    expect(api.refreshCodexAccountQuota).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(context.applyError).toBeNull();
+  });
+
+  it.each([
+    ['fixture', 'openai', 'https://example.test/v1', 'fixture-model'],
+    ['anthropic-fixture', 'anthropic', 'https://example.test/anthropic', 'anthropic-model'],
+  ])(
+    'applies %s explicitly and updates only VS Code without launching',
+    async (id, protocol, baseUrl, model) => {
+      await mount();
+      act(() => {
+        context.handleSelectModel('vscode', id);
+        context.setLaunchAfterApply(false);
+      });
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      expect(api.applyModelToTool).toHaveBeenCalledWith('vscode', {
+        id,
+        name: id === 'fixture' ? 'Fixture' : 'Anthropic Fixture',
+        baseUrl,
+        apiKey: 'fixture-key',
+        model,
+        protocol,
+      });
+      expect(context.detectedTools.find((tool) => tool.id === 'vscode')?.activeModel).toBe(model);
+      expect(context.detectedTools.find((tool) => tool.id === 'cline')?.activeModel).toBe(
+        'cline-before'
+      );
+      expect(context.toolModelConfig.cline).toBeUndefined();
+      expect(api.startTool).not.toHaveBeenCalled();
+      expect(openDialog).not.toHaveBeenCalled();
+    }
+  );
+
+  it('waits for configuration to finish before starting the existing IDE launch flow', async () => {
+    await mount();
+    act(() => context.handleSelectModel('vscode', 'fixture'));
+    let resolve!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        })
+    );
+    let pending!: Promise<void>;
+    act(() => {
+      pending = context.handleLaunch();
+    });
+    expect(context.isLaunching).toBe(true);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledOnce();
+    await act(async () => {
+      resolve({ success: true, message: 'ok' });
+      await pending;
+    });
+    expect(api.startTool).toHaveBeenCalledWith('vscode', undefined, undefined);
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+  });
+
+  it('keeps the action pending until IDE launch finishes', async () => {
+    await mount();
+    act(() => context.handleSelectModel('vscode', 'fixture'));
+    let resolve!: () => void;
+    vi.mocked(api.startTool).mockImplementationOnce(
+      () =>
+        new Promise<void>((r) => {
+          resolve = r;
+        })
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = context.handleLaunch();
+    });
+    expect(api.startTool).toHaveBeenCalledOnce();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+      await context.handleLaunch();
+    });
+    expect(context.isLaunching).toBe(true);
+    expect(api.applyModelToTool).toHaveBeenCalledOnce();
+    expect(api.startTool).toHaveBeenCalledOnce();
+    await act(async () => {
+      resolve();
+      await pending;
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it('ignores the previous failed tool cooldown while VS Code is pending', async () => {
+    await mount();
+    act(() => {
+      context.setSelectedTool('cline');
+      context.handleSelectModel('cline', 'fixture');
+    });
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'Unavailable',
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.isLaunching).toBe(false);
+    act(() => {
+      context.setSelectedTool('vscode');
+      context.handleSelectModel('vscode', 'fixture');
+    });
+    let resolve!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        })
+    );
+    let pending!: Promise<void>;
+    act(() => {
+      pending = context.handleLaunch();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(2);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      resolve({ success: true, message: 'ok' });
+      await pending;
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+    expect(api.startTool).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a previous tool failure while VS Code configuration is pending', async () => {
+    await mount();
+    act(() => {
+      context.setSelectedTool('cline');
+      context.handleSelectModel('cline', 'fixture');
+      context.setLaunchAfterApply(false);
+    });
+    let resolvePrevious!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePrevious = resolve;
+        })
+    );
+    let previousPending!: Promise<void>;
+    act(() => {
+      previousPending = context.handleLaunch();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3500);
+    });
+    expect(context.isLaunching).toBe(false);
+    act(() => {
+      context.setSelectedTool('vscode');
+      context.handleSelectModel('vscode', 'fixture');
+    });
+    let resolveCurrent!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCurrent = resolve;
+        })
+    );
+    let currentPending!: Promise<void>;
+    act(() => {
+      currentPending = context.handleLaunch();
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      resolvePrevious({ success: false, message: 'Unavailable' });
+      await previousPending;
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    const applyCountWhilePending = vi.mocked(api.applyModelToTool).mock.calls.length;
+    await act(async () => {
+      resolveCurrent({ success: true, message: 'ok' });
+      await currentPending;
+    });
+    expect(applyCountWhilePending).toBe(2);
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancel', 'error'])(
+    'ignores the previous tool folder picker %s while VS Code configuration is pending',
+    async (outcome) => {
+      await mount();
+      act(() => {
+        context.setSelectedTool('cline');
+        context.handleSelectModel('cline', 'fixture');
+      });
+      let resolvePrevious!: (value: { success: boolean; message: string }) => void;
+      vi.mocked(api.applyModelToTool).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePrevious = resolve;
+          })
+      );
+      let previousPending!: Promise<void>;
+      act(() => {
+        previousPending = context.handleLaunch();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      expect(context.isLaunching).toBe(false);
+      act(() => {
+        context.setSelectedTool('vscode');
+        context.handleSelectModel('vscode', 'fixture');
+        context.setLaunchAfterApply(false);
+      });
+      let resolveCurrent!: (value: { success: boolean; message: string }) => void;
+      vi.mocked(api.applyModelToTool).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveCurrent = resolve;
+          })
+      );
+      let currentPending!: Promise<void>;
+      act(() => {
+        currentPending = context.handleLaunch();
+      });
+      expect(context.isLaunching).toBe(true);
+      if (outcome === 'cancel') vi.mocked(openDialog).mockResolvedValueOnce(null);
+      else vi.mocked(openDialog).mockRejectedValueOnce(new Error('Picker unavailable'));
+      await act(async () => {
+        resolvePrevious({ success: true, message: 'ok' });
+        await previousPending;
+      });
+      expect(openDialog).toHaveBeenCalledWith({ directory: true, multiple: false });
+      const launchingAfterPicker = context.isLaunching;
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      const applyCountWhilePending = vi.mocked(api.applyModelToTool).mock.calls.length;
+      await act(async () => {
+        resolveCurrent({ success: true, message: 'ok' });
+        await currentPending;
+      });
+      expect(applyCountWhilePending).toBe(2);
+      expect(launchingAfterPicker).toBe(true);
+      expect(api.startTool).not.toHaveBeenCalled();
+    }
+  );
+
+  it('preserves the applied model and prevents launch when configuration fails', async () => {
+    await mount();
+    act(() => context.handleSelectModel('vscode', 'fixture'));
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'Invalid settings',
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.applyError).toBe('Invalid settings');
+    expect(context.isLaunching).toBe(false);
+    expect(context.detectedTools.find((tool) => tool.id === 'vscode')?.activeModel).toBe('before');
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it('launches without writing configuration when the write policy is unchecked', async () => {
+    await mount();
+    act(() => {
+      context.handleSelectModel('vscode', 'fixture');
+      context.setAgreedConfigPolicy(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).toHaveBeenCalledWith('vscode', undefined, undefined);
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(context.detectedTools.find((tool) => tool.id === 'vscode')?.activeModel).toBe('before');
+  });
+});
+
 const accountTools = [
   'grokbot',
   'cursor',
