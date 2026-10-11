@@ -1275,7 +1275,7 @@ function FreeModelProviderRow({
   const openDocs = () => shellOpen(group.docsUrl).catch(() => window.open(group.docsUrl, '_blank'));
 
   return (
-    <div className="free-model-provider-enter relative flex items-stretch rounded overflow-hidden bg-cyber-surface">
+    <div className="relative flex items-stretch rounded overflow-hidden bg-cyber-surface">
       <button
         type="button"
         onClick={onAdd}

@@ -166,10 +166,6 @@
   animation: free-model-scan-dot-three 1.2s steps(1, end) infinite;
 }
 
-.free-model-provider-enter {
-  animation: free-model-provider-in 180ms ease-out both;
-}
-
 .free-model-route-node:hover {
   background: rgb(var(--bg-elevated-rgb));
 }
@@ -208,17 +204,6 @@
   }
 }
 
-@keyframes free-model-provider-in {
-  from {
-    opacity: 0;
-    transform: translateY(5px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 @keyframes free-model-scan-dot-two {
   0%,
   32% {
@@ -244,8 +229,7 @@
 @media (prefers-reduced-motion: reduce) {
   .free-model-route-path,
   .free-model-route-glow,
-  .free-model-route-node,
-  .free-model-provider-enter {
+  .free-model-route-node {
     animation: none;
   }
 
