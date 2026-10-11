@@ -15,6 +15,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { MiniSelect } from '../../components/MiniSelect';
+import { ViewModeTabs } from '../../components/ViewModeTabs';
 import { useI18n } from '../../hooks/useI18n';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useDownload } from '../../components/DownloadContext';
@@ -1550,28 +1551,14 @@ export const LocalServerPanel: React.FC = () => {
     <>
       {/* ===== Tab Header ===== */}
       <div className="h-10 px-2 flex items-center justify-between bg-transparent">
-        <div className="flex gap-1">
-          <button
-            onClick={() => setActiveTab('local')}
-            className={`px-3.5 py-2 text-[14px] font-semibold rounded transition-colors ${
-              activeTab === 'local'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('server.local')}
-          </button>
-          <button
-            onClick={() => setActiveTab('store')}
-            className={`px-3.5 py-2 text-[14px] font-semibold rounded transition-colors ${
-              activeTab === 'store'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('server.store')}
-          </button>
-        </div>
+        <ViewModeTabs
+          value={activeTab}
+          onChange={setActiveTab}
+          options={[
+            { value: 'local', label: t('server.local') },
+            { value: 'store', label: t('server.store') },
+          ]}
+        />
         {/* VRAM total — sums across all GPUs (e.g. 4× H100 → 320GB) */}
         {gpuVramGb > 0 && (
           <span className="text-[10px] text-cyber-text-muted font-mono">{gpuVramGb}GB</span>

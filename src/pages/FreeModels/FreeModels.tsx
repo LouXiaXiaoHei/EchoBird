@@ -1445,7 +1445,10 @@ export function FreeModelsPanel() {
   return (
     <div className="free-model-router h-full min-h-0 flex flex-col">
       <div className="h-10 shrink-0 px-2 mb-2 flex items-center justify-between gap-2">
-        <div role="tablist" className="flex items-center gap-1">
+        <div
+          role="tablist"
+          className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden"
+        >
           {(['saved', 'free'] as const).map((tab, index, tabs) => (
             <button
               key={tab}
@@ -1467,10 +1470,10 @@ export function FreeModelsPanel() {
                   );
                 tabButtons?.[next]?.focus();
               }}
-              className={`px-3.5 py-2 text-[14px] font-semibold rounded transition-colors ${
+              className={`view-mode-tab px-3 py-1.5 text-sm font-mono transition-[color] ${
                 activeTab === tab
                   ? 'bg-cyber-elevated text-cyber-text'
-                  : 'text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-elevated'
+                  : 'text-cyber-text-secondary hover:text-cyber-text'
               }`}
             >
               {t(tab === 'saved' ? 'freeModels.tab.saved' : 'freeModels.tab.free')}
