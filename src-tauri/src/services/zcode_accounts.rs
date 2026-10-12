@@ -86,22 +86,8 @@ fn store_path() -> Result<PathBuf, String> {
     Ok(home()?.join(".echobird/zcode-accounts.json"))
 }
 
-pub(super) fn native_dir() -> Result<PathBuf, String> {
-    let home = home()?;
-    let settings = read_map(&home.join(".zcode/v2/setting.json"))?;
-    let base = settings
-        .get("dataBaseDir")
-        .and_then(Value::as_str)
-        .filter(|v| !v.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("ZCODE_DATA_BASE_DIR")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .map(PathBuf::from)
-        })
-        .unwrap_or(home);
-    Ok(base.join(".zcode/v2"))
+fn native_dir() -> Result<PathBuf, String> {
+    Ok(super::zcode_paths::resolve()?.config_dir)
 }
 
 fn device_mid() -> Result<String, String> {
@@ -645,9 +631,12 @@ pub async fn poll_login(login_id: &str) -> Result<Option<Account>, String> {
     Ok(Some(result))
 }
 
-fn write_native(saved: &Saved, dir: &std::path::Path) -> Result<(), String> {
+fn write_native(
+    saved: &Saved,
+    dir: &std::path::Path,
+    settings: &std::path::Path,
+) -> Result<(), String> {
     let credentials = dir.join("credentials.json");
-    let settings = dir.join("setting.json");
     let mut values = read_map(&credentials)?;
     values.remove("oauth:login_attribution");
     for provider in ["zai", "bigmodel"] {
@@ -686,7 +675,7 @@ fn write_native(saved: &Saved, dir: &std::path::Path) -> Result<(), String> {
         },
     )?;
     put("zcodejwttoken".into(), &saved.jwt_token)?;
-    let mut settings_value = read_map(&settings)?;
+    let mut settings_value = read_map(settings)?;
     let same_account = native_account_at(dir)?
         .as_ref()
         .is_some_and(|current| id(current) == id(saved));
@@ -717,7 +706,7 @@ fn write_native(saved: &Saved, dir: &std::path::Path) -> Result<(), String> {
         .ok_or("accountError.format")?
         .insert(saved.provider.clone(), Value::String("oauth".into()));
     super::cursor_auth::write(&credentials, &values)?;
-    super::cursor_auth::write(&settings, &settings_value)?;
+    super::cursor_auth::write(settings, &settings_value)?;
     Ok(())
 }
 
@@ -728,8 +717,9 @@ pub async fn switch(account_id: &str) -> Result<Account, String> {
         return Err("accountError.invalidAccount".into());
     }
     super::process_manager::stop_desktop_for_config("zcode").await;
-    let dir = native_dir()?;
-    if let Some(mut current) = native_account_at(&dir)? {
+    let paths = super::zcode_paths::resolve()?;
+    let dir = &paths.config_dir;
+    if let Some(mut current) = native_account_at(dir)? {
         if let Some(previous) = accounts.get(&id(&current)) {
             current.plan = previous.plan.clone();
             current.subscription_end_at = previous.subscription_end_at;
@@ -743,19 +733,22 @@ pub async fn switch(account_id: &str) -> Result<Account, String> {
     let saved = accounts
         .get(account_id)
         .ok_or("accountError.invalidAccount")?;
-    switch_native(saved, &dir)?;
+    switch_native(saved, dir, &paths.settings_file)?;
     Ok(row(saved, Some(account_id)))
 }
 
-fn switch_native(saved: &Saved, dir: &std::path::Path) -> Result<(), String> {
+fn switch_native(
+    saved: &Saved,
+    dir: &std::path::Path,
+    settings: &std::path::Path,
+) -> Result<(), String> {
     let mut backups = Vec::new();
-    for name in [
-        "credentials.json",
-        "setting.json",
-        "provider_config.json",
-        "config.json",
+    for path in [
+        dir.join("credentials.json"),
+        settings.to_path_buf(),
+        dir.join("provider_config.json"),
+        dir.join("config.json"),
     ] {
-        let path = dir.join(name);
         let bytes = match fs::read(&path) {
             Ok(bytes) => Some(bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -768,7 +761,7 @@ fn switch_native(saved: &Saved, dir: &std::path::Path) -> Result<(), String> {
         if !restored.success {
             return Err(restored.message);
         }
-        write_native(saved, dir)?;
+        write_native(saved, dir, settings)?;
         if native_account_at(dir)?.as_ref().map(id) != Some(id(saved)) {
             return Err("accountError.write".into());
         }
@@ -956,7 +949,7 @@ mod tests {
             remaining_percent: None,
             reset_at: None,
         };
-        write_native(&saved, &dir).unwrap();
+        write_native(&saved, &dir, &dir.join("setting.json")).unwrap();
         let credentials = read_map(&dir.join("credentials.json")).unwrap();
         assert_eq!(credentials["other"], "keep");
         assert_eq!(
@@ -1043,7 +1036,7 @@ mod tests {
             "theme":"dark", "providerFamilyConnectionSelections":{"zai":{"kind":"team-coding-plan","projectId":"old"}},
             "modelProviderFamilyModes":{"unrelated":"keep"}
         })).unwrap();
-        super::switch_native(&cn, &dir).unwrap();
+        super::switch_native(&cn, &dir, &dir.join("setting.json")).unwrap();
         assert_eq!(
             super::native_account_at(&dir)
                 .unwrap()
@@ -1051,7 +1044,7 @@ mod tests {
                 .access_token,
             cn.access_token
         );
-        super::switch_native(&international, &dir).unwrap();
+        super::switch_native(&international, &dir, &dir.join("setting.json")).unwrap();
         let current = super::native_account_at(&dir).unwrap().unwrap();
         assert_eq!(super::id(&current), "zai:same-id");
         assert_eq!(current.access_token, international.access_token);
@@ -1080,7 +1073,10 @@ mod tests {
         super::super::cursor_auth::write(&dir.join("provider_config.json"), &config).unwrap();
         std::fs::write(dir.join("setting.json"), "broken").unwrap();
         let before = std::fs::read(dir.join("provider_config.json")).unwrap();
-        assert!(super::switch_native(&account("bigmodel", "one"), &dir).is_err());
+        assert!(
+            super::switch_native(&account("bigmodel", "one"), &dir, &dir.join("setting.json"))
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(dir.join("provider_config.json")).unwrap(),
             before
@@ -1091,7 +1087,7 @@ mod tests {
             "broken"
         );
         std::fs::write(dir.join("setting.json"), "{}").unwrap();
-        super::switch_native(&account("bigmodel", "one"), &dir).unwrap();
+        super::switch_native(&account("bigmodel", "one"), &dir, &dir.join("setting.json")).unwrap();
         let config = read_map(&dir.join("provider_config.json")).unwrap();
         assert!(config["config"].get("defaultModelSelection").is_none());
         assert_eq!(config["config"]["providerOrder"], json!(["other"]));
@@ -1100,6 +1096,76 @@ mod tests {
             "bigmodel"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn zcode_account_switch_keeps_home_settings_and_rolls_back_across_data_directories() {
+        let root = fixture_dir();
+        let home = root.join("home");
+        let data = root.join("custom data");
+        let settings = home.join(".zcode/v2/setting.json");
+        super::super::cursor_auth::write(&settings, &json!({"dataBaseDir":data,"theme":"dark"}))
+            .unwrap();
+        let paths = super::super::zcode_paths::resolve_at(&home, None).unwrap();
+        assert_eq!(paths.config_dir, data.join(".zcode/v2"));
+        let dir = &paths.config_dir;
+        let ignored_settings = dir.join("setting.json");
+        super::super::cursor_auth::write(&ignored_settings, &json!({"theme":"old"})).unwrap();
+        let ignored_before = std::fs::read(&ignored_settings).unwrap();
+        let personal = json!({"schemaVersion":1,"config":{
+            "providerConfigRules":{"providerRules":[{"providerId":"echobird"},{"providerId":"other"}]},
+            "modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[]},
+            "defaultModelSelection":{"providerId":"echobird","modelId":"fixture"}
+        }});
+        super::super::cursor_auth::write(&dir.join("provider_config.json"), &personal).unwrap();
+        super::super::cursor_auth::write(
+            &dir.join("config.json"),
+            &json!({"provider":{"echobird":{},"other":{}},"model":"echobird/fixture"}),
+        )
+        .unwrap();
+        super::switch_native(&account("zai", "one"), dir, &paths.settings_file).unwrap();
+        let settings_value = read_map(&paths.settings_file).unwrap();
+        assert_eq!(settings_value["theme"], "dark");
+        assert_eq!(settings_value["dataBaseDir"], json!(data));
+        assert_eq!(settings_value["providerFamilyDomain"], "zai");
+        assert_eq!(
+            super::native_account_at(dir)
+                .unwrap()
+                .as_ref()
+                .map(super::id),
+            Some("zai:one".into())
+        );
+        assert!(!home.join(".zcode/v2/credentials.json").exists());
+        assert_eq!(std::fs::read(&ignored_settings).unwrap(), ignored_before);
+        let restored = read_map(&dir.join("provider_config.json")).unwrap();
+        assert!(restored["config"].get("defaultModelSelection").is_none());
+        assert_eq!(
+            restored["config"]["providerConfigRules"]["providerRules"],
+            json!([{"providerId":"other"}])
+        );
+
+        super::super::cursor_auth::write(&dir.join("provider_config.json"), &personal).unwrap();
+        std::fs::write(&paths.settings_file, "broken").unwrap();
+        let backups: Vec<_> = [
+            dir.join("credentials.json"),
+            paths.settings_file.clone(),
+            dir.join("provider_config.json"),
+            dir.join("config.json"),
+        ]
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+        assert!(
+            super::switch_native(&account("bigmodel", "two"), dir, &paths.settings_file).is_err()
+        );
+        for (path, bytes) in backups {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        assert_eq!(std::fs::read(&ignored_settings).unwrap(), ignored_before);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn account_switch_preserves_shared_task_index_ids_and_transcripts() {
@@ -1126,7 +1192,7 @@ mod tests {
             account("bigmodel", "c"),
             account("zai", "a"),
         ] {
-            switch_native(&saved, &dir).unwrap();
+            switch_native(&saved, &dir, &dir.join("setting.json")).unwrap();
             assert_eq!(
                 native_account_at(&dir).unwrap().as_ref().map(id),
                 Some(id(&saved))
@@ -1136,7 +1202,7 @@ mod tests {
             }
         }
         fs::write(dir.join("setting.json"), "broken").unwrap();
-        assert!(switch_native(&account("zai", "b"), &dir).is_err());
+        assert!(switch_native(&account("zai", "b"), &dir, &dir.join("setting.json")).is_err());
         for (path, bytes) in &originals {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }

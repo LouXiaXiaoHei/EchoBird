@@ -3,9 +3,10 @@
 use super::{claudedesktop, mimodesktop};
 use crate::services::{codex_runtime, local_proxy, tool_manager};
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 pub(crate) fn migrate_local_proxy_port(old: u16, new: u16) -> Result<(), String> {
-    let mut paths = tool_manager::model_config_paths();
+    let (mut paths, errors) = tool_manager::model_config_paths();
     if let Some(home) = dirs::home_dir() {
         // Split settings/providers and JSONC alternatives to configFile.
         for relative in [
@@ -41,8 +42,16 @@ pub(crate) fn migrate_local_proxy_port(old: u16, new: u16) -> Result<(), String>
     if let Ok(dir) = mimodesktop::config_dir() {
         paths.extend(mimodesktop::CONFIG_NAMES.iter().map(|name| dir.join(name)));
     }
+    migrate_paths(paths, errors, old, new)
+}
+
+fn migrate_paths(
+    paths: Vec<PathBuf>,
+    mut errors: Vec<String>,
+    old: u16,
+    new: u16,
+) -> Result<(), String> {
     let mut seen = HashSet::new();
-    let mut errors = Vec::new();
     for path in paths {
         if seen.insert(path.clone()) {
             if let Err(error) = local_proxy::migrate_file(&path, old, new) {
@@ -54,5 +63,39 @@ pub(crate) fn migrate_local_proxy_port(old: u16, new: u16) -> Result<(), String>
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zcode_path_failure_keeps_migration_pending_without_blocking_other_clients() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-zcode-port-{}", uuid::Uuid::new_v4()));
+        let settings = root.join(".zcode/v2/setting.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, "broken").unwrap();
+        let error = crate::services::zcode_paths::resolve_at(&root, None)
+            .err()
+            .unwrap();
+        let other_client = root.join("other.json");
+        std::fs::write(&other_client, r#"{"baseUrl":"http://localhost:14565/v1"}"#).unwrap();
+        assert!(migrate_paths(vec![other_client.clone()], vec![error], 14565, 14566).is_err());
+        assert!(std::fs::read_to_string(&other_client)
+            .unwrap()
+            .contains("localhost:14566/v1"));
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "broken");
+
+        std::fs::write(&settings, "{}").unwrap();
+        let paths = crate::services::zcode_paths::resolve_at(&root, None).unwrap();
+        let provider = paths.config_dir.join("provider_config.json");
+        std::fs::write(&provider, r#"{"baseUrl":"http://localhost:14565/v1"}"#).unwrap();
+        assert!(migrate_paths(vec![other_client, provider.clone()], vec![], 14565, 14566).is_ok());
+        assert!(std::fs::read_to_string(provider)
+            .unwrap()
+            .contains("localhost:14566/v1"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -46,3 +46,4 @@ pub mod windows_path;
 
 pub mod workbuddy_accounts;
 pub mod zcode_accounts;
+pub(crate) mod zcode_paths;

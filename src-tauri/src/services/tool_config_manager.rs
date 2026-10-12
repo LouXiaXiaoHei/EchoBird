@@ -304,9 +304,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         "openscience" => return apply_openscience(&model_info),
         "dsh" => return apply_dsh(&model_info),
 
-        // ZCode (Z.AI desktop OpenCode fork): OpenCode schema but the provider
-        // uses a `kind` discriminator and supports BOTH protocols; config at
-        // ~/.zcode/v2/config.json.
+        // ZCode keeps model configuration in its selected data directory.
         "zcode" => return apply_zcode(&model_info),
 
         // Codex CLI and ChatGPT desktop share ~/.codex/config.toml.

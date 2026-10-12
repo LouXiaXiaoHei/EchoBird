@@ -1593,33 +1593,38 @@ pub fn merge_override_seed(
     }
 }
 
-pub(crate) fn model_config_paths() -> Vec<PathBuf> {
-    get_definitions()
-        .into_iter()
-        .flat_map(|def| {
-            [
-                model_config_path(&def),
-                platform::echobird_dir().join(format!("{}.json", def.id)),
-            ]
-        })
-        .filter(|path| !path.as_os_str().is_empty())
-        .collect()
+pub(crate) fn model_config_paths() -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+    for def in get_definitions() {
+        match model_config_path(&def) {
+            Ok(path) if !path.as_os_str().is_empty() => paths.push(path),
+            Ok(_) => {}
+            Err(error) => errors.push(format!("{} config path: {error}", def.id)),
+        }
+        paths.push(platform::echobird_dir().join(format!("{}.json", def.id)));
+    }
+    (paths, errors)
 }
 
-fn model_config_path(def: &ToolDefinition) -> PathBuf {
+fn model_config_path(def: &ToolDefinition) -> Result<PathBuf, String> {
+    if def.id == "zcode" {
+        return super::zcode_paths::resolve()
+            .map(|paths| paths.config_dir.join("provider_config.json"));
+    }
     if matches!(def.id.as_str(), "cline" | "clinedesktop") {
-        super::tool_config_manager::cline::config_path()
+        Ok(super::tool_config_manager::cline::config_path())
     } else {
-        expand_path(&def.config_mapping.config_file)
+        Ok(expand_path(&def.config_mapping.config_file))
     }
 }
 
 /// Get the config mapping for a specific tool
 pub fn get_tool_config_mapping(tool_id: &str) -> Option<(ToolDefinition, PathBuf)> {
     let defs = get_definitions();
-    defs.into_iter().find(|d| d.id == tool_id).map(|def| {
-        let config_path = model_config_path(&def);
-        (def, config_path)
+    defs.into_iter().find(|d| d.id == tool_id).and_then(|def| {
+        let config_path = model_config_path(&def).ok()?;
+        Some((def, config_path))
     })
 }
 
@@ -1882,8 +1887,9 @@ async fn scan_single_tool(def: ToolDefinition) -> DetectedTool {
     };
 
     let config_path = if installed && !def.config_mapping.config_file.is_empty() {
-        let cp = model_config_path(&def);
-        Some(normalize_for_display(cp.to_string_lossy().to_string()))
+        model_config_path(&def)
+            .ok()
+            .map(|cp| normalize_for_display(cp.to_string_lossy().to_string()))
     } else {
         None
     };

@@ -4,32 +4,8 @@ use super::{
     model_input_modalities_for, read_json_file, read_jsonc_file, write_json_file, ApplyResult,
     ModelInfo,
 };
-use crate::services::tool_manager;
-use std::path::PathBuf;
-
-// ════════════════════════════════════════════════════════════════
-//  ZCode — Z.AI's desktop OpenCode fork. ~/.zcode/v2/config.json.
-//  OpenCode config schema, but the provider uses a `kind` discriminator
-//  ("openai-compatible" | "anthropic") instead of OpenCode's `npm`, and
-//  it supports BOTH protocols. The native config write is the whole
-//  mechanism — desktop app, no launcher patch, no ~/.echobird relay.
-//  Default model is the OpenCode-standard top-level `model` selector.
-// ════════════════════════════════════════════════════════════════
-
-fn zcode_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".zcode")
-        .join("v2")
-}
-
-fn zcode_config_path() -> PathBuf {
-    zcode_config_dir().join("config.json")
-}
-
-fn zcode_personal_config_path() -> PathBuf {
-    zcode_config_dir().join("provider_config.json")
-}
+use crate::services::{tool_manager, zcode_paths};
+use std::path::Path;
 
 fn prepare_zcode_personal_config(
     path: &std::path::Path,
@@ -113,6 +89,16 @@ fn prepare_zcode_personal_config(
 }
 
 pub(super) fn apply_zcode(model_info: &ModelInfo) -> ApplyResult {
+    match zcode_paths::resolve() {
+        Ok(paths) => apply_zcode_at(model_info, &paths.config_dir),
+        Err(_) => ApplyResult {
+            success: false,
+            message: "Cannot read ZCode storage settings. Configuration was left unchanged.".into(),
+        },
+    }
+}
+
+fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
     let model_id = model_info
         .model
         .as_deref()
@@ -153,7 +139,7 @@ pub(super) fn apply_zcode(model_info: &ModelInfo) -> ApplyResult {
         "openai-compatible"
     };
 
-    let config_path = zcode_config_path();
+    let config_path = dir.join("config.json");
     let mut config = read_jsonc_file(&config_path).unwrap_or(serde_json::json!({}));
 
     if config.get("$schema").is_none() {
@@ -189,12 +175,11 @@ pub(super) fn apply_zcode(model_info: &ModelInfo) -> ApplyResult {
             }
         }
     });
-    // OpenCode-standard active-model selectors (UI stores its pick elsewhere;
-    // these set the configured default that ZCode reads on launch).
+    // Keep the legacy selectors for clients that have not migrated yet.
     config["model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
     config["small_model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
 
-    let personal_path = zcode_personal_config_path();
+    let personal_path = dir.join("provider_config.json");
     let personal = match prepare_zcode_personal_config(
         &personal_path,
         model_id,
@@ -296,11 +281,15 @@ fn read_zcode_personal_config(path: &std::path::Path) -> Option<ModelInfo> {
 }
 
 pub(super) fn read_zcode() -> Option<ModelInfo> {
-    let personal_path = zcode_personal_config_path();
+    read_zcode_at(&zcode_paths::resolve().ok()?.config_dir)
+}
+
+fn read_zcode_at(dir: &Path) -> Option<ModelInfo> {
+    let personal_path = dir.join("provider_config.json");
     if personal_path.exists() {
         return read_zcode_personal_config(&personal_path);
     }
-    let config = read_jsonc_file(&zcode_config_path())?;
+    let config = read_jsonc_file(&dir.join("config.json"))?;
     let selected = config.get("model")?.as_str()?;
     let (provider_id, model_id) = selected.split_once('/')?;
     let provider = config.pointer(&format!("/provider/{}", provider_id))?;
@@ -339,7 +328,13 @@ pub(super) fn read_zcode() -> Option<ModelInfo> {
 }
 
 pub(super) fn restore_zcode_to_official() -> ApplyResult {
-    restore_zcode_to_official_at(&zcode_config_dir())
+    match zcode_paths::resolve() {
+        Ok(paths) => restore_zcode_to_official_at(&paths.config_dir),
+        Err(_) => ApplyResult {
+            success: false,
+            message: "Cannot read ZCode storage settings. Configuration was left unchanged.".into(),
+        },
+    }
 }
 
 pub(super) fn restore_zcode_to_official_at(dir: &std::path::Path) -> ApplyResult {
@@ -533,5 +528,71 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn zcode_model_apply_read_restore_follow_custom_data_directory_and_preserve_home() {
+        let root = std::env::temp_dir().join(format!(
+            "echobird-zcode-model-paths-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let home = root.join("home");
+        let custom = root.join("custom data");
+        let home_dir = home.join(".zcode/v2");
+        write_json_file(
+            &home_dir.join("setting.json"),
+            &serde_json::json!({"dataBaseDir":custom}),
+        )
+        .unwrap();
+        for name in ["config.json", "provider_config.json"] {
+            write_json_file(&home_dir.join(name), &serde_json::json!({"untouched":name})).unwrap();
+        }
+        let originals: Vec<_> = ["setting.json", "config.json", "provider_config.json"]
+            .into_iter()
+            .map(|name| {
+                let path = home_dir.join(name);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let paths = zcode_paths::resolve_at(&home, None).unwrap();
+        let dir = &paths.config_dir;
+        write_json_file(&dir.join("provider_config.json"), &personal_fixture()).unwrap();
+        write_json_file(
+            &dir.join("config.json"),
+            &serde_json::json!({"provider":{"existing":{"keep":true}},"mcp":{"keep":true}}),
+        )
+        .unwrap();
+        for protocol in ["openai", "anthropic"] {
+            let model: ModelInfo = serde_json::from_value(serde_json::json!({
+                "model":"vendor/fixture", "apiKey":"fixture-key", "baseUrl":"https://example.test/v1", "protocol":protocol
+            })).unwrap();
+            assert!(apply_zcode_at(&model, dir).success);
+            let before = std::fs::read(dir.join("provider_config.json")).unwrap();
+            let read = read_zcode_at(dir).unwrap();
+            assert_eq!(read.model.as_deref(), Some("vendor/fixture"));
+            assert_eq!(read.protocol.as_deref(), Some(protocol));
+            assert_eq!(
+                std::fs::read(dir.join("provider_config.json")).unwrap(),
+                before
+            );
+        }
+        assert!(restore_zcode_to_official_at(dir).success);
+        assert!(read_zcode_at(dir).is_none());
+        let legacy = read_json_file(&dir.join("config.json")).unwrap();
+        assert_eq!(legacy["provider"]["existing"]["keep"], true);
+        assert_eq!(legacy["mcp"]["keep"], true);
+        assert_eq!(
+            read_json_file(&dir.join("provider_config.json")).unwrap()["config"]
+                ["providerConfigRules"]["providerRules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        for (path, bytes) in originals {
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
