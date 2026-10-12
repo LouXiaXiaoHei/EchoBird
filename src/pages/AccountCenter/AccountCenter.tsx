@@ -198,17 +198,17 @@ export function AccountCard({
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={Math.max(0, Math.min(100, metric.percent))}
-                      className={`relative h-0 flex-shrink-0 rounded-full border-t-4 ${colors.track}`}
+                      className={`relative -my-px h-0 flex-shrink-0 rounded-full border-t-[6px] ${colors.track}`}
                     >
                       <div
-                        className={`quota-progress-fill absolute bottom-0 left-0 h-0 rounded-full border-t-4 ${colors.fill}`}
+                        className={`quota-progress-fill absolute bottom-0 left-0 h-0 rounded-full border-t-[6px] ${colors.fill}`}
                         style={{ width: `${Math.max(0, Math.min(100, metric.percent))}%` }}
                       />
                     </div>
                   ) : metric.showProgress && !balanceOnly ? (
                     <div
                       aria-hidden="true"
-                      className="h-0 flex-shrink-0 rounded-full border-t-4 border-cyber-border"
+                      className="-my-px h-0 flex-shrink-0 rounded-full border-t-[6px] border-cyber-border"
                     />
                   ) : null}
                 </div>
