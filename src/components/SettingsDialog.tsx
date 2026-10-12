@@ -21,6 +21,7 @@ import { isNewerVersion } from '../utils/version';
 import { useThemeStore, type ThemeMode } from '../stores/themeStore';
 import { COLOR_THEMES, type ColorThemeId } from '../data/colorThemes';
 import { useUiScaleStore } from '../stores/uiScaleStore';
+import { useEasterEggStore } from '../stores/easterEggStore';
 
 // All supported locales
 const LOCALE_OPTIONS = [
@@ -30,10 +31,6 @@ const LOCALE_OPTIONS = [
   { id: 'ja', label: '日本語' },
 ];
 
-// localStorage flag gating the apply effect + sound. MUST match the key
-// AppManagerProvider reads. Default ON — users can switch it off here to keep
-// things quiet.
-const EASTER_EGG_KEY = 'echobird_easter_egg';
 type SettingsTab = 'general' | 'appearance';
 
 const UI_SCALE_TICKS = [70, 80, 90, 100, 110, 120, 130, 140, 150];
@@ -64,15 +61,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   >(null);
   const [installPct, setInstallPct] = useState(0);
   const [closeToTray, setCloseToTray] = useState<boolean | null>(false);
-  // Read the persisted flag once at mount (default ON). The toggle keeps state
-  // and localStorage in sync, so there's no need to re-read it via an effect.
-  const [easterEgg, setEasterEgg] = useState(() => {
-    try {
-      return localStorage.getItem(EASTER_EGG_KEY) !== 'false';
-    } catch {
-      return true;
-    }
-  });
+  const easterEgg = useEasterEggStore((state) => state.enabled);
+  const setEasterEgg = useEasterEggStore((state) => state.setEnabled);
   // Launch-at-startup toggle. Source of truth is the autostart plugin's OS
   // registration (isEnabled), queried each time the dialog opens, so changes
   // made outside the app (msconfig, Login Items) are reflected. Default off.
@@ -140,15 +130,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
       });
     }
   }, [isOpen]);
-
-  const handleEasterEggChange = useCallback((value: boolean) => {
-    setEasterEgg(value);
-    try {
-      localStorage.setItem(EASTER_EGG_KEY, String(value));
-    } catch {
-      /* private mode */
-    }
-  }, []);
 
   // Toggle launch-at-startup: register/unregister the OS autostart entry.
   // The entry launches with --minimized so a boot start stays in the tray.
@@ -401,7 +382,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                         {t('settings.easterEgg')}
                       </span>
                     </div>
-                    <ToggleSwitch checked={easterEgg} onChange={handleEasterEggChange} />
+                    <ToggleSwitch checked={easterEgg} onChange={setEasterEgg} />
                   </div>
                 </div>
 

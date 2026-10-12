@@ -1,5 +1,5 @@
 // Sidebar navigation component
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Server,
@@ -16,6 +16,7 @@ import { RoutingToggle } from './RoutingToggle';
 import { useI18n } from '../hooks/useI18n';
 import * as api from '../api/tauri';
 import { useDocumentVisible } from '../hooks/useDocumentVisible';
+import { BirdEasterEgg } from './BirdEasterEgg';
 
 declare const __APP_EDITION__: string;
 const isFullEdition = __APP_EDITION__ === 'full';
@@ -55,6 +56,8 @@ export const Sidebar = ({
   onSettingsClick,
 }: SidebarProps) => {
   const { t } = useI18n();
+  const sidebarRef = useRef<HTMLElement>(null);
+  const perchRef = useRef<HTMLDivElement>(null);
   // Poll local model server status
   const [serverRunning, setServerRunning] = useState(false);
   const docVisible = useDocumentVisible();
@@ -78,15 +81,9 @@ export const Sidebar = ({
   }, [docVisible]);
 
   return (
-    <nav className="w-64 flex flex-col px-6 pb-6">
+    <nav ref={sidebarRef} className="relative w-64 flex flex-col px-6 pb-6">
       <div className="mb-7 flex items-center gap-2 overflow-hidden">
-        <img
-          src="/brand/bird.png"
-          alt=""
-          aria-hidden="true"
-          draggable={false}
-          className="flex-shrink-0 h-7 w-7 select-none"
-        />
+        <BirdEasterEgg sidebarRef={sidebarRef} perchRef={perchRef} />
         <span className="brand-mark flex-shrink-0 text-cyber-text">{t('app.name')}</span>
         {updateAvailable && (
           <button
@@ -134,7 +131,7 @@ export const Sidebar = ({
           }
         />
         {/* Divider — primary actions above; career and project tools below */}
-        <div className="border-t border-cyber-border/50" />
+        <div ref={perchRef} className="border-t border-cyber-border/50" />
         <NavItem
           icon={<Trophy size={20} />}
           label={t('nav.aiCareer')}
