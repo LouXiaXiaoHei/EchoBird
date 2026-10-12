@@ -8,6 +8,7 @@ import type { useZCodeAccounts } from './useZCodeAccounts';
 import type { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import type { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
 import type { useCodexAccounts } from './useCodexAccounts';
+import type { useKiloAccounts, useCopilotAccounts } from './useClientAccounts';
 import { createContext, useContext } from 'react';
 import type { ModelConfig, LocalTool } from '../../api/types';
 import type { CodexAccount } from '../../api/tauri';
@@ -42,6 +43,8 @@ export interface AppManagerContextType {
   zcodeAccounts: ReturnType<typeof useZCodeAccounts>;
   deepSeekAccounts: ReturnType<typeof useDeepSeekAccounts>;
   grokAccounts: ReturnType<typeof useGrokAccounts>;
+  kiloAccounts: ReturnType<typeof useKiloAccounts>;
+  copilotAccounts: ReturnType<typeof useCopilotAccounts>;
   manusAccounts: ReturnType<typeof useGrokAccounts>;
   cueAccounts: ReturnType<typeof useGrokAccounts>;
   grokBotAccounts: ReturnType<typeof useCursorAccounts>;

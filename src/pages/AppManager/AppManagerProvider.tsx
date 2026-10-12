@@ -2,6 +2,7 @@ import { useCursorAccounts } from './useCursorAccounts';
 import { useAntigravityAccounts } from './useAntigravityAccounts';
 import { useDeepSeekAccounts } from './useDeepSeekAccounts';
 import { useGrokAccounts } from './useGrokAccounts';
+import { useKiloAccounts, useCopilotAccounts } from './useClientAccounts';
 import { accountError } from '../../utils/accountError';
 import { ClaudeCodeLoginDialog } from './ClaudeCodeLoginDialog';
 import { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
@@ -366,6 +367,42 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     'cue'
   );
 
+  const clearKiloModel = useCallback(
+    () => setToolModelConfig((prev) => ({ ...prev, kilo: null, kilodesktop: null })),
+    []
+  );
+  const kiloAccounts = useKiloAccounts(
+    accountGroupEnabled('kilo', 'kilodesktop'),
+    !!(
+      selectedTool &&
+      ['kilo', 'kilodesktop'].includes(selectedTool) &&
+      toolModelConfig[selectedTool]
+    ),
+    clearKiloModel,
+    setApplyError,
+    activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
+  );
+  const clearCopilotModel = useCallback(
+    () => setToolModelConfig((prev) => ({ ...prev, copilot: null, copilotdesktop: null })),
+    []
+  );
+  const copilotAccounts = useCopilotAccounts(
+    accountGroupEnabled('copilot', 'copilotdesktop'),
+    !!(
+      selectedTool &&
+      ['copilot', 'copilotdesktop'].includes(selectedTool) &&
+      toolModelConfig[selectedTool]
+    ),
+    clearCopilotModel,
+    setApplyError,
+    selectedTool === 'copilotdesktop' ||
+      (activePage === 'accounts' &&
+        !detectedTools.some((tool) => tool.id === 'copilot' && tool.installed))
+      ? 'copilotdesktop'
+      : 'copilot',
+    activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
+  );
+
   const clearGrokBotModel = useCallback(
     () => setToolModelConfig((prev) => ({ ...prev, grokbot: null })),
     []
@@ -413,6 +450,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (toolId === 'grok') grokAccounts.select(null);
     if (toolId === 'manus') manusAccounts.select(null);
     if (toolId === 'cue') cueAccounts.select(null);
+    if (toolId === 'kilo' || toolId === 'kilodesktop') kiloAccounts.select(null);
+    if (toolId === 'copilot' || toolId === 'copilotdesktop') copilotAccounts.select(null);
     if (toolId === 'claudecode') claudeCodeAccounts.setSelectedId(null);
     if (toolId === 'claudedesktop') claudeDesktopAccounts.select(null);
     if (toolId === 'workbuddy' || toolId === 'workbuddyai') workBuddyAccounts.select(null);
@@ -496,7 +535,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         ...(isRelayCapableApp ? { relayMode: effectiveRelay } : {}),
         ...(isClaudeApp ? { oneMContext: effective1m } : {}),
         ...(['codex', 'chatgptdesktop'].includes(toolId)
-          ? { webSearch: webSearchOverride ?? codexWebSearch }
+          ? {
+              webSearch:
+                model.internalId === 'smart-router' ? false : (webSearchOverride ?? codexWebSearch),
+            }
           : {}),
       });
 
@@ -530,7 +572,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
 
   // Restore the shared Web Search preference and apply it on an explicit flip.
   const setCodexWebSearch = (value: boolean) => {
-    if (isLaunching) return;
+    if (isLaunching || (selectedTool && toolModelConfig[selectedTool] === 'smart-router')) return;
     setCodexWebSearchRaw(value);
     writeBool('echobird_codex_web_search', value);
     if (!isCodexTool || !selectedTool || !selectedToolData?.installed || selectedCodexAccountId)
@@ -671,6 +713,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
     if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) return;
+    if (['kilo', 'kilodesktop'].includes(selectedTool) && kiloAccounts.busy) return;
+    if (['copilot', 'copilotdesktop'].includes(selectedTool) && copilotAccounts.busy) return;
     const generation = ++launchGeneration.current;
     const finishLaunch = () => {
       if (launchGeneration.current === generation) setIsLaunching(false);
@@ -684,12 +728,15 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       (selectedTool === 'claudedesktop' && !!claudeDesktopAccounts.selectedId);
     if (
       selectedTool !== 'vscode' &&
+      selectedTool !== 'copilotdesktop' &&
       !switchingClaudeAccount &&
       !(workBuddyEdition && workBuddyAccounts.selectedId) &&
       !((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
       !(selectedTool === 'grok' && grokAccounts.selectedId) &&
+      !(['kilo', 'kilodesktop'].includes(selectedTool) && kiloAccounts.selectedId) &&
+      !(['copilot', 'copilotdesktop'].includes(selectedTool) && copilotAccounts.selectedId) &&
       !(selectedTool === 'manus' && manusAccounts.selectedId) &&
       !(selectedTool === 'cue' && cueAccounts.selectedId) &&
       !(selectedTool === 'cursor' && cursorAccounts.selectedId) &&
@@ -738,6 +785,40 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         finishLaunch();
         return;
       }
+    } else if (
+      ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && kiloAccounts.selectedId) ||
+      ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') &&
+        copilotAccounts.selectedId)
+    ) {
+      try {
+        if (selectedTool === 'kilo' || selectedTool === 'kilodesktop') {
+          await api.switchKiloAccount(kiloAccounts.selectedId!, selectedTool);
+          await kiloAccounts.reload();
+        } else {
+          await api.switchCopilotAccount(
+            copilotAccounts.selectedId!,
+            selectedTool as api.CopilotTool
+          );
+          await copilotAccounts.reload();
+        }
+        setDetectedTools((prev) =>
+          prev.map((tool) => (tool.id === selectedTool ? { ...tool, activeModel: '' } : tool))
+        );
+        if (launchAfterApply) {
+          let cwd: string | undefined;
+          if (toolData?.category === 'CLI Code' && !toolData.noCwdPrompt) {
+            const picked = await openDialog({ directory: true, multiple: false });
+            if (typeof picked !== 'string' || !picked) return;
+            cwd = picked;
+          }
+          await api.startTool(selectedTool, toolData?.startCommand, cwd);
+        }
+      } catch (error) {
+        setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
     } else if (selectedTool === 'dsh' && deepSeekAccounts.selectedId) {
       try {
         await api.switchDeepSeekAccount(deepSeekAccounts.selectedId, locale);
@@ -958,7 +1039,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         }
       }
     }
-    if (selectedTool === 'vscode') startCooldown();
+    if (selectedTool === 'vscode' || selectedTool === 'copilotdesktop') startCooldown();
   };
 
   return (
@@ -1025,6 +1106,11 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           accounts: orderedAccounts('dsh', deepSeekAccounts.accounts),
         },
         grokAccounts: { ...grokAccounts, accounts: orderedAccounts('grok', grokAccounts.accounts) },
+        kiloAccounts: { ...kiloAccounts, accounts: orderedAccounts('kilo', kiloAccounts.accounts) },
+        copilotAccounts: {
+          ...copilotAccounts,
+          accounts: orderedAccounts('copilot', copilotAccounts.accounts),
+        },
         manusAccounts: {
           ...manusAccounts,
           accounts: orderedAccounts('manus', manusAccounts.accounts),

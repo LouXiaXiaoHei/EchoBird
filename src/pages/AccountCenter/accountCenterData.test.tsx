@@ -41,6 +41,8 @@ function context() {
     cursorAccounts: group(),
     zcodeAccounts: group(),
     grokAccounts: group(),
+    kiloAccounts: group(),
+    copilotAccounts: group(),
     grokBotAccounts: group(),
     manusAccounts: group(),
     cueAccounts: group(),
@@ -105,6 +107,46 @@ describe('Account Center display data', () => {
     }
   );
 
+  it('keeps Kilo balance and Copilot request quota distinct without fabricating missing values', () => {
+    const state = context();
+    state.kiloAccounts.accounts = [
+      { id: 'k', email: 'kilo@example.test', active: false, plan: null, balance: null },
+    ];
+    state.copilotAccounts.accounts = [
+      {
+        id: 'c',
+        login: 'github-user',
+        host: 'github.com',
+        active: false,
+        plan: null,
+        remaining: null,
+        total: null,
+        resetAt: null,
+      },
+    ];
+    const kilo = providers(state).find((p) => p.id === 'kilo')!;
+    const copilot = providers(state).find((p) => p.id === 'copilot')!;
+    expect(kilo.accounts[0].metrics).toEqual([{ label: 'model.balance', value: '—' }]);
+    expect(copilot.accounts[0].metrics[0]).toMatchObject({ value: '—', percent: undefined });
+    const markup = renderToStaticMarkup(<AccountCard provider={kilo} account={kilo.accounts[0]} />);
+    expect(markup).toContain('model.balance');
+    expect(markup).toContain('text-2xl');
+    state.kiloAccounts.accounts[0].balance = 12.34;
+    state.copilotAccounts.accounts[0] = {
+      ...state.copilotAccounts.accounts[0],
+      remaining: 30,
+      total: 100,
+      resetAt: 1794132901,
+    };
+    expect(providers(state).find((p) => p.id === 'kilo')!.accounts[0].metrics[0].value).toBe(
+      '$12.34'
+    );
+    expect(providers(state).find((p) => p.id === 'copilot')!.accounts[0].metrics[0]).toMatchObject({
+      value: '30',
+      percent: 30,
+      resetAt: 1794132901,
+    });
+  });
   it.each(['pro', 'free', 'Free'])(
     'keeps Manus %s subscription expiry separate from its credit balance and refresh time',
     (plan) => {

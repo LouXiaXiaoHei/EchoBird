@@ -33,12 +33,27 @@ export interface LocalTool extends DetectedTool {
 
 // ─── Model Types ───
 
+export type AccountProvider =
+  | 'claudeCode'
+  | 'codex'
+  | 'workBuddy'
+  | 'workBuddyAi'
+  | 'antigravity'
+  | 'copilot'
+  | 'kilo';
+
+export interface AccountSource {
+  provider: AccountProvider;
+  accountId: string;
+}
+
 export interface ModelConfig {
   internalId: string;
   name: string;
   modelId?: string;
   baseUrl: string;
   apiKey: string;
+  accountSource?: AccountSource;
   anthropicUrl?: string;
   modelType?: 'CLOUD' | 'LOCAL' | 'TUNNEL' | 'DEMO';
   openaiTested?: boolean;

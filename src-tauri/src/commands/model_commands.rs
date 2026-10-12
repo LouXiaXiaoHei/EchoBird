@@ -12,8 +12,18 @@ pub fn get_models() -> Vec<ModelConfig> {
 
 /// Add a new model
 #[tauri::command]
-pub fn add_model(input: AddModelInput) -> ModelConfig {
-    model_manager::add_model(input)
+pub async fn add_model(input: AddModelInput) -> Result<ModelConfig, String> {
+    if let Some(source) = &input.account_source {
+        crate::services::account_model_sources::validate_source(source).await?;
+        if input
+            .model_id
+            .as_deref()
+            .map_or(true, |id| id.trim().is_empty())
+        {
+            return Err("Model ID is required".into());
+        }
+    }
+    Ok(model_manager::add_model(input))
 }
 
 /// Delete a model by internal ID
@@ -34,16 +44,45 @@ pub fn delete_model(internal_id: String) -> bool {
 
 /// Update a model
 #[tauri::command]
-pub fn update_model(internal_id: String, updates: UpdateModelInput) -> Option<ModelConfig> {
+pub async fn update_model(
+    internal_id: String,
+    updates: UpdateModelInput,
+) -> Result<Option<ModelConfig>, String> {
+    if let Some(source) = &updates.account_source {
+        crate::services::account_model_sources::validate_source(source).await?;
+    }
+    if let Some(existing) = model_manager::get_user_models()
+        .iter()
+        .find(|model| model.internal_id == internal_id)
+    {
+        validate_account_model_update(existing, &updates)?;
+    }
     let resets_route_memory = updates.base_url.is_some()
         || updates.anthropic_url.is_some()
         || updates.api_key.is_some()
-        || updates.model_id.is_some();
+        || updates.model_id.is_some()
+        || updates.account_source.is_some();
     let updated = model_manager::update_model(&internal_id, updates);
     if resets_route_memory && updated.is_some() {
         crate::services::smart_router::forget_candidate_memory(&internal_id);
     }
-    updated
+    Ok(updated)
+}
+
+fn validate_account_model_update(
+    existing: &ModelConfig,
+    updates: &UpdateModelInput,
+) -> Result<(), String> {
+    if (updates.account_source.is_some() || existing.account_source.is_some())
+        && updates
+            .model_id
+            .as_deref()
+            .or(existing.model_id.as_deref())
+            .map_or(true, |id| id.trim().is_empty())
+    {
+        return Err("Model ID is required".into());
+    }
+    Ok(())
 }
 
 /// Persist a user-defined model display order (full visible list of
@@ -160,4 +199,55 @@ pub fn save_zhipu_team_access(
         return Err("Model not found".to_string());
     }
     usage_providers::zhipu_team::save_access(&internal_id, access)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::model::{AccountProvider, AccountSource};
+
+    #[test]
+    fn account_update_requires_effective_model_id_and_preserves_partial_updates() {
+        let mut existing: ModelConfig = serde_json::from_value(serde_json::json!({
+            "internalId":"fixture","name":"Model","baseUrl":"account://echobird","modelId":"existing-model",
+            "accountSource":{"provider":"codex","accountId":"saved-id"}
+        })).unwrap();
+        assert!(validate_account_model_update(&existing, &UpdateModelInput::default()).is_ok());
+        for id in ["", "   "] {
+            assert!(validate_account_model_update(
+                &existing,
+                &UpdateModelInput {
+                    model_id: Some(id.into()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        }
+        existing.account_source = None;
+        existing.model_id = None;
+        assert!(validate_account_model_update(&existing, &UpdateModelInput::default()).is_ok());
+        assert!(validate_account_model_update(
+            &existing,
+            &UpdateModelInput {
+                account_source: Some(AccountSource {
+                    provider: AccountProvider::Codex,
+                    account_id: "saved-id".into()
+                }),
+                ..Default::default()
+            }
+        )
+        .is_err());
+        assert!(validate_account_model_update(
+            &existing,
+            &UpdateModelInput {
+                account_source: Some(AccountSource {
+                    provider: AccountProvider::Codex,
+                    account_id: "saved-id".into()
+                }),
+                model_id: Some("selected-model".into()),
+                ..Default::default()
+            }
+        )
+        .is_ok());
+    }
 }

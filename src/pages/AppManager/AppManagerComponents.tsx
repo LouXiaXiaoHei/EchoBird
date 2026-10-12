@@ -3,6 +3,7 @@ import { AntigravityAccountSection } from './AntigravityAccountSection';
 import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimitives';
 import { DeepSeekAccountSection } from './DeepSeekAccountSection';
 import { GrokAccountSection } from './GrokAccountSection';
+import { ClientAccountSection } from './ClientAccountSection';
 import { ManusAccountSection } from './ManusAccountSection';
 import { ModelSwitchDivider } from './ModelSwitchDivider';
 import { QuotaCountdown } from './QuotaCountdown';
@@ -739,6 +740,10 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
     selectedTool === 'chatgptdesktop' ||
     selectedTool === 'claudecode' ||
     selectedTool === 'grok' ||
+    selectedTool === 'kilo' ||
+    selectedTool === 'kilodesktop' ||
+    selectedTool === 'copilot' ||
+    selectedTool === 'copilotdesktop' ||
     selectedTool === 'workbuddy' ||
     selectedTool === 'workbuddyai';
   const official =
@@ -1016,8 +1021,8 @@ export const AppManagerPanel: React.FC = () => {
           key="web-search"
           label={t('agent.codexWebSearchLabel')}
           hint={t('agent.codexWebSearchHint')}
-          checked={codexWebSearch}
-          disabled={isLaunching}
+          checked={toolModelConfig[selectedTool ?? ''] === 'smart-router' ? false : codexWebSearch}
+          disabled={isLaunching || toolModelConfig[selectedTool ?? ''] === 'smart-router'}
           onChange={setCodexWebSearch}
         />
       )}
@@ -1096,6 +1101,12 @@ export const AppManagerPanel: React.FC = () => {
               )}
               {selectedTool === 'dsh' && <DeepSeekAccountSection showDivider={hasVisibleModels} />}
               {selectedTool === 'grok' && <GrokAccountSection showDivider={hasVisibleModels} />}
+              {(selectedTool === 'kilo' || selectedTool === 'kilodesktop') && (
+                <ClientAccountSection provider="kilo" showDivider={hasVisibleModels} />
+              )}
+              {(selectedTool === 'copilot' || selectedTool === 'copilotdesktop') && (
+                <ClientAccountSection provider="copilot" showDivider={hasVisibleModels} />
+              )}
               {selectedTool === 'zcode' && <ZCodeAccountSection showDivider={hasVisibleModels} />}
               {(selectedTool === 'workbuddy' || selectedTool === 'workbuddyai') && (
                 <WorkBuddyAccountSection showDivider={hasVisibleModels} />
@@ -1174,6 +1185,8 @@ export const AppManagerBottom: React.FC = () => {
     zcodeAccounts,
     deepSeekAccounts,
     grokAccounts,
+    kiloAccounts,
+    copilotAccounts,
     manusAccounts,
     cueAccounts,
     grokBotAccounts,
@@ -1204,6 +1217,9 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'claudedesktop' && !!claudeDesktopAccounts.selectedId) ||
     (selectedTool === 'dsh' && !!deepSeekAccounts.selectedId) ||
     (selectedTool === 'grok' && !!grokAccounts.selectedId) ||
+    ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && !!kiloAccounts.selectedId) ||
+    ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') &&
+      !!copilotAccounts.selectedId) ||
     (selectedTool === 'manus' && !!manusAccounts.selectedId) ||
     (selectedTool === 'cue' && !!cueAccounts.selectedId) ||
     (selectedTool === 'grokbot' && !!grokBotAccounts.selectedId) ||
@@ -1226,6 +1242,8 @@ export const AppManagerBottom: React.FC = () => {
     isLaunching ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||
+    ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && kiloAccounts.busy) ||
+    ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') && copilotAccounts.busy) ||
     (selectedTool === 'manus' && manusAccounts.busy) ||
     (selectedTool === 'cue' && cueAccounts.busy) ||
     (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) ||

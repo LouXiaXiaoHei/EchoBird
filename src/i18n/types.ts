@@ -1,4 +1,4 @@
-﻿// i18n type definitions (separate file to avoid circular imports)
+// i18n type definitions (separate file to avoid circular imports)
 
 // Translation key definitions
 export type TKey =
@@ -212,6 +212,16 @@ export type TKey =
   | 'freeModels.scanning'
   | 'freeModels.scanConnecting'
   | 'freeModels.tab.saved'
+  | 'freeModels.tab.account'
+  | 'accountProxy.provider'
+  | 'accountProxy.account'
+  | 'accountProxy.selectRequired'
+  | 'accountProxy.riskReadPrefix'
+  | 'accountProxy.riskNotice'
+  | 'accountProxy.riskAcceptSuffix'
+  | 'accountProxy.riskTitle'
+  | 'accountProxy.riskMessage'
+  | 'accountProxy.riskDismiss'
   | 'freeModels.tab.free'
   | 'freeModels.customAdd'
   | 'freeModels.saved.empty'

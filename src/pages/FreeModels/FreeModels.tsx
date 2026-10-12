@@ -44,6 +44,8 @@ import {
   X,
 } from 'lucide-react';
 import * as api from '../../api/tauri';
+import { accountProxyProviders } from '../../api/accountProxy';
+import type { AccountSource } from '../../api/types';
 import type { FreeModelDirectory, FreeModelEntry } from '../../api/freeModels';
 import { getModelIcon } from '../../components';
 import { ModelListCard } from '../../components/ModelListCard';
@@ -52,6 +54,7 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
 import { copyText } from '../../utils/copyText';
 import { useModelNexus } from '../ModelNexus/context';
 import './FreeModels.css';
@@ -67,6 +70,7 @@ const SCAN_STEP_MS = 230;
 const SCAN_COMPLETE_MS = 320;
 const ROUTER_ACTIVITY_POLL_MS = 750;
 const ROUTER_ACTIVITY_GRACE_MS = 2200;
+const ACCOUNT_PROXY_RISK_ACKNOWLEDGED_KEY = 'echobird-account-proxy-risk-acknowledged';
 
 interface FreeModelsContextValue {
   viewMode: 'smart' | 'super';
@@ -94,6 +98,7 @@ interface RouteModelInput {
   name: string;
   baseUrl: string;
   modelId: string;
+  accountSource?: AccountSource;
 }
 
 interface RouteModelNode {
@@ -102,6 +107,7 @@ interface RouteModelNode {
   provider: string;
   modelId: string;
   baseUrl: string;
+  accountSource?: AccountSource;
 }
 
 interface FreeModelProviderGroup {
@@ -206,6 +212,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           provider: model.name,
           modelId: model.modelId ?? '',
           baseUrl: model.baseUrl,
+          accountSource: model.accountSource,
         },
       ];
     });
@@ -324,6 +331,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
               provider: model.name,
               modelId: model.modelId,
               baseUrl: model.baseUrl,
+              accountSource: model.accountSource,
             },
           ]);
           setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
@@ -342,7 +350,13 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           setCustomModels((current) =>
             current.map((entry) =>
               entry.id === model.internalId
-                ? { ...entry, provider: model.name, modelId: model.modelId, baseUrl: model.baseUrl }
+                ? {
+                    ...entry,
+                    provider: model.name,
+                    modelId: model.modelId,
+                    baseUrl: model.baseUrl,
+                    accountSource: model.accountSource,
+                  }
                 : entry
             )
           );
@@ -625,7 +639,10 @@ function RouteModelCard({
 }) {
   const { t } = useI18n();
   const confirm = useConfirm();
-  const iconSrc = getModelIcon(model.provider, model.modelId);
+  const accountProvider = accountProxyProviders.find((p) => p.id === model.accountSource?.provider);
+  const iconSrc = accountProvider
+    ? `/icons/tools/${accountProvider.icon}`
+    : getModelIcon(model.provider, model.modelId);
 
   return (
     <div
@@ -903,6 +920,7 @@ function SmartRouterMain() {
         anthropicUrl: model.anthropicUrl || '',
         apiKey: model.apiKey,
         modelId: model.modelId || '',
+        accountSource: model.accountSource,
       });
       setKeyDestroyed(keyDestroyed);
       setShowApiKey(false);
@@ -1337,12 +1355,29 @@ function FreeModelProviderRow({
 }
 
 export function FreeModelsPanel() {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
+  const compactTabs = locale === 'en' || locale === 'ja';
   const { showToast } = useToast();
   const confirm = useConfirm();
-  const [activeTab, setActiveTab] = useState<'saved' | 'free'>('saved');
+  const [activeTab, setActiveTab] = useState<'saved' | 'account' | 'free'>('saved');
+  const [accountRiskAcknowledged, setAccountRiskAcknowledged] = useState(() => {
+    try {
+      return localStorage.getItem(ACCOUNT_PROXY_RISK_ACKNOWLEDGED_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const acknowledgeAccountRisk = (acknowledged: boolean) => {
+    setAccountRiskAcknowledged(acknowledged);
+    try {
+      localStorage.setItem(ACCOUNT_PROXY_RISK_ACKNOWLEDGED_KEY, String(acknowledged));
+    } catch {
+      // Keep the current choice if local storage is unavailable.
+    }
+  };
   const [addingId, setAddingId] = useState<string | null>(null);
   const setActivePage = useNavigationStore((state) => state.setActivePage);
+  const modelContext = useModelNexus();
   const {
     models,
     customModels,
@@ -1371,7 +1406,7 @@ export function FreeModelsPanel() {
     setShowAddModelModal,
     setKeyDestroyed,
     setShowApiKey,
-  } = useModelNexus();
+  } = modelContext;
   const providerGroups = useMemo(() => {
     const groups = new Map<string, FreeModelProviderGroup>();
     models.forEach((model) => {
@@ -1433,6 +1468,7 @@ export function FreeModelsPanel() {
         name: model.name,
         baseUrl: model.baseUrl,
         modelId: model.modelId ?? '',
+        accountSource: model.accountSource,
       });
     } catch (error) {
       console.error('Add saved model to smart router failed:', error);
@@ -1447,9 +1483,9 @@ export function FreeModelsPanel() {
       <div className="h-10 shrink-0 px-2 mb-2 flex items-center justify-between gap-2">
         <div
           role="tablist"
-          className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden"
+          className={`view-mode-tabs min-w-0 flex border border-cyber-border rounded-button overflow-hidden ${compactTabs ? 'flex-1' : ''}`}
         >
-          {(['saved', 'free'] as const).map((tab, index, tabs) => (
+          {(['saved', 'account', 'free'] as const).map((tab, index, tabs) => (
             <button
               key={tab}
               type="button"
@@ -1462,7 +1498,12 @@ export function FreeModelsPanel() {
               onKeyDown={(event) => {
                 if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
                 event.preventDefault();
-                const next = event.key === 'Home' ? 0 : event.key === 'End' ? 1 : 1 - index;
+                const next =
+                  event.key === 'Home'
+                    ? 0
+                    : event.key === 'End'
+                      ? tabs.length - 1
+                      : (index + (event.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
                 setActiveTab(tabs[next]);
                 const tabButtons =
                   event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
@@ -1470,21 +1511,34 @@ export function FreeModelsPanel() {
                   );
                 tabButtons?.[next]?.focus();
               }}
-              className={`view-mode-tab px-3 py-1.5 text-sm font-mono transition-[color] ${
+              className={`view-mode-tab min-w-0 whitespace-nowrap py-1.5 transition-[color] ${
+                compactTabs ? 'flex-auto px-[2px] text-[12px] font-sans' : 'px-3 text-sm font-mono'
+              } ${
                 activeTab === tab
                   ? 'bg-cyber-elevated text-cyber-text'
                   : 'text-cyber-text-secondary hover:text-cyber-text'
               }`}
             >
-              {t(tab === 'saved' ? 'freeModels.tab.saved' : 'freeModels.tab.free')}
+              {t(
+                tab === 'saved'
+                  ? 'freeModels.tab.saved'
+                  : tab === 'account'
+                    ? 'freeModels.tab.account'
+                    : 'freeModels.tab.free'
+              )}
             </button>
           ))}
         </div>
         <button
           type="button"
-          onClick={openCustomModel}
+          disabled={activeTab === 'account' && !accountRiskAcknowledged}
+          onClick={() => {
+            if (activeTab === 'account') {
+              if (accountRiskAcknowledged) openAccountModelForm('codex', modelContext);
+            } else openCustomModel();
+          }}
           aria-label={t('freeModels.customAdd')}
-          className="w-9 h-9 shrink-0 flex items-center justify-center border border-cyber-border rounded-button text-cyber-text-secondary hover:text-cyber-text hover:bg-cyber-elevated transition-colors"
+          className="w-9 h-9 shrink-0 flex items-center justify-center border border-cyber-border rounded-button text-cyber-text-secondary enabled:hover:text-cyber-text enabled:hover:bg-cyber-elevated disabled:opacity-40 transition-colors"
         >
           <Plus size={16} />
         </button>
@@ -1576,6 +1630,11 @@ export function FreeModelsPanel() {
               </div>
             )}
           </div>
+        ) : activeTab === 'account' ? (
+          <AccountProxyPanel
+            acknowledged={accountRiskAcknowledged}
+            onAcknowledgedChange={acknowledgeAccountRisk}
+          />
         ) : (
           <>
             <div className="h-10 shrink-0 px-2 flex items-center">

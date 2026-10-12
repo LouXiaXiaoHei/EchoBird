@@ -36,6 +36,20 @@ vi.mock('../../api/tauri', () => ({
   refreshTraeAccountQuota: vi.fn(),
   claimTraeDailyCredits: vi.fn(),
   deleteTraeAccount: vi.fn(),
+  listKiloAccounts: vi.fn().mockResolvedValue([]),
+  startKiloLogin: vi.fn(),
+  pollKiloLogin: vi.fn(),
+  cancelKiloLogin: vi.fn().mockResolvedValue(undefined),
+  switchKiloAccount: vi.fn(),
+  refreshKiloAccount: vi.fn(),
+  deleteKiloAccount: vi.fn(),
+  listCopilotAccounts: vi.fn().mockResolvedValue([]),
+  startCopilotLogin: vi.fn(),
+  pollCopilotLogin: vi.fn(),
+  cancelCopilotLogin: vi.fn().mockResolvedValue(undefined),
+  switchCopilotAccount: vi.fn(),
+  refreshCopilotAccount: vi.fn(),
+  deleteCopilotAccount: vi.fn(),
   listZCodeAccounts: vi.fn(),
   startZCodeLogin: vi.fn(),
   pollZCodeLogin: vi.fn(),
@@ -227,6 +241,13 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search preference', (tool) =>
         baseUrl: 'https://provider.example/v1',
         apiKey: 'fixture',
       },
+      {
+        internalId: 'smart-router',
+        name: 'Auto Router',
+        modelId: 'auto',
+        baseUrl: 'http://127.0.0.1:53683/v1',
+        apiKey: 'fixture-router',
+      },
       ...['deepseek.com', 'xiaomimimo.com'].map((domain) => ({
         internalId: domain,
         name: domain,
@@ -275,6 +296,33 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search preference', (tool) =>
         expect.objectContaining({ webSearch: true })
       );
     }
+  });
+
+  it('disables hosted search for auto without changing the saved preference for ordinary models', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'smart-router'));
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ model: 'auto', webSearch: false })
+    );
+    const calls = vi.mocked(api.applyModelToTool).mock.calls.length;
+    act(() => context.setCodexWebSearch(true));
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(calls);
+    expect(context.codexWebSearch).toBe(true);
+    expect(storage.has('echobird_codex_web_search')).toBe(false);
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ model: 'fixture-model', webSearch: true })
+    );
   });
   it('keeps navigation passive and preserves off across repeat apply, tool switches and remounts', async () => {
     await mount();
@@ -731,6 +779,12 @@ describe('VS Code API model workflow', () => {
         installed: true,
         activeModel: 'cline-before',
       },
+      {
+        id: 'copilotdesktop',
+        name: 'GitHub Copilot',
+        category: 'Desktop',
+        installed: true,
+      },
     ]);
     vi.mocked(api.getModels).mockResolvedValue([
       {
@@ -901,52 +955,55 @@ describe('VS Code API model workflow', () => {
     expect(openDialog).not.toHaveBeenCalled();
   });
 
-  it('ignores the previous failed tool cooldown while VS Code is pending', async () => {
-    await mount();
-    act(() => {
-      context.setSelectedTool('cline');
-      context.handleSelectModel('cline', 'fixture');
-    });
-    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
-      success: false,
-      message: 'Unavailable',
-    });
-    await act(async () => {
-      await context.handleLaunch();
-    });
-    expect(context.isLaunching).toBe(false);
-    act(() => {
-      context.setSelectedTool('vscode');
-      context.handleSelectModel('vscode', 'fixture');
-    });
-    let resolve!: (value: { success: boolean; message: string }) => void;
-    vi.mocked(api.applyModelToTool).mockImplementationOnce(
-      () =>
-        new Promise((r) => {
-          resolve = r;
-        })
-    );
-    let pending!: Promise<void>;
-    act(() => {
-      pending = context.handleLaunch();
-    });
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(3500);
-    });
-    expect(context.isLaunching).toBe(true);
-    await act(async () => {
-      await context.handleLaunch();
-    });
-    expect(api.applyModelToTool).toHaveBeenCalledTimes(2);
-    expect(api.startTool).not.toHaveBeenCalled();
-    await act(async () => {
-      resolve({ success: true, message: 'ok' });
-      await pending;
-      await vi.advanceTimersByTimeAsync(3000);
-    });
-    expect(context.isLaunching).toBe(false);
-    expect(api.startTool).toHaveBeenCalledOnce();
-  });
+  it.each(['vscode', 'copilotdesktop'])(
+    'ignores the previous failed tool cooldown while %s is pending',
+    async (tool) => {
+      await mount();
+      act(() => {
+        context.setSelectedTool('cline');
+        context.handleSelectModel('cline', 'fixture');
+      });
+      vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+        success: false,
+        message: 'Unavailable',
+      });
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      expect(context.isLaunching).toBe(false);
+      act(() => {
+        context.setSelectedTool(tool);
+        context.handleSelectModel(tool, 'fixture');
+      });
+      let resolve!: (value: { success: boolean; message: string }) => void;
+      vi.mocked(api.applyModelToTool).mockImplementationOnce(
+        () =>
+          new Promise((r) => {
+            resolve = r;
+          })
+      );
+      let pending!: Promise<void>;
+      act(() => {
+        pending = context.handleLaunch();
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3500);
+      });
+      expect(context.isLaunching).toBe(true);
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      expect(api.applyModelToTool).toHaveBeenCalledTimes(2);
+      expect(api.startTool).not.toHaveBeenCalled();
+      await act(async () => {
+        resolve({ success: true, message: 'ok' });
+        await pending;
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(context.isLaunching).toBe(false);
+      expect(api.startTool).toHaveBeenCalledExactlyOnceWith(tool, undefined, undefined);
+    }
+  );
 
   it('ignores a previous tool failure while VS Code configuration is pending', async () => {
     await mount();
@@ -1107,6 +1164,95 @@ const accountTools = [
   'antigravity',
   'antigravitydesktop',
 ] as const;
+describe('Copilot Desktop pending API apply', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.mocked(api.listCopilotAccounts).mockResolvedValue([]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      { internalId: 'fixture', name: 'Fixture', baseUrl: 'https://example.com/v1', apiKey: 'key' },
+    ]);
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore
+      .getState()
+      .setDetectedTools([
+        { id: 'copilotdesktop', name: 'GitHub Copilot', category: 'Desktop', installed: true },
+      ]);
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    act(() => {
+      context.setSelectedTool('copilotdesktop');
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(true);
+      context.handleSelectModel('copilotdesktop', 'fixture');
+    });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.useRealTimers();
+  });
+  it('blocks repeat applies until native initialization and optional launch finish', async () => {
+    let finishApply!: (value: { success: boolean; message: string }) => void;
+    let finishLaunch!: () => void;
+    vi.mocked(api.applyModelToTool).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishApply = resolve;
+      })
+    );
+    vi.mocked(api.startTool).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishLaunch = resolve;
+      })
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = context.handleLaunch();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      finishApply({ success: true, message: 'ok' });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(context.isLaunching).toBe(true);
+    expect(api.startTool).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finishLaunch();
+      await pending;
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+  });
+});
+
 describe.each(accountTools)('%s navigation account loading', (tool) => {
   let renderer: ReactTestRenderer;
   let context: ReturnType<typeof useAppManager>;

@@ -366,7 +366,19 @@ impl ProcessManager {
         }
 
         // Build the final command with tool-specific args
+        let copilot_executable = (tool_id == "copilot")
+            .then(|| {
+                copilot_literal_launch_path(
+                    command,
+                    crate::services::tool_manager::get_tool_exe_path(tool_id),
+                )
+            })
+            .flatten();
         let mut full_command = command.to_string();
+        #[cfg(not(windows))]
+        if let Some(executable) = &copilot_executable {
+            full_command = shell_single_quote(executable);
+        }
 
         // OpenCode reads the selected model from its native config; the V2
         // default command does not accept --model. MiMo / Kilo still use the
@@ -376,8 +388,17 @@ impl ProcessManager {
             "kilo" => crate::services::tool_config_manager::kilo_echobird_model(),
             _ => None,
         };
-        if let Some(mid) = model_id {
-            full_command = format!("{} --model echobird/{}", command, mid);
+        if tool_id == "kilo" {
+            #[cfg(not(windows))]
+            if let Some(argument) = kilo_model_arguments(model_id.as_deref()).get(1) {
+                full_command = format!("{} --model {}", command, shell_single_quote(argument));
+            }
+        }
+
+        if tool_id == "mimocode" {
+            if let Some(ref mid) = model_id {
+                full_command = format!("{} --model echobird/{}", command, mid);
+            }
         }
 
         #[cfg(windows)]
@@ -393,6 +414,12 @@ impl ProcessManager {
             // relying on PATH — some users have System32 stripped from PATH.
             let mut cmd = if tool_id == "musecode" {
                 musecode_windows_terminal(&full_command, &work_dir)
+            } else if let Some(executable) = &copilot_executable {
+                copilot_native_command(executable)
+            } else if tool_id == "kilo" {
+                let runtime = crate::services::tool_manager::get_kilo_runtime_path()
+                    .ok_or("Kilo CLI executable not found")?;
+                kilo_native_command(&runtime, model_id.as_deref())
             } else {
                 let mut cmd = Command::new(resolve_cmd_exe());
                 cmd.args(["/C", &full_command]);
@@ -974,6 +1001,31 @@ impl ProcessManager {
         // kill below terminates that process anyway.
         self.processes.remove(tool_id);
 
+        #[cfg(not(windows))]
+        if matches!(tool_id, "copilotdesktop" | "kilodesktop") {
+            let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
+                return false;
+            };
+            #[cfg(target_os = "linux")]
+            if tool_id == "copilotdesktop"
+                && std::path::Path::new(&path)
+                    .extension()
+                    .is_some_and(|extension| extension == "AppImage")
+            {
+                return crate::services::copilot_accounts::desktop::verified_appimage_pid(
+                    std::path::Path::new(&path),
+                )
+                .is_some_and(|pid| unsafe { libc::kill(pid as i32, libc::SIGTERM) == 0 });
+            }
+            let Ok(path) = std::fs::canonicalize(path) else {
+                return false;
+            };
+            return crate::utils::process::command("pkill")
+                .args(["-f", &executable_process_pattern(&path.to_string_lossy())])
+                .output()
+                .is_ok_and(|output| output.status.success());
+        }
+
         // MiniMax editions share a process name; macOS WorkBuddy shares Electron
         // with unrelated apps. Match these clients by their executable path.
         if tool_id == "minimaxdesktop"
@@ -1232,6 +1284,50 @@ fn musecode_unix_command(
     }
 }
 
+fn copilot_literal_launch_path(command: &str, executable: Option<String>) -> Option<String> {
+    executable.filter(|path| command == "copilot" || command == path)
+}
+
+#[cfg(windows)]
+pub(crate) fn copilot_native_command(executable: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    if std::path::Path::new(executable)
+        .extension()
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+    {
+        let mut command = crate::utils::process::command(resolve_cmd_exe());
+        command.args(["/d", "/v:off", "/s", "/c"]);
+        command.env("ECHOBIRD_COPILOT_NATIVE_WRAPPER", executable);
+        command.raw_arg("\"\"%ECHOBIRD_COPILOT_NATIVE_WRAPPER%\"\"");
+        command
+    } else {
+        crate::utils::process::command(executable)
+    }
+}
+
+fn kilo_model_arguments(model_id: Option<&str>) -> Vec<String> {
+    model_id.map_or_else(Vec::new, |id| {
+        vec!["--model".into(), format!("echobird/{id}")]
+    })
+}
+
+#[cfg(any(windows, test))]
+fn kilo_native_command(runtime: &str, model_id: Option<&str>) -> Command {
+    let mut command = Command::new(runtime);
+    command.args(kilo_model_arguments(model_id));
+    let resources = std::path::Path::new(runtime)
+        .parent()
+        .map(|parent| parent.join("tree-sitter"));
+    if std::env::var_os("KILO_TREE_SITTER_WASM_DIR").is_none() {
+        if let Some(resources) = resources.filter(|dir| dir.join("tree-sitter.wasm").is_file()) {
+            command.env("KILO_TREE_SITTER_WASM_DIR", resources);
+        }
+    }
+    command
+}
+
 // Wrap a user command so the terminal stays open when the tool exits quickly
 // or with a non-zero status. The heuristic catches two real failure modes:
 //   - tool not found / immediate error  -> non-zero exit, user needs to read it
@@ -1323,6 +1419,194 @@ pub async fn open_tool_for_login(tool_id: &str) -> Result<(), String> {
     mgr.launch_tool(tool_id, None, None, false).await
 }
 
+/// A temporary native client used only by an explicit configuration operation.
+/// It does not enter the normal launcher cooldown or restart an existing client.
+pub(crate) struct OwnedDesktopConfigProcess {
+    child: std::process::Child,
+    stopped: bool,
+}
+
+#[cfg(windows)]
+fn owned_windows_process_times(child: &std::process::Child) -> Result<(u64, u64), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::FILETIME;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetProcessTimes(
+            process: std::os::windows::io::RawHandle,
+            created: *mut FILETIME,
+            exited: *mut FILETIME,
+            kernel: *mut FILETIME,
+            user: *mut FILETIME,
+        ) -> i32;
+    }
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // This is the original Child handle, including after exit, not a PID lookup.
+    if unsafe {
+        GetProcessTimes(
+            child.as_raw_handle(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err("accountError.closeClient".into());
+    }
+    let micros = |time: FILETIME| {
+        ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)) / 10
+    };
+    Ok((micros(created), micros(exited)))
+}
+
+#[cfg(windows)]
+fn stop_owned_windows_tree(pid: u32, created: u64, exited: u64) -> Result<(), String> {
+    let script = r#"
+$ErrorActionPreference='Stop'
+function Created($entry){return [long][decimal]::Truncate(([decimal]($entry.CreationDate.ToFileTimeUtc()))/10)}
+$all=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+$root=$all | Where-Object { $_.ProcessId -eq [uint32]$env:ECHOBIRD_OWNED_CONFIG_PID }
+if($root -and (Created $root) -ne [long]$env:ECHOBIRD_OWNED_CONFIG_CREATED){exit 2}
+$queue=[Collections.Generic.Queue[object]]::new()
+$queue.Enqueue(@{Pid=[uint32]$env:ECHOBIRD_OWNED_CONFIG_PID;Created=[long]$env:ECHOBIRD_OWNED_CONFIG_CREATED;Exited=[long]$env:ECHOBIRD_OWNED_CONFIG_EXITED})
+$owned=@()
+while($queue.Count -gt 0){
+  $parent=$queue.Dequeue()
+  foreach($entry in $all | Where-Object { $_.ParentProcessId -eq $parent.Pid }){
+    $birth=Created $entry
+    if($birth -lt $parent.Created -or ($parent.Exited -gt 0 -and $birth -gt $parent.Exited)){continue}
+    $identity=@{Pid=$entry.ProcessId;Created=$birth;Exited=0}
+    $owned+=$identity
+    $queue.Enqueue($identity)
+  }
+}
+if($root){$owned+=@{Pid=$root.ProcessId;Created=(Created $root)}}
+$ErrorActionPreference='Continue'
+if($root){& taskkill.exe /PID $root.ProcessId /T /F >$null 2>&1}
+$survivors=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+foreach($entry in $owned){
+  $current=$survivors | Where-Object { $_.ProcessId -eq $entry.Pid }
+  if($current -and (Created $current) -eq $entry.Created){& taskkill.exe /PID $entry.Pid /T /F >$null 2>&1}
+}
+$ErrorActionPreference='Stop'
+$deadline=[DateTime]::UtcNow.AddSeconds(3)
+do{
+  $remaining=$false
+  $current=@(Get-CimInstance Win32_Process -ErrorAction Stop)
+  foreach($entry in $owned){
+    $candidate=$current | Where-Object { $_.ProcessId -eq $entry.Pid }
+    if($candidate -and (Created $candidate) -eq $entry.Created){$remaining=$true}
+  }
+  if(-not $remaining){exit 0}
+  Start-Sleep -Milliseconds 100
+}while([DateTime]::UtcNow -lt $deadline)
+exit 1
+"#;
+    let status = crate::utils::process::command("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("ECHOBIRD_OWNED_CONFIG_PID", pid.to_string())
+        .env("ECHOBIRD_OWNED_CONFIG_CREATED", created.to_string())
+        .env("ECHOBIRD_OWNED_CONFIG_EXITED", exited.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|_| "accountError.closeClient")?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("accountError.closeClient".into())
+    }
+}
+
+impl OwnedDesktopConfigProcess {
+    pub(crate) fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub(crate) fn stop(&mut self) -> Result<(), String> {
+        if self.stopped {
+            return Ok(());
+        }
+        let exited = self
+            .child
+            .try_wait()
+            .map_err(|_| "accountError.closeClient")?
+            .is_some();
+        #[cfg(windows)]
+        {
+            // taskkill /T can terminate the parent while a native SDK child
+            // survives. Capture only this owned tree before killing it, and
+            // retain creation times so a reused descendant PID is never targeted.
+            let (created, ended) = owned_windows_process_times(&self.child)?;
+            stop_owned_windows_tree(self.id(), created, ended)?;
+            let _ = exited;
+        }
+        #[cfg(unix)]
+        {
+            if exited {
+                self.stopped = true;
+                return Ok(());
+            }
+            // The child starts a separate process group, so its helpers are owned too.
+            if unsafe { libc::kill(-(self.id() as i32), libc::SIGKILL) } != 0
+                && self.child.try_wait().ok().flatten().is_none()
+            {
+                return Err("accountError.closeClient".into());
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            if self
+                .child
+                .try_wait()
+                .map_err(|_| "accountError.closeClient")?
+                .is_some()
+            {
+                self.stopped = true;
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("accountError.closeClient".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+}
+
+impl Drop for OwnedDesktopConfigProcess {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+pub(crate) fn start_desktop_for_config(tool_id: &str) -> Result<OwnedDesktopConfigProcess, String> {
+    let executable =
+        super::tool_manager::get_tool_exe_path(tool_id).ok_or("accountError.initializeClient")?;
+    let mut command = crate::utils::process::command(&executable);
+    if let Some(directory) = std::path::Path::new(&executable).parent() {
+        command.current_dir(directory);
+    }
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command
+        .spawn()
+        .map_err(|_| "accountError.initializeClient")?;
+    Ok(OwnedDesktopConfigProcess {
+        child,
+        stopped: false,
+    })
+}
+
 /// Account storage must not be replaced while its owning desktop app is alive.
 pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     let path = super::tool_manager::get_tool_exe_path(tool_id).unwrap_or_default();
@@ -1382,6 +1666,18 @@ pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     }
     #[cfg(target_os = "linux")]
     {
+        if tool_id == "copilotdesktop"
+            && std::path::Path::new(&path)
+                .extension()
+                .is_some_and(|extension| extension == "AppImage")
+        {
+            return Ok(
+                crate::services::copilot_accounts::desktop::verified_appimage_pid(
+                    std::path::Path::new(&path),
+                )
+                .is_some(),
+            );
+        }
         let executable = std::fs::canonicalize(&path).map_err(|_| "accountError.closeClient")?;
         for entry in std::fs::read_dir("/proc")
             .map_err(|_| "accountError.closeClient")?
@@ -1419,7 +1715,472 @@ pub(crate) async fn stop_desktop_for_config(tool_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn copilot_literal_launch_changes_only_default_or_exact_native_commands() {
+        let executable = "/Users/alice/Tool Dir/it's/copilot";
+        for command in ["copilot", executable] {
+            let resolved = super::copilot_literal_launch_path(command, Some(executable.into()));
+            assert_eq!(resolved.as_deref(), Some(executable));
+            assert_eq!(
+                super::shell_single_quote(resolved.as_deref().unwrap()),
+                "'/Users/alice/Tool Dir/it'\\''s/copilot'"
+            );
+        }
+        for custom in [
+            "copilot --model local",
+            "env CUSTOM=true copilot",
+            "other-tool",
+        ] {
+            assert!(super::copilot_literal_launch_path(custom, Some(executable.into())).is_none());
+        }
+        assert!(super::copilot_literal_launch_path("copilot", None).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copilot_windows_native_launch_keeps_the_resolved_path_literal() {
+        let native = r"C:\Tool Dir & fixture\copilot.exe";
+        let command = super::copilot_native_command(native);
+        assert_eq!(command.get_program(), std::ffi::OsStr::new(native));
+        assert!(command.get_args().next().is_none());
+        let wrapper = r"C:\Tool Dir & fixture\copilot.cmd";
+        assert_eq!(
+            super::copilot_native_command(wrapper)
+                .get_args()
+                .collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("/d"),
+                std::ffi::OsStr::new("/v:off"),
+                std::ffi::OsStr::new("/s"),
+                std::ffi::OsStr::new("/c"),
+                std::ffi::OsStr::new("\"\"%ECHOBIRD_COPILOT_NATIVE_WRAPPER%\"\"")
+            ]
+        );
+        assert!(super::copilot_native_command(wrapper)
+            .get_envs()
+            .any(|(name, value)| name == "ECHOBIRD_COPILOT_NATIVE_WRAPPER"
+                && value == Some(std::ffi::OsStr::new(wrapper))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn copilot_windows_wrapper_executes_an_owned_path_with_spaces_and_ampersand() {
+        let root = std::env::temp_dir().join(format!(
+            "copilot wrapper & %ECHOBIRD_COPILOT_WRAPPER_PROBE% ! fixture {}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let wrapper = root.join("copilot.cmd");
+        std::fs::write(
+            &wrapper,
+            b"@echo off\r\necho echobird-copilot-wrapper-ok %*\r\n",
+        )
+        .unwrap();
+        let results = [
+            Vec::new(),
+            vec!["login", "--web-flow"],
+            vec![
+                "--headless",
+                "--stdio",
+                "--no-auto-update",
+                "--no-auto-login",
+            ],
+        ]
+        .map(|arguments| {
+            let output = super::copilot_native_command(&wrapper.to_string_lossy())
+                .args(&arguments)
+                .env("ECHOBIRD_COPILOT_WRAPPER_PROBE", "expanded-would-break")
+                .output();
+            (arguments, output)
+        });
+        std::fs::remove_file(wrapper).unwrap();
+        std::fs::remove_dir(root).unwrap();
+        for (arguments, output) in results {
+            let output = output.unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                format!("echobird-copilot-wrapper-ok {}", arguments.join(" ")).trim()
+            );
+        }
+    }
+
+    #[test]
+    fn new_desktop_restart_patterns_match_the_native_executable_and_exclude_other_apps() {
+        for path in [
+            "/Applications/GitHub Copilot.app/Contents/MacOS/github",
+            "/Applications/Kilo.app/Contents/MacOS/kilo-desktop",
+            "/home/alice/Apps/Kilo (custom).app/Contents/MacOS/native-kilo",
+            "/opt/kilo-desktop/kilo-desktop",
+        ] {
+            let pattern = regex::Regex::new(&super::executable_process_pattern(path)).unwrap();
+            assert!(pattern.is_match(path));
+            assert!(pattern.is_match(&format!("{path} --native-argument")));
+            assert!(!pattern.is_match(&format!("{path}-other")));
+            assert!(!pattern.is_match(&format!("/other{path}")));
+            assert!(!pattern.is_match("/Applications/Other.app/Contents/MacOS/github"));
+        }
+    }
+
+    #[cfg(windows)]
+    async fn owned_visible_window_status(
+        owned: &super::OwnedDesktopConfigProcess,
+        executable: &str,
+    ) -> Result<std::process::ExitStatus, String> {
+        let (created, _) = super::owned_windows_process_times(&owned.child)?;
+        let script = r#"
+$ErrorActionPreference='Stop'
+try {
+  Add-Type 'using System; using System.Runtime.InteropServices; public static class KiloProbeWindow { private delegate bool Callback(IntPtr h, IntPtr p); [DllImport("user32.dll", SetLastError=true)] private static extern bool EnumWindows(Callback c, IntPtr p); [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h); [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid); public static bool Visible(uint process) { bool found=false; Callback callback=(window,unused)=>{uint owner; GetWindowThreadProcessId(window,out owner); if(owner==process && IsWindowVisible(window)){found=true;} return true;}; if(!EnumWindows(callback,IntPtr.Zero)){throw new InvalidOperationException();} return found; } }'
+  $expectedExe=[IO.Path]::GetFullPath($env:ECHOBIRD_KILO_GUI_EXE)
+  $deadline=[DateTime]::UtcNow.AddSeconds(20)
+  do {
+    $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$env:ECHOBIRD_KILO_GUI_PID) -ErrorAction Stop
+    if(-not $process){exit 2}
+    $created=[long][decimal]::Truncate(([decimal]($process.CreationDate.ToFileTimeUtc()))/10)
+    if($created -ne [long]$env:ECHOBIRD_KILO_GUI_CREATED -or -not $process.ExecutablePath -or -not $process.ExecutablePath.Equals($expectedExe,[StringComparison]::OrdinalIgnoreCase)){exit 3}
+    if([KiloProbeWindow]::Visible([uint32]$env:ECHOBIRD_KILO_GUI_PID)){exit 0}
+    Start-Sleep -Milliseconds 200
+  }while([DateTime]::UtcNow -lt $deadline)
+  exit 1
+} catch {exit 4}
+"#;
+        crate::utils::process::async_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("ECHOBIRD_KILO_GUI_PID", owned.id().to_string())
+            .env("ECHOBIRD_KILO_GUI_CREATED", created.to_string())
+            .env("ECHOBIRD_KILO_GUI_EXE", executable)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map_err(|_| "owned GUI detector could not start".into())
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "explicit isolated Kilo Desktop GUI launch; ECHOBIRD_LIVE_KILO_GUI=1 and closed clients required"]
+    async fn live_isolated_kilo_desktop_gui_launch_probe() -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        use std::{fs, path::PathBuf, process::Stdio};
+
+        if std::env::var("ECHOBIRD_LIVE_KILO_GUI").as_deref() != Ok("1") {
+            return Err("explicit Kilo GUI probe flag is required".into());
+        }
+        let status = crate::utils::process::async_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; try { if(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -in @('kilo.exe','kilo-desktop.exe') }){exit 1}else{exit 0} } catch {exit 2}"])
+            .status().await.map_err(|_| "Kilo process inventory failed")?;
+        if status.code() != Some(0) {
+            return Err("Kilo clients must be closed before the GUI probe".into());
+        }
+        let executable = crate::services::tool_manager::get_tool_exe_path("kilodesktop")
+            .ok_or("Kilo Desktop is not installed")?;
+        let home = dirs::home_dir().ok_or("home is unavailable")?;
+        let xdg = |name: &str, fallback: PathBuf| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or(fallback)
+        };
+        let cli = xdg("XDG_CONFIG_HOME", home.join(".config")).join("kilo");
+        let desktop = dirs::config_dir()
+            .ok_or("desktop data is unavailable")?
+            .join("Kilo Desktop");
+        let mut paths = vec![
+            xdg("XDG_DATA_HOME", home.join(".local/share")).join("kilo/auth.json"),
+            desktop.join("plugins/kilo-ui/model-preferences.json"),
+            home.join(".echobird/kilo-accounts.json"),
+            home.join(".echobird/kilo.json"),
+        ];
+        for directory in [cli, desktop.join("plugins/kilo-server/runtime/config/kilo")] {
+            paths.extend(
+                ["config.json", "kilo.json", "kilo.jsonc"].map(|name| directory.join(name)),
+            );
+        }
+        let hashes = || -> Result<Vec<Option<Vec<u8>>>, String> {
+            paths
+                .iter()
+                .map(|path| match fs::read(path) {
+                    Ok(bytes) => Ok(Some(Sha256::digest(bytes).to_vec())),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(_) => Err("GUI probe snapshot failed".into()),
+                })
+                .collect()
+        };
+        let before = hashes()?;
+        let temporary =
+            std::env::temp_dir().join(format!("echobird-kilo-gui-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&temporary).map_err(|_| "GUI probe temporary directory failed")?;
+        let cleanup_temporary = || -> Result<(), String> {
+            let resolved =
+                fs::canonicalize(&temporary).map_err(|_| "GUI temporary path resolution failed")?;
+            let parent = fs::canonicalize(std::env::temp_dir())
+                .map_err(|_| "GUI temporary parent resolution failed")?;
+            if resolved.parent() != Some(parent.as_path()) {
+                return Err("GUI cleanup directory is outside its temporary parent".into());
+            }
+            fs::remove_dir_all(&resolved).map_err(|_| "GUI temporary cleanup failed".into())
+        };
+        let mut command = crate::utils::process::command(&executable);
+        command
+            .arg(format!(
+                "--user-data-dir={}",
+                temporary.join("desktop").display()
+            ))
+            .current_dir(
+                std::path::Path::new(&executable)
+                    .parent()
+                    .ok_or("Kilo executable directory missing")?,
+            )
+            .env("XDG_CONFIG_HOME", temporary.join("config"))
+            .env("XDG_DATA_HOME", temporary.join("data"))
+            .env("XDG_CACHE_HOME", temporary.join("cache"))
+            .env("XDG_STATE_HOME", temporary.join("state"))
+            .env("KILO_AUTH_CONTENT", "{}")
+            .env("KILO_CONFIG_CONTENT", "{}")
+            // Official packaged-e2e switch also isolates the external Anaconda keyring.
+            .env("ANACONDA_SKIP_KEYRING", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let control_executable = PathBuf::from(
+            std::env::var_os("SystemRoot").ok_or("GUI control system directory missing")?,
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let control_child = crate::utils::process::command(&control_executable)
+            .args([
+                "-STA",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$ErrorActionPreference='Stop'; Add-Type -AssemblyName System.Windows.Forms; $form=New-Object System.Windows.Forms.Form; $form.Text='EchoBird window detector'; $form.Width=240; $form.Height=100; $timer=New-Object System.Windows.Forms.Timer; $timer.Interval=60000; $timer.Add_Tick({$form.Close()}); $timer.Start(); try{[void]$form.ShowDialog()}finally{$timer.Dispose();$form.Dispose()}",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| "GUI cleanup positive control failed")?;
+        let mut control = super::OwnedDesktopConfigProcess {
+            child: control_child,
+            stopped: false,
+        };
+        let positive =
+            owned_visible_window_status(&control, &control_executable.to_string_lossy()).await;
+        if !positive.as_ref().is_ok_and(|status| status.success()) {
+            control.stop()?;
+            cleanup_temporary()?;
+            let positive = positive?;
+            return Err(format!(
+                "owned Form detector positive control failed: exitCode={:?}",
+                positive.code()
+            ));
+        }
+        eprintln!("provider=Kilo stage=gui_detector_positive_control status=ok");
+        let child = command
+            .spawn()
+            .map_err(|_| "isolated Kilo GUI spawn failed")?;
+        let mut owned = super::OwnedDesktopConfigProcess {
+            child,
+            stopped: false,
+        };
+        let window = owned_visible_window_status(&owned, &executable).await;
+        let root_exit = owned
+            .child
+            .try_wait()
+            .map_err(|_| "owned GUI process state failed")?
+            .and_then(|status| status.code());
+        let stopped = owned.stop();
+        let control_untouched = control
+            .child
+            .try_wait()
+            .map_err(|_| "GUI control state failed")?
+            .is_none();
+        control.stop()?;
+        let after = hashes()?;
+        if stopped.is_err() {
+            return Err("owned Kilo GUI cleanup failed".into());
+        }
+        cleanup_temporary()?;
+        if before != after {
+            return Err("isolated GUI launch changed official native files".into());
+        }
+        if !control_untouched {
+            return Err("owned GUI cleanup affected the unrelated process positive control".into());
+        }
+        let window = window?;
+        if !window.success() {
+            return Err(format!(
+                "owned Kilo GUI visible-window verification failed: detectorExitCode={:?} rootExitCode={root_exit:?} (1=timeout, 2=rootGone, 3=identityMismatch, 4=instrumentError)",
+                window.code()
+            ));
+        }
+        eprintln!("provider=Kilo stage=gui_owned_window status=ok");
+        eprintln!("provider=Kilo stage=gui_owned_cleanup status=ok unrelatedProcessUnchanged=true");
+        eprintln!("provider=Kilo stage=gui_preservation status=ok officialFilesHashUnchanged=true");
+        Ok(())
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn temporary_config_process_cleanup_preserves_an_unowned_process() {
+        fn worker() -> std::process::Child {
+            #[cfg(windows)]
+            let mut command = crate::utils::process::command("powershell.exe");
+            #[cfg(windows)]
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ]);
+            #[cfg(unix)]
+            let mut command = crate::utils::process::command("sleep");
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.arg("60").process_group(0);
+            }
+            command.spawn().unwrap()
+        }
+        let mut owned = super::OwnedDesktopConfigProcess {
+            child: worker(),
+            stopped: false,
+        };
+        let mut unowned = super::OwnedDesktopConfigProcess {
+            child: worker(),
+            stopped: false,
+        };
+        assert!(owned.child.try_wait().unwrap().is_none());
+        assert!(unowned.child.try_wait().unwrap().is_none());
+        owned.stop().unwrap();
+        assert!(owned.child.try_wait().unwrap().is_some());
+        assert!(unowned.child.try_wait().unwrap().is_none());
+        unowned.stop().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temporary_cleanup_rejects_a_different_root_creation_identity() {
+        let child = crate::utils::process::command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ])
+            .spawn()
+            .unwrap();
+        let mut owned = super::OwnedDesktopConfigProcess {
+            child,
+            stopped: false,
+        };
+        let (created, exited) = super::owned_windows_process_times(&owned.child).unwrap();
+        assert!(super::stop_owned_windows_tree(owned.id(), created + 1_000_000, exited).is_err());
+        assert!(owned.child.try_wait().unwrap().is_none());
+        owned.stop().unwrap();
+        owned.stop().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn temporary_cleanup_reaps_owned_descendants_after_the_parent_exits() {
+        use std::io::BufRead;
+        let child = crate::utils::process::command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$worker=Start-Process powershell.exe -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60' -WindowStyle Hidden -PassThru; Write-Output $worker.Id"])
+            .stdout(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let mut owned = super::OwnedDesktopConfigProcess {
+            child,
+            stopped: false,
+        };
+        let mut line = String::new();
+        std::io::BufReader::new(owned.child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let descendant: u32 = line.trim().parse().unwrap();
+        owned.child.wait().unwrap();
+        let other = crate::utils::process::command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 60",
+            ])
+            .spawn()
+            .unwrap();
+        let mut unowned = super::OwnedDesktopConfigProcess {
+            child: other,
+            stopped: false,
+        };
+        owned.stop().unwrap();
+        let result = crate::utils::process::command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "if(Get-CimInstance Win32_Process -Filter ('ProcessId = '+$env:ECHOBIRD_FIXTURE_PID)){exit 1}else{exit 0}"])
+            .env("ECHOBIRD_FIXTURE_PID", descendant.to_string()).status().unwrap();
+        assert!(result.success());
+        assert!(unowned.child.try_wait().unwrap().is_none());
+        unowned.stop().unwrap();
+    }
+
     use super::is_third_party_codex_base_url;
+
+    #[test]
+    fn kilo_models_are_individual_arguments_and_official_selection_has_no_override() {
+        let runtime = if cfg!(windows) {
+            r"C:\Kilo CLI\kilo.exe"
+        } else {
+            "/tmp/Kilo CLI/kilo"
+        };
+        for model in [
+            "normal",
+            "vendor/model",
+            "space model",
+            "'quoted'\"model",
+            "&echo marker",
+            "%PATH%",
+            "$(echo marker)",
+        ] {
+            let command = super::kilo_native_command(runtime, Some(model));
+            assert_eq!(command.get_program(), std::ffi::OsStr::new(runtime));
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                vec![
+                    std::ffi::OsStr::new("--model"),
+                    std::ffi::OsStr::new(&format!("echobird/{model}"))
+                ]
+            );
+        }
+        assert_eq!(
+            super::shell_single_quote("echobird/space & %PATH% $(echo marker)"),
+            "'echobird/space & %PATH% $(echo marker)'"
+        );
+        assert_eq!(
+            super::shell_single_quote("echobird/a'b"),
+            "'echobird/a'\\''b'"
+        );
+        assert!(super::kilo_native_command(runtime, None)
+            .get_args()
+            .next()
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kilo_posix_shell_preserves_a_single_literal_model_argument() {
+        for model in [
+            "vendor/model",
+            "space 'quote' \"double\" & %PATH% $(echo marker)",
+        ] {
+            let argument = format!("echobird/{model}");
+            let output = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &format!("printf '%s' {}", super::shell_single_quote(&argument)),
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), argument);
+        }
+    }
 
     #[cfg(windows)]
     use super::openscience_windows_data_dir_for;

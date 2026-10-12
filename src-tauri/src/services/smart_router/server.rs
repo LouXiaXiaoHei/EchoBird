@@ -24,6 +24,9 @@ use crate::services::model_manager;
 use crate::utils::platform::echobird_dir;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_RESPONSE_BINDINGS: usize = 512;
+const RESPONSE_BINDING_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
+const RESPONSES_CAPABILITY_LIFETIME_MS: u64 = 5 * 60 * 1_000;
 pub const MAX_ROUTE_CANDIDATES: usize = 20;
 const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(45);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -127,6 +130,8 @@ struct AppState {
     http_client: reqwest::Client,
     route_memory: Arc<Mutex<RouteMemory>>,
     route_memory_path: Option<PathBuf>,
+    #[cfg(test)]
+    fixture_responses: Option<Arc<Mutex<HashMap<String, Response>>>>,
 }
 
 impl AppState {
@@ -140,6 +145,8 @@ impl AppState {
             http_client,
             route_memory: shared_route_memory(),
             route_memory_path: Some(route_memory_path()),
+            #[cfg(test)]
+            fixture_responses: None,
         })
     }
 
@@ -154,6 +161,7 @@ impl AppState {
             http_client,
             route_memory: Arc::new(Mutex::new(RouteMemory::default())),
             route_memory_path: None,
+            fixture_responses: None,
         })
     }
 }
@@ -165,6 +173,28 @@ struct RouteMemory {
     version: u32,
     #[serde(default)]
     candidates: HashMap<String, CandidateHealth>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    accounts: HashMap<String, CandidateHealth>,
+    #[serde(default)]
+    revision: u64,
+    #[serde(skip)]
+    credential_versions: HashMap<String, (String, u64)>,
+    #[serde(skip)]
+    account_epochs: HashMap<String, u64>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    response_bindings: HashMap<String, ResponseBinding>,
+    #[serde(skip)]
+    unsupported_responses: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseBinding {
+    candidate_id: String,
+    fingerprint: String,
+    expires_at_ms: u64,
+    #[serde(default)]
+    ambiguous: bool,
 }
 
 impl Default for RouteMemory {
@@ -172,6 +202,12 @@ impl Default for RouteMemory {
         Self {
             version: route_memory_version(),
             candidates: HashMap::new(),
+            accounts: HashMap::new(),
+            revision: 0,
+            credential_versions: HashMap::new(),
+            account_epochs: HashMap::new(),
+            response_bindings: HashMap::new(),
+            unsupported_responses: HashMap::new(),
         }
     }
 }
@@ -187,6 +223,17 @@ struct CandidateHealth {
     fingerprint: String,
     #[serde(default)]
     failure: Option<FailureClass>,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    account_key: Option<String>,
+}
+
+#[derive(Debug)]
+struct AttemptHealth {
+    revision: u64,
+    account_epoch: u64,
+    credential_version: Mutex<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,7 +242,9 @@ struct Candidate {
     model_id: String,
     base_url: String,
     api_key: String,
+    account_source: Option<crate::models::model::AccountSource>,
     fingerprint: String,
+    attempt: Option<Arc<AttemptHealth>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -206,6 +255,7 @@ enum FailureClass {
     ModelUnavailable,
     RateLimit,
     Transient,
+    RequestIncompatible,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,6 +273,13 @@ struct RoutePolicy {
     time_budget: Duration,
     header_timeout: Duration,
     first_byte_timeout: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RouteProtocol {
+    #[default]
+    Chat,
+    Responses,
 }
 
 impl Default for RoutePolicy {
@@ -311,7 +368,17 @@ pub(crate) fn forget_candidate_memory(candidate_id: &str) {
         return;
     };
     let removed = memory.candidates.remove(candidate_id).is_some();
-    if removed {
+    let account = model_manager::get_user_models()
+        .into_iter()
+        .find(|model| model.internal_id == candidate_id)
+        .and_then(|model| model.account_source);
+    let removed_account = account.is_some_and(|source| {
+        memory
+            .accounts
+            .remove(&source_health_key(&source))
+            .is_some()
+    });
+    if removed || removed_account {
         save_route_memory(&route_memory_path(), &memory);
     }
 }
@@ -344,6 +411,8 @@ pub(super) fn start(
         .route("/models", get(handle_models))
         .route("/v1/chat/completions", post(handle_chat))
         .route("/chat/completions", post(handle_chat))
+        .route("/v1/responses", post(handle_responses))
+        .route("/responses", post(handle_responses))
         .route("/v1/messages", post(handle_messages))
         .route("/messages", post(handle_messages))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
@@ -421,6 +490,24 @@ fn is_supported_router_model(model_id: &str) -> bool {
     )
 }
 
+async fn handle_responses(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let key = match api_key_for_use() {
+        Ok(key) => key,
+        Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+    if !is_authorized(&headers, &key) {
+        return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
+    }
+    if !is_supported_router_model(body["model"].as_str().unwrap_or_default()) {
+        return openai_error(StatusCode::NOT_FOUND, "Unknown router model");
+    }
+    route_responses_with_candidates(&state, &headers, body, resolve_candidates()).await
+}
+
 async fn handle_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -470,11 +557,13 @@ fn resolve_candidates() -> Vec<Candidate> {
                 let base_url = format!("http://127.0.0.1:{}/v1", local_server.port);
                 let api_key = local_server.api_key.clone();
                 return Some(Candidate {
+                    attempt: None,
                     internal_id: id,
                     fingerprint: candidate_fingerprint(&model_id, &base_url, &api_key),
                     model_id,
                     base_url,
                     api_key,
+                    account_source: None,
                 });
             }
 
@@ -484,16 +573,26 @@ fn resolve_candidates() -> Vec<Candidate> {
                 return None;
             }
             let api_key = model_manager::decrypt_key_for_use(&model.api_key);
-            if api_key.trim().is_empty() {
+            if api_key.trim().is_empty() && model.account_source.is_none() {
                 return None;
             }
 
             Some(Candidate {
+                attempt: None,
                 internal_id: model.internal_id.clone(),
-                fingerprint: candidate_fingerprint(model_id, &model.base_url, &model.api_key),
+                fingerprint: candidate_fingerprint(
+                    model_id,
+                    &model.base_url,
+                    &model
+                        .account_source
+                        .as_ref()
+                        .map(|source| serde_json::to_string(source).unwrap_or_default())
+                        .unwrap_or_else(|| model.api_key.clone()),
+                ),
                 model_id: model_id.to_string(),
                 base_url: model.base_url.clone(),
                 api_key,
+                account_source: model.account_source.clone(),
             })
         })
         .filter(|candidate| !super::is_router_url(&candidate.base_url))
@@ -516,6 +615,276 @@ async fn route_chat_with_candidates(
     .await
 }
 
+async fn route_responses_with_candidates(
+    state: &AppState,
+    inbound_headers: &HeaderMap,
+    body: Value,
+    candidates: Vec<Candidate>,
+) -> Response {
+    route_with_policy(
+        state,
+        inbound_headers,
+        body,
+        candidates,
+        RoutePolicy::default(),
+        RouteProtocol::Responses,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn route_live_account_probe(
+    source: crate::models::model::AccountSource,
+    model_id: String,
+    body: Value,
+) -> Result<Response, String> {
+    let state = AppState::for_tests()?;
+    let source_json = serde_json::to_string(&source).map_err(|_| "Invalid account source")?;
+    let candidate = Candidate {
+        attempt: None,
+        internal_id: "live-account-probe".into(),
+        fingerprint: candidate_fingerprint(&model_id, "account://echobird", &source_json),
+        model_id,
+        base_url: "account://echobird".into(),
+        api_key: String::new(),
+        account_source: Some(source),
+    };
+    // Use production routing without changing the user's candidates or health file.
+    Ok(route_chat_with_candidates(&state, &HeaderMap::new(), body, vec![candidate]).await)
+}
+
+async fn send_candidate(
+    state: &AppState,
+    headers: &HeaderMap,
+    candidate: &Candidate,
+    mut body: Value,
+    protocol: RouteProtocol,
+) -> Result<Response, String> {
+    #[cfg(test)]
+    if let Some(responses) = &state.fixture_responses {
+        return responses
+            .lock()
+            .map_err(|_| "Fixture response lock poisoned".to_string())?
+            .remove(&candidate.internal_id)
+            .ok_or_else(|| "Fixture response is missing".to_string());
+    }
+    if let Some(source) = &candidate.account_source {
+        let credentials = match crate::services::account_model_sources::credentials(source, false)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(
+                    crate::services::account_model_sources::credential_error(error).into_response(),
+                )
+            }
+        };
+        bind_attempt_credentials(state, candidate, &credentials);
+        let rejected_credentials = credentials.clone();
+        let result = send_account_request(
+            state,
+            source,
+            credentials,
+            &candidate.model_id,
+            body.clone(),
+            protocol,
+        )
+        .await;
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => error.into_response(),
+        };
+        if response.status() == StatusCode::UNAUTHORIZED {
+            // One refresh of the bound account only; never switch or log in a native client.
+            let credentials =
+                match crate::services::account_model_sources::credentials_after_rejection(
+                    source,
+                    &rejected_credentials,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(
+                            crate::services::account_model_sources::credential_error(error)
+                                .into_response(),
+                        )
+                    }
+                };
+            bind_attempt_credentials(state, candidate, &credentials);
+            return Ok(
+                match send_account_request(
+                    state,
+                    source,
+                    credentials,
+                    &candidate.model_id,
+                    body,
+                    protocol,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(error) => error.into_response(),
+                },
+            );
+        }
+        return Ok(response);
+    }
+    if protocol == RouteProtocol::Responses {
+        let continuing = has_previous_response(&body);
+        let unsupported = state.route_memory.lock().ok().is_some_and(|memory| {
+            memory
+                .unsupported_responses
+                .get(&candidate.fingerprint)
+                .is_some_and(|until| *until > now_ms())
+        });
+        if !unsupported || continuing {
+            let response = send_api_request(state, headers, candidate, &body, protocol).await?;
+            if matches!(response.status().as_u16(), 400 | 404 | 405 | 501) {
+                let status = response.status();
+                let (parts, response_body) = response.into_parts();
+                let bytes = axum::body::to_bytes(response_body, 64 * 1024)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if !responses_endpoint_unsupported(status, &bytes) || continuing {
+                    return Ok(Response::from_parts(parts, Body::from(bytes)));
+                }
+                remember_unsupported_responses(state, candidate);
+            } else {
+                return Ok(response);
+            }
+        }
+        body = match responses_chat_request(&body) {
+            Ok(chat) => chat,
+            Err(error) => return Ok(error.into_response()),
+        };
+        let response =
+            send_api_request(state, headers, candidate, &body, RouteProtocol::Chat).await?;
+        return responses_from_chat(response, &body)
+            .await
+            .map_err(|error| error.to_string());
+    }
+    crate::services::account_proxy::strip_response_metadata(&mut body);
+    send_api_request(state, headers, candidate, &body, protocol).await
+}
+
+#[derive(Clone, Copy)]
+struct NativeResponses;
+
+async fn send_account_request(
+    state: &AppState,
+    source: &crate::models::model::AccountSource,
+    credentials: Value,
+    model: &str,
+    body: Value,
+    protocol: RouteProtocol,
+) -> Result<Response, crate::services::account_proxy::ProxyError> {
+    if protocol == RouteProtocol::Responses {
+        if let Some(mut response) = crate::services::account_proxy::route_responses(
+            source.provider,
+            credentials.clone(),
+            model,
+            body.clone(),
+            &state.http_client,
+        )
+        .await?
+        {
+            response.extensions_mut().insert(NativeResponses);
+            return Ok(response);
+        }
+        let chat = responses_chat_request(&body)?;
+        let response = crate::services::account_proxy::route(
+            source.provider,
+            credentials,
+            model,
+            chat.clone(),
+            &state.http_client,
+        )
+        .await?;
+        return responses_from_chat(response, &chat).await;
+    }
+    crate::services::account_proxy::route(
+        source.provider,
+        credentials,
+        model,
+        body,
+        &state.http_client,
+    )
+    .await
+}
+
+fn responses_chat_request(
+    body: &Value,
+) -> Result<Value, crate::services::account_proxy::ProxyError> {
+    let mut chat =
+        crate::services::account_proxy::responses_to_chat(body).map_err(|mut error| {
+            error.error_code = Some("responses_conversion_unsupported".into());
+            error
+        })?;
+    // Collect after headers, within the router's existing completion budget.
+    chat["stream"] = json!(true);
+    Ok(chat)
+}
+
+async fn responses_from_chat(
+    response: Response,
+    chat: &Value,
+) -> Result<Response, crate::services::account_proxy::ProxyError> {
+    let original = &chat["_echobird_responses"];
+    let response =
+        crate::services::account_proxy::chat_to_responses_with_tools(response, true, original)
+            .await;
+    crate::services::account_proxy::responses_response(
+        response,
+        original["stream"].as_bool().unwrap_or(false),
+    )
+}
+
+async fn send_api_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    candidate: &Candidate,
+    body: &Value,
+    protocol: RouteProtocol,
+) -> Result<Response, String> {
+    let mut body = body.clone();
+    if protocol == RouteProtocol::Chat {
+        crate::services::account_proxy::strip_response_metadata(&mut body);
+    }
+    let mut request = state
+        .http_client
+        .post(if protocol == RouteProtocol::Responses {
+            responses_url(&candidate.base_url)
+        } else {
+            chat_completions_url(&candidate.base_url)
+        })
+        .bearer_auth(&candidate.api_key)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("HTTP-Referer", "https://echobird.ai")
+        .header("X-OpenRouter-Title", "EchoBird")
+        .header("X-OpenRouter-Categories", "programming-app,personal-agent")
+        .json(&body);
+    if let Some(user_agent) = headers.get(header::USER_AGENT) {
+        request = request.header(header::USER_AGENT, user_agent.clone());
+    }
+    let upstream = request.send().await.map_err(|e| e.to_string())?;
+    let status = upstream.status();
+    let response_headers = upstream.headers().clone();
+    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
+    *response.status_mut() = status;
+    *response.headers_mut() = response_headers;
+    if protocol == RouteProtocol::Responses {
+        response.extensions_mut().insert(NativeResponses);
+        crate::services::account_proxy::responses_response(
+            response,
+            body["stream"].as_bool().unwrap_or(false),
+        )
+        .map_err(|error| error.to_string())
+    } else {
+        Ok(response)
+    }
+}
+
 async fn route_chat_with_policy(
     state: &AppState,
     inbound_headers: &HeaderMap,
@@ -523,6 +892,40 @@ async fn route_chat_with_policy(
     candidates: Vec<Candidate>,
     policy: RoutePolicy,
 ) -> Response {
+    route_with_policy(
+        state,
+        inbound_headers,
+        body,
+        candidates,
+        policy,
+        RouteProtocol::Chat,
+    )
+    .await
+}
+
+async fn route_with_policy(
+    state: &AppState,
+    inbound_headers: &HeaderMap,
+    body: Value,
+    candidates: Vec<Candidate>,
+    policy: RoutePolicy,
+    protocol: RouteProtocol,
+) -> Response {
+    if protocol == RouteProtocol::Responses && body["background"] == true {
+        return openai_error(StatusCode::BAD_REQUEST, "Background Responses require a separate task lifecycle and are not supported by Auto Router");
+    }
+    if protocol == RouteProtocol::Responses
+        && body
+            .get("conversation")
+            .is_some_and(|value| !value.is_null())
+    {
+        return openai_error(StatusCode::BAD_REQUEST, "Conversation objects are not supported by Auto Router; use complete input or a bound previous_response_id");
+    }
+    let bound_continuation = protocol == RouteProtocol::Responses && has_previous_response(&body);
+    let bound_candidates = match response_candidates(state, &body, candidates.clone(), protocol) {
+        Ok(candidates) => candidates,
+        Err(error) => return openai_error(StatusCode::BAD_REQUEST, error),
+    };
     if candidates.is_empty() {
         return openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -530,7 +933,14 @@ async fn route_chat_with_policy(
         );
     }
 
-    let available = prioritized_candidates(state, candidates);
+    let mut available = prioritized_candidates(state, candidates);
+    if bound_continuation {
+        available.retain(|candidate| {
+            bound_candidates
+                .iter()
+                .any(|bound| bound.internal_id == candidate.internal_id)
+        });
+    }
     if available.is_empty() {
         return openai_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -540,35 +950,40 @@ async fn route_chat_with_policy(
 
     let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut attempts = Vec::new();
+    let mut incompatible_response = None;
     let routing_started = Instant::now();
 
-    for candidate in available.into_iter().take(policy.max_attempts) {
-        let Some(header_timeout) =
-            remaining_timeout(routing_started, policy.time_budget, policy.header_timeout)
-        else {
+    for mut candidate in available {
+        if candidate_is_cooling_down(state, &candidate) {
+            continue;
+        }
+        if attempts.len() >= policy.max_attempts {
+            break;
+        }
+        let Some(header_timeout) = remaining_timeout(
+            routing_started,
+            policy.time_budget,
+            if !stream_requested
+                && candidate.account_source.as_ref().is_some_and(|source| {
+                    source.provider == crate::models::model::AccountProvider::ClaudeCode
+                })
+            {
+                policy.time_budget
+            } else {
+                policy.header_timeout
+            },
+        ) else {
             break;
         };
         let mut upstream_body = body.clone();
+        begin_attempt(state, &mut candidate);
         upstream_body["model"] = Value::String(candidate.model_id.clone());
-        let url = chat_completions_url(&candidate.base_url);
-        let mut request = state
-            .http_client
-            .post(url)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(
-                header::AUTHORIZATION,
-                format!("Bearer {}", candidate.api_key),
-            )
-            .header("HTTP-Referer", "https://echobird.ai")
-            .header("X-OpenRouter-Title", "EchoBird")
-            .header("X-OpenRouter-Categories", "programming-app,personal-agent")
-            .json(&upstream_body);
-        if let Some(user_agent) = inbound_headers.get(header::USER_AGENT) {
-            request = request.header(header::USER_AGENT, user_agent.clone());
-        }
-
         let activity_guard = RouteActivityGuard::begin(&candidate.internal_id);
-        let sent = tokio::time::timeout(header_timeout, request.send()).await;
+        let sent = tokio::time::timeout(
+            header_timeout,
+            send_candidate(state, inbound_headers, &candidate, upstream_body, protocol),
+        )
+        .await;
         let response = match sent {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
@@ -605,6 +1020,12 @@ async fn route_chat_with_policy(
         let status = response.status();
         let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
         let cache_control = response.headers().get(header::CACHE_CONTROL).cloned();
+        let response_headers = response.headers().clone();
+        let native_responses = response.extensions().get::<NativeResponses>().is_some();
+        let model_scope = response
+            .extensions()
+            .get::<crate::services::account_proxy::ProxyFailureMetadata>()
+            .is_some_and(|metadata| metadata.model_scope);
         if !status.is_success() {
             let retry_after = retry_after(response.headers());
             let Some(error_body_timeout) =
@@ -619,22 +1040,57 @@ async fn route_chat_with_policy(
                 });
                 break;
             };
-            let response_body =
-                match tokio::time::timeout(error_body_timeout, response.bytes()).await {
-                    Ok(Ok(body)) => body,
-                    Ok(Err(_)) | Err(_) => {
-                        mark_failure(state, &candidate, FailureClass::Transient, None);
-                        attempts.push(AttemptRecord {
-                            candidate_id: candidate.internal_id.clone(),
-                            model_id: candidate.model_id.clone(),
-                            failure: FailureClass::Transient,
-                            status: Some(status.as_u16()),
-                        });
-                        break;
-                    }
-                };
+            let response_body = match tokio::time::timeout(
+                error_body_timeout,
+                response.into_body().collect(),
+            )
+            .await
+            {
+                Ok(Ok(body)) => body.to_bytes(),
+                Ok(Err(_)) | Err(_) => {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    attempts.push(AttemptRecord {
+                        candidate_id: candidate.internal_id.clone(),
+                        model_id: candidate.model_id.clone(),
+                        failure: FailureClass::Transient,
+                        status: Some(status.as_u16()),
+                    });
+                    break;
+                }
+            };
+            if bound_continuation && is_continuation_failure(status, &response_body) {
+                let mut response = upstream_response(
+                    status,
+                    content_type,
+                    cache_control,
+                    response_body,
+                    &candidate,
+                );
+                copy_response_headers(&mut response, &response_headers);
+                return response;
+            }
             if let Some(failure) = classify_failure(status, &response_body) {
-                mark_failure(state, &candidate, failure, retry_after);
+                if failure == FailureClass::RequestIncompatible {
+                    incompatible_response = Some(upstream_response(
+                        status,
+                        content_type.clone(),
+                        cache_control.clone(),
+                        response_body.clone(),
+                        &candidate,
+                    ));
+                }
+                mark_failure_scoped(state, &candidate, failure, retry_after, model_scope);
+                if protocol == RouteProtocol::Responses && has_previous_response(&body) {
+                    let mut response = upstream_response(
+                        status,
+                        content_type,
+                        cache_control,
+                        response_body,
+                        &candidate,
+                    );
+                    copy_response_headers(&mut response, &response_headers);
+                    return response;
+                }
                 attempts.push(AttemptRecord {
                     candidate_id: candidate.internal_id.clone(),
                     model_id: candidate.model_id.clone(),
@@ -649,17 +1105,26 @@ async fn route_chat_with_policy(
                 continue;
             }
 
-            return upstream_response(
+            let mut response = upstream_response(
                 status,
                 content_type,
                 cache_control,
                 response_body,
                 &candidate,
             );
+            if protocol == RouteProtocol::Responses {
+                copy_response_headers(&mut response, &response_headers);
+            }
+            return response;
         }
 
         if stream_requested {
-            let mut upstream_stream = response.bytes_stream();
+            let completion = StreamCompletion {
+                headers: response.headers().clone(),
+                protocol,
+                ..StreamCompletion::default()
+            };
+            let mut upstream_stream = response.into_body().into_data_stream();
             let Some(first_byte_timeout) = remaining_timeout(
                 routing_started,
                 policy.time_budget,
@@ -677,41 +1142,136 @@ async fn route_chat_with_policy(
             let first = tokio::time::timeout(first_byte_timeout, upstream_stream.next()).await;
             match first {
                 Ok(Some(Ok(first_chunk))) if !first_chunk.is_empty() => {
-                    mark_success(state, &candidate);
                     let stream_state = state.clone();
                     let stream_candidate = candidate.clone();
-                    let activity_guard = Arc::new(activity_guard);
-                    let rest = upstream_stream.then(move |item| {
-                        let stream_state = stream_state.clone();
-                        let stream_candidate = stream_candidate.clone();
-                        let activity_guard = activity_guard.clone();
-                        async move {
-                            let _activity_guard = activity_guard;
-                            match item {
-                                Ok(bytes) => Ok(bytes),
-                                Err(error) => {
-                                    mark_failure(
-                                        &stream_state,
-                                        &stream_candidate,
-                                        FailureClass::Transient,
-                                        None,
-                                    );
-                                    Err(std::io::Error::other(error))
+                    let body_stream = stream::unfold(
+                        (
+                            Some(first_chunk),
+                            upstream_stream,
+                            completion,
+                            false,
+                            activity_guard,
+                        ),
+                        move |(mut first, mut upstream, mut completion, finished, guard)| {
+                            let stream_state = stream_state.clone();
+                            let stream_candidate = stream_candidate.clone();
+                            async move {
+                                if finished {
+                                    return None;
                                 }
+                                let item = if let Some(bytes) = first.take() {
+                                    Some(Ok(bytes))
+                                } else {
+                                    upstream.next().await
+                                };
+                                let (result, finished) = match item {
+                                    Some(Ok(bytes)) => match completion.push(&bytes) {
+                                        Ok(()) => {
+                                            if completion.done {
+                                                if completion.failure.is_none() {
+                                                    mark_success(&stream_state, &stream_candidate);
+                                                    if native_responses {
+                                                        remember_response(
+                                                            &stream_state,
+                                                            &stream_candidate,
+                                                            completion.response_id.as_deref(),
+                                                        );
+                                                    }
+                                                } else if let Some(error) = &completion.failure {
+                                                    let _ = mark_response_failure(
+                                                        &stream_state,
+                                                        &stream_candidate,
+                                                        error,
+                                                        bound_continuation,
+                                                    );
+                                                }
+                                            }
+                                            (Ok(bytes), completion.done)
+                                        }
+                                        Err(error) => {
+                                            let _ = mark_response_failure(
+                                                &stream_state,
+                                                &stream_candidate,
+                                                &error,
+                                                bound_continuation,
+                                            );
+                                            (Err(error), true)
+                                        }
+                                    },
+                                    Some(Err(error)) => {
+                                        let _ = mark_response_failure(
+                                            &stream_state,
+                                            &stream_candidate,
+                                            &error,
+                                            bound_continuation,
+                                        );
+                                        (Err(std::io::Error::other(error)), true)
+                                    }
+                                    None => match completion.finish() {
+                                        Ok(()) => {
+                                            if let Some(error) = &completion.failure {
+                                                let _ = mark_response_failure(
+                                                    &stream_state,
+                                                    &stream_candidate,
+                                                    error,
+                                                    bound_continuation,
+                                                );
+                                            } else {
+                                                mark_success(&stream_state, &stream_candidate);
+                                                if native_responses {
+                                                    remember_response(
+                                                        &stream_state,
+                                                        &stream_candidate,
+                                                        completion.response_id.as_deref(),
+                                                    );
+                                                }
+                                            }
+                                            return None;
+                                        }
+                                        Err(error) => {
+                                            let _ = mark_response_failure(
+                                                &stream_state,
+                                                &stream_candidate,
+                                                &error,
+                                                bound_continuation,
+                                            );
+                                            (Err(error), true)
+                                        }
+                                    },
+                                };
+                                Some((result, (None, upstream, completion, finished, guard)))
                             }
-                        }
-                    });
-                    let body_stream =
-                        stream::once(async move { Ok::<Bytes, std::io::Error>(first_chunk) })
-                            .chain(rest);
-                    return streaming_response(
+                        },
+                    );
+                    let mut result = streaming_response(
                         content_type,
                         cache_control,
                         Body::from_stream(body_stream),
                         &candidate,
                     );
+                    if protocol == RouteProtocol::Responses {
+                        copy_response_headers(&mut result, &response_headers);
+                    }
+                    return result;
                 }
-                Ok(Some(Ok(_))) | Ok(None) | Ok(Some(Err(_))) | Err(_) => {
+                Ok(Some(Err(error))) => {
+                    let Some(failure) =
+                        mark_response_failure(state, &candidate, &error, bound_continuation)
+                    else {
+                        return proxy_error_from_chain(&error)
+                            .expect("Unclassified body failure has a typed upstream error")
+                            .clone()
+                            .into_response();
+                    };
+                    attempts.push(AttemptRecord {
+                        candidate_id: candidate.internal_id.clone(),
+                        model_id: candidate.model_id.clone(),
+                        failure,
+                        status: Some(status.as_u16()),
+                    });
+                    continue;
+                }
+                Ok(Some(Ok(_))) | Ok(None) | Err(_) => {
                     mark_failure(state, &candidate, FailureClass::Transient, None);
                     attempts.push(AttemptRecord {
                         candidate_id: candidate.internal_id.clone(),
@@ -736,23 +1296,82 @@ async fn route_chat_with_policy(
             });
             break;
         };
-        match tokio::time::timeout(body_timeout, response.bytes()).await {
+        match tokio::time::timeout(body_timeout, response.into_body().collect()).await {
             Ok(Ok(response_body)) => {
+                let bytes = response_body.to_bytes();
+                if protocol == RouteProtocol::Responses {
+                    let value = match serde_json::from_slice::<Value>(&bytes) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            mark_stream_failure(state, &candidate, &error);
+                            attempts.push(AttemptRecord {
+                                candidate_id: candidate.internal_id.clone(),
+                                model_id: candidate.model_id.clone(),
+                                failure: FailureClass::Transient,
+                                status: Some(status.as_u16()),
+                            });
+                            continue;
+                        }
+                    };
+                    if let Some(error) = crate::services::account_proxy::stream_error(
+                        if value["status"] == "failed" {
+                            "response.failed"
+                        } else {
+                            ""
+                        },
+                        &value.to_string(),
+                        &response_headers,
+                    ) {
+                        mark_response_failure(state, &candidate, &error, bound_continuation);
+                    } else if matches!(value["status"].as_str(), Some("completed" | "incomplete"))
+                        && value["object"] == "response"
+                        && value["id"].as_str().is_some_and(|id| !id.is_empty())
+                    {
+                        mark_success(state, &candidate);
+                        if native_responses {
+                            remember_response(state, &candidate, value["id"].as_str());
+                        }
+                    } else {
+                        mark_failure(state, &candidate, FailureClass::Transient, None);
+                        attempts.push(AttemptRecord {
+                            candidate_id: candidate.internal_id.clone(),
+                            model_id: candidate.model_id.clone(),
+                            failure: FailureClass::Transient,
+                            status: Some(status.as_u16()),
+                        });
+                        continue;
+                    }
+                    let mut response =
+                        upstream_response(status, content_type, cache_control, bytes, &candidate);
+                    copy_response_headers(&mut response, &response_headers);
+                    return response;
+                }
                 mark_success(state, &candidate);
-                return upstream_response(
-                    status,
-                    content_type,
-                    cache_control,
-                    response_body,
-                    &candidate,
-                );
+                return upstream_response(status, content_type, cache_control, bytes, &candidate);
             }
             Ok(Err(error)) => {
-                mark_failure(state, &candidate, FailureClass::Transient, None);
+                let Some(failure) =
+                    mark_response_failure(state, &candidate, &error, bound_continuation)
+                else {
+                    return proxy_error_from_chain(&error)
+                        .expect("Unclassified body failure has a typed upstream error")
+                        .clone()
+                        .into_response();
+                };
+                if protocol == RouteProtocol::Responses && has_previous_response(&body) {
+                    return proxy_error_from_chain(&error)
+                        .map(|error| error.clone().into_response())
+                        .unwrap_or_else(|| {
+                            openai_error(
+                                StatusCode::BAD_GATEWAY,
+                                "The bound Responses stream failed",
+                            )
+                        });
+                }
                 attempts.push(AttemptRecord {
                     candidate_id: candidate.internal_id.clone(),
                     model_id: candidate.model_id.clone(),
-                    failure: FailureClass::Transient,
+                    failure,
                     status: Some(status.as_u16()),
                 });
                 log::warn!(
@@ -779,6 +1398,15 @@ async fn route_chat_with_policy(
     }
 
     let detail = serde_json::to_value(&attempts).unwrap_or_else(|_| json!([]));
+    if !attempts.is_empty()
+        && attempts
+            .iter()
+            .all(|attempt| attempt.failure == FailureClass::RequestIncompatible)
+    {
+        if let Some(response) = incompatible_response {
+            return response;
+        }
+    }
     log::error!("[SmartRouter] all candidates failed: {detail}");
     json_error(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -795,7 +1423,7 @@ struct ToolCallBuffer {
 }
 
 struct AnthropicSseAdapter {
-    buffer: String,
+    parser: crate::services::account_proxy::SseParser,
     message_id: String,
     text_index: Option<usize>,
     next_block_index: usize,
@@ -808,7 +1436,7 @@ struct AnthropicSseAdapter {
 impl AnthropicSseAdapter {
     fn new() -> Self {
         Self {
-            buffer: String::new(),
+            parser: crate::services::account_proxy::SseParser::default(),
             message_id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
             text_index: None,
             next_block_index: 0,
@@ -838,37 +1466,45 @@ impl AnthropicSseAdapter {
         )
     }
 
-    fn push(&mut self, chunk: &[u8]) -> Vec<Bytes> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<Bytes>, String> {
         let mut events = Vec::new();
-        while let Some(newline) = self.buffer.find('\n') {
-            let line = self.buffer[..newline].trim_end_matches('\r').to_string();
-            self.buffer.drain(..=newline);
-            events.extend(self.process_line(&line));
+        for (event, data) in self.parser.push(chunk) {
+            events.extend(self.process_frame(&event, &data)?);
         }
-        events
+        Ok(events)
     }
 
-    fn finish(mut self) -> Vec<Bytes> {
+    fn finish(mut self) -> Result<Vec<Bytes>, String> {
         let mut events = Vec::new();
-        if !self.buffer.trim().is_empty() {
-            let line = std::mem::take(&mut self.buffer);
-            events.extend(self.process_line(line.trim_end_matches('\r')));
+        for (event, data) in self.parser.finish() {
+            events.extend(self.process_frame(&event, &data)?);
+        }
+        if !self.finished && self.finish_reason.is_none() {
+            return Err("Smart Router stream ended before completion".to_string());
         }
         events.extend(self.finish_events());
-        events
+        Ok(events)
     }
 
-    fn process_line(&mut self, line: &str) -> Vec<Bytes> {
-        let Some(data) = line.strip_prefix("data:").map(str::trim) else {
-            return Vec::new();
-        };
-        if data == "[DONE]" {
-            return self.finish_events();
+    fn process_frame(&mut self, event: &str, data: &str) -> Result<Vec<Bytes>, String> {
+        if self.finished {
+            return Ok(Vec::new());
         }
-        let Ok(chunk) = serde_json::from_str::<Value>(data) else {
-            return Vec::new();
-        };
+        if data.trim() == "[DONE]" {
+            return Ok(self.finish_events());
+        }
+        let chunk: Value = serde_json::from_str(data)
+            .map_err(|error| format!("Invalid Smart Router stream: {error}"))?;
+        if event == "error"
+            || chunk.get("error").is_some_and(|error| !error.is_null())
+            || chunk["type"] == "error"
+        {
+            return Err(chunk["error"]["message"]
+                .as_str()
+                .or_else(|| chunk["message"].as_str())
+                .unwrap_or("Smart Router upstream stream failed")
+                .to_string());
+        }
 
         if let Some(tokens) = chunk
             .get("usage")
@@ -883,14 +1519,18 @@ impl AnthropicSseAdapter {
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
         else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
-        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+        if let Some(reason) = choice
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty())
+        {
             self.finish_reason = Some(reason.to_string());
         }
 
         let Some(delta) = choice.get("delta") else {
-            return Vec::new();
+            return Ok(Vec::new());
         };
         let mut events = Vec::new();
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
@@ -940,7 +1580,7 @@ impl AnthropicSseAdapter {
                 }
             }
         }
-        events
+        Ok(events)
     }
 
     fn finish_events(&mut self) -> Vec<Bytes> {
@@ -1053,10 +1693,22 @@ fn openai_stream_to_anthropic(response: Response) -> Response {
         if tx.send(Ok(adapter.start_event())).await.is_err() {
             return;
         }
-        while let Some(item) = source.next().await {
+        loop {
+            let item = tokio::select! {
+                _ = tx.closed() => return,
+                item = source.next() => item,
+            };
+            let Some(item) = item else { break };
             match item {
                 Ok(chunk) => {
-                    for event in adapter.push(&chunk) {
+                    let events = match adapter.push(&chunk) {
+                        Ok(events) => events,
+                        Err(error) => {
+                            let _ = tx.send(Err(std::io::Error::other(error))).await;
+                            return;
+                        }
+                    };
+                    for event in events {
                         if tx.send(Ok(event)).await.is_err() {
                             return;
                         }
@@ -1068,7 +1720,14 @@ fn openai_stream_to_anthropic(response: Response) -> Response {
                 }
             }
         }
-        for event in adapter.finish() {
+        let events = match adapter.finish() {
+            Ok(events) => events,
+            Err(error) => {
+                let _ = tx.send(Err(std::io::Error::other(error))).await;
+                return;
+            }
+        };
+        for event in events {
             if tx.send(Ok(event)).await.is_err() {
                 return;
             }
@@ -1185,33 +1844,348 @@ fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<C
         })
         .collect();
     let previous_len = memory.candidates.len();
+    let account_keys: HashSet<String> = candidates.iter().filter_map(account_health_key).collect();
+    let previous_accounts = memory.accounts.len();
+    memory.accounts.retain(|key, _| account_keys.contains(key));
     memory.candidates.retain(|candidate_id, health| {
         fingerprints
             .get(candidate_id.as_str())
             .is_some_and(|fingerprint| health.fingerprint == *fingerprint)
     });
-    if memory.candidates.len() != previous_len {
+    if memory.candidates.len() != previous_len || memory.accounts.len() != previous_accounts {
         persist_route_memory(state, &memory);
     }
 
     candidates
         .into_iter()
         .filter(|candidate| {
-            !memory
-                .candidates
-                .get(&candidate.internal_id)
+            !account_health_key(candidate)
+                .and_then(|key| memory.accounts.get(&key))
                 .and_then(|health| health.cooldown_until_ms)
                 .is_some_and(|until| until > now)
+                && !memory
+                    .candidates
+                    .get(&candidate.internal_id)
+                    .and_then(|health| health.cooldown_until_ms)
+                    .is_some_and(|until| until > now)
         })
         .collect()
+}
+
+fn account_health_key(candidate: &Candidate) -> Option<String> {
+    candidate.account_source.as_ref().map(source_health_key)
+}
+
+fn source_health_key(source: &crate::models::model::AccountSource) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(source).unwrap_or_default(),
+    ))
+}
+
+fn candidate_is_cooling_down(state: &AppState, candidate: &Candidate) -> bool {
+    let Ok(memory) = state.route_memory.lock() else {
+        return false;
+    };
+    let now = now_ms();
+    memory
+        .candidates
+        .get(&candidate.internal_id)
+        .and_then(|health| health.cooldown_until_ms)
+        .is_some_and(|until| until > now)
+        || account_health_key(candidate)
+            .and_then(|key| memory.accounts.get(&key))
+            .and_then(|health| health.cooldown_until_ms)
+            .is_some_and(|until| until > now)
+}
+
+#[derive(Default)]
+struct StreamCompletion {
+    parser: crate::services::account_proxy::SseParser,
+    headers: HeaderMap,
+    protocol: RouteProtocol,
+    response_id: Option<String>,
+    failure: Option<crate::services::account_proxy::ProxyError>,
+    finish_reason: bool,
+    done: bool,
+}
+
+impl StreamCompletion {
+    fn push(&mut self, bytes: &[u8]) -> Result<(), std::io::Error> {
+        let frames = self.parser.push(bytes);
+        self.observe(frames)
+    }
+
+    fn observe(&mut self, frames: Vec<(String, String)>) -> Result<(), std::io::Error> {
+        for (event, data) in frames {
+            if self.done || data.trim().is_empty() {
+                continue;
+            }
+            if data.trim() == "[DONE]" {
+                if self.protocol == RouteProtocol::Chat {
+                    self.done = true;
+                }
+                continue;
+            }
+            let value: Value = serde_json::from_str(&data)
+                .map_err(|_| std::io::Error::other("Invalid upstream event stream"))?;
+            if let Some(error) =
+                crate::services::account_proxy::stream_error(&event, &data, &self.headers)
+            {
+                if self.protocol == RouteProtocol::Responses {
+                    self.failure = Some(error);
+                    self.done = true;
+                    continue;
+                }
+                return Err(std::io::Error::other(error));
+            }
+            if self.protocol == RouteProtocol::Responses {
+                let kind = value["type"].as_str().unwrap_or(&event);
+                if matches!(kind, "response.completed" | "response.incomplete") {
+                    if !value["response"]["error"].is_null() {
+                        self.failure = crate::services::account_proxy::stream_error(
+                            "response.failed",
+                            &data,
+                            &self.headers,
+                        );
+                        self.done = true;
+                        continue;
+                    }
+                    let expected_status = kind.trim_start_matches("response.");
+                    if (!event.is_empty() && event != kind)
+                        || value["response"]["object"] != "response"
+                        || value["response"]["status"] != expected_status
+                        || !value["response"]["id"]
+                            .as_str()
+                            .is_some_and(|id| !id.is_empty())
+                    {
+                        return Err(std::io::Error::other(
+                            "Responses terminal event has no matching terminal response",
+                        ));
+                    }
+                    self.done = true;
+                    self.response_id = value["response"]["id"].as_str().map(str::to_owned);
+                }
+                continue;
+            }
+            self.finish_reason |=
+                value
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .is_some_and(|choices| {
+                        choices.iter().any(|choice| {
+                            choice
+                                .get("finish_reason")
+                                .and_then(Value::as_str)
+                                .is_some_and(|reason| !reason.is_empty())
+                        })
+                    });
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), std::io::Error> {
+        let frames = self.parser.finish();
+        self.observe(frames)?;
+        if self.done || self.finish_reason {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(
+                "Upstream stream ended before completion",
+            ))
+        }
+    }
+}
+
+fn proxy_error_from_chain<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a crate::services::account_proxy::ProxyError> {
+    let mut cause = Some(error);
+    while let Some(error) = cause {
+        if let Some(proxy) = error.downcast_ref::<crate::services::account_proxy::ProxyError>() {
+            return Some(proxy);
+        }
+        cause = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| {
+                error
+                    .get_ref()
+                    .map(|inner| inner as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
+    }
+    None
+}
+
+fn mark_stream_failure(
+    state: &AppState,
+    candidate: &Candidate,
+    error: &(dyn std::error::Error + 'static),
+) -> Option<FailureClass> {
+    if let Some(proxy) = proxy_error_from_chain(error) {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = &proxy.retry_after {
+            headers.insert(header::RETRY_AFTER, value.clone());
+        }
+        let body = json!({"error":{"message":proxy.message,"code":proxy.error_code,"type":proxy.error_type}}).to_string();
+        let failure = classify_failure(proxy.status, body.as_bytes())?;
+        mark_failure_scoped(
+            state,
+            candidate,
+            failure,
+            retry_after(&headers),
+            proxy.model_scope,
+        );
+        return Some(failure);
+    }
+    mark_failure(state, candidate, FailureClass::Transient, None);
+    Some(FailureClass::Transient)
+}
+
+fn begin_attempt(state: &AppState, candidate: &mut Candidate) {
+    let Ok(memory) = state.route_memory.lock() else {
+        return;
+    };
+    candidate.attempt = Some(Arc::new(AttemptHealth {
+        revision: memory.revision,
+        account_epoch: account_health_key(candidate)
+            .and_then(|key| memory.account_epochs.get(&key).copied())
+            .unwrap_or(0),
+        credential_version: Mutex::new(None),
+    }));
+}
+
+fn attempt_is_current(memory: &RouteMemory, candidate: &Candidate) -> bool {
+    let Some(attempt) = &candidate.attempt else {
+        return true;
+    };
+    let Some(key) = account_health_key(candidate) else {
+        return true;
+    };
+    if memory.account_epochs.get(&key).copied().unwrap_or(0) != attempt.account_epoch {
+        return false;
+    }
+    let version = attempt.credential_version.lock().ok();
+    match (
+        version.as_deref().and_then(|value| value.as_ref()),
+        memory.credential_versions.get(&key),
+    ) {
+        (Some(attempted), Some((current, _))) => attempted == current,
+        _ => true,
+    }
+}
+
+fn clear_account_authentication(
+    memory: &mut RouteMemory,
+    key: &str,
+    candidate_ids: &HashSet<String>,
+) -> bool {
+    let before = memory.candidates.len() + memory.accounts.len();
+    memory.candidates.retain(|id, health| {
+        !(health.failure == Some(FailureClass::Authentication)
+            && (health.account_key.as_deref() == Some(key) || candidate_ids.contains(id)))
+    });
+    if memory
+        .accounts
+        .get(key)
+        .is_some_and(|health| health.failure == Some(FailureClass::Authentication))
+    {
+        memory.accounts.remove(key);
+    }
+    before != memory.candidates.len() + memory.accounts.len()
+}
+
+pub(crate) fn forget_account_authentication(
+    provider: crate::models::model::AccountProvider,
+    account_id: &str,
+) {
+    let source = crate::models::model::AccountSource {
+        provider,
+        account_id: account_id.into(),
+    };
+    let key = source_health_key(&source);
+    let candidate_ids = model_manager::get_user_models()
+        .into_iter()
+        .filter(|model| model.account_source.as_ref() == Some(&source))
+        .map(|model| model.internal_id)
+        .collect();
+    let memory = shared_route_memory();
+    let Ok(mut memory) = memory.lock() else {
+        return;
+    };
+    let epoch = memory.account_epochs.entry(key.clone()).or_default();
+    *epoch = epoch.saturating_add(1);
+    memory.credential_versions.remove(&key);
+    memory.revision = memory.revision.saturating_add(1);
+    if clear_account_authentication(&mut memory, &key, &candidate_ids) {
+        save_route_memory(&route_memory_path(), &memory);
+    }
+}
+
+fn bind_attempt_credentials(state: &AppState, candidate: &Candidate, credentials: &Value) {
+    let Some(attempt) = &candidate.attempt else {
+        return;
+    };
+    let Some(key) = account_health_key(candidate) else {
+        return;
+    };
+    let version = hex::encode(Sha256::digest(credentials.to_string().as_bytes()));
+    let Ok(mut memory) = state.route_memory.lock() else {
+        return;
+    };
+    if memory.account_epochs.get(&key).copied().unwrap_or(0) != attempt.account_epoch {
+        return;
+    }
+    let Ok(mut attempted_version) = attempt.credential_version.lock() else {
+        return;
+    };
+    let current = memory.credential_versions.get(&key);
+    let may_update = current.map_or(true, |(current, revision)| {
+        current == &version
+            || attempted_version.as_ref() == Some(current)
+            || *revision <= attempt.revision
+    });
+    *attempted_version = Some(version.clone());
+    if may_update && current.map_or(true, |(current, _)| current != &version) {
+        memory.revision = memory.revision.saturating_add(1);
+        let revision = memory.revision;
+        memory
+            .credential_versions
+            .insert(key.clone(), (version, revision));
+        if clear_account_authentication(&mut memory, &key, &HashSet::new()) {
+            persist_route_memory(state, &memory);
+        }
+    }
 }
 
 fn mark_success(state: &AppState, candidate: &Candidate) {
     let Ok(mut memory) = state.route_memory.lock() else {
         return;
     };
-    let removed_failure = memory.candidates.remove(&candidate.internal_id).is_some();
-    if removed_failure {
+    if !attempt_is_current(&memory, candidate) {
+        return;
+    }
+    let revision = candidate
+        .attempt
+        .as_ref()
+        .map_or(u64::MAX, |attempt| attempt.revision);
+    let may_clear = |health: &CandidateHealth| {
+        health.revision <= revision
+            && !(matches!(
+                health.failure,
+                Some(FailureClass::Billing | FailureClass::RateLimit)
+            ) && health
+                .cooldown_until_ms
+                .is_some_and(|until| until > now_ms()))
+    };
+    let removed_failure = memory
+        .candidates
+        .get(&candidate.internal_id)
+        .is_some_and(may_clear)
+        && memory.candidates.remove(&candidate.internal_id).is_some();
+    let removed_account = account_health_key(candidate).is_some_and(|key| {
+        memory.accounts.get(&key).is_some_and(may_clear) && memory.accounts.remove(&key).is_some()
+    });
+    if removed_failure || removed_account {
         persist_route_memory(state, &memory);
     }
 }
@@ -1222,9 +2196,27 @@ fn mark_failure(
     failure: FailureClass,
     retry_after: Option<Duration>,
 ) {
+    mark_failure_scoped(state, candidate, failure, retry_after, false);
+}
+
+fn mark_failure_scoped(
+    state: &AppState,
+    candidate: &Candidate,
+    failure: FailureClass,
+    retry_after: Option<Duration>,
+    model_scope: bool,
+) {
+    if failure == FailureClass::RequestIncompatible {
+        return;
+    }
     let Ok(mut memory) = state.route_memory.lock() else {
         return;
     };
+    if !attempt_is_current(&memory, candidate) {
+        return;
+    }
+    memory.revision = memory.revision.saturating_add(1);
+    let revision = memory.revision;
     let entry = memory
         .candidates
         .entry(candidate.internal_id.clone())
@@ -1236,10 +2228,44 @@ fn mark_failure(
         };
     }
     entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-    entry.failure = Some(failure);
     let cooldown = cooldown_for_failure(failure, retry_after, entry.consecutive_failures);
-    entry.cooldown_until_ms =
-        Some(now_ms().saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64));
+    let deadline = now_ms().saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64);
+    if !entry
+        .cooldown_until_ms
+        .is_some_and(|until| until > deadline)
+    {
+        entry.failure = Some(failure);
+        entry.cooldown_until_ms = Some(deadline);
+    }
+    entry.revision = revision;
+    entry.account_key = account_health_key(candidate);
+    let consecutive_failures = entry.consecutive_failures;
+    if !model_scope
+        && matches!(
+            failure,
+            FailureClass::Authentication | FailureClass::Billing | FailureClass::RateLimit
+        )
+    {
+        if let Some(key) = account_health_key(candidate) {
+            let existing = memory.accounts.get(&key);
+            if !existing
+                .and_then(|entry| entry.cooldown_until_ms)
+                .is_some_and(|until| until > deadline)
+            {
+                memory.accounts.insert(
+                    key.clone(),
+                    CandidateHealth {
+                        consecutive_failures,
+                        cooldown_until_ms: Some(deadline),
+                        fingerprint: candidate.fingerprint.clone(),
+                        failure: Some(failure),
+                        revision,
+                        account_key: Some(key),
+                    },
+                );
+            }
+        }
+    }
     persist_route_memory(state, &memory);
 }
 
@@ -1260,6 +2286,7 @@ fn cooldown_for_failure(
                 .saturating_mul(multiplier)
                 .min(MAX_TRANSIENT_COOLDOWN)
         }
+        FailureClass::RequestIncompatible => Duration::ZERO,
     }
 }
 
@@ -1284,6 +2311,22 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
         return None;
     }
     if [
+        "does not support tool",
+        "tools are not supported",
+        "tool use is not supported",
+        "function calling is not supported",
+        "tools_not_supported",
+        "does not support image",
+        "images are not supported",
+        "vision is not supported",
+        "responses_conversion_unsupported",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+    {
+        return Some(FailureClass::RequestIncompatible);
+    }
+    if [
         "model_not_found",
         "model not found",
         "model does not exist",
@@ -1294,10 +2337,6 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
         "model_not_supported",
         "model has been deprecated",
         "model has been decommissioned",
-        "does not support tool",
-        "tools are not supported",
-        "tool use is not supported",
-        "function calling is not supported",
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
@@ -1354,6 +2393,218 @@ fn chat_completions_url(base_url: &str) -> String {
         base_url.to_string()
     } else {
         format!("{base_url}/chat/completions")
+    }
+}
+
+fn responses_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/responses") {
+        return base.to_string();
+    }
+    let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+    format!("{base}/responses")
+}
+
+fn has_previous_response(body: &Value) -> bool {
+    body.get("previous_response_id")
+        .is_some_and(|value| !value.is_null())
+}
+
+fn response_candidates(
+    state: &AppState,
+    body: &Value,
+    candidates: Vec<Candidate>,
+    protocol: RouteProtocol,
+) -> Result<Vec<Candidate>, &'static str> {
+    if protocol != RouteProtocol::Responses || !has_previous_response(body) {
+        return Ok(candidates);
+    }
+    let id = body["previous_response_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("previous_response_id must be a response ID")?;
+    let binding = state
+        .route_memory
+        .lock()
+        .ok()
+        .and_then(|memory| memory.response_bindings.get(id).cloned())
+        .filter(|binding| binding.expires_at_ms > now_ms())
+        .ok_or("Unknown or expired response ID; send the complete conversation input")?;
+    if binding.ambiguous {
+        return Err("Ambiguous response ID; send the complete conversation input");
+    }
+    let candidate = candidates.into_iter()
+        .find(|candidate| candidate.internal_id == binding.candidate_id && candidate.fingerprint == binding.fingerprint)
+        .ok_or("The original response provider configuration has changed; send the complete conversation input")?;
+    Ok(vec![candidate])
+}
+
+fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) {
+    let Some(id) = id.filter(|id| !id.is_empty() && id.len() <= 1024) else {
+        return;
+    };
+    let Ok(mut memory) = state.route_memory.lock() else {
+        return;
+    };
+    if !attempt_is_current(&memory, candidate) {
+        return;
+    }
+    let now = now_ms();
+    memory
+        .response_bindings
+        .retain(|_, binding| binding.expires_at_ms > now);
+    if let Some(binding) = memory.response_bindings.get_mut(id) {
+        if binding.ambiguous
+            || binding.candidate_id != candidate.internal_id
+            || binding.fingerprint != candidate.fingerprint
+        {
+            binding.ambiguous = true;
+            binding.expires_at_ms = now.saturating_add(RESPONSE_BINDING_LIFETIME_MS);
+            persist_route_memory(state, &memory);
+            return;
+        }
+    }
+    if memory.response_bindings.len() >= MAX_RESPONSE_BINDINGS
+        && !memory.response_bindings.contains_key(id)
+    {
+        let oldest = memory
+            .response_bindings
+            .iter()
+            .min_by_key(|(_, binding)| binding.expires_at_ms)
+            .map(|(id, _)| id.clone());
+        if let Some(oldest) = oldest {
+            memory.response_bindings.remove(&oldest);
+        }
+    }
+    memory.response_bindings.insert(
+        id.into(),
+        ResponseBinding {
+            candidate_id: candidate.internal_id.clone(),
+            fingerprint: candidate.fingerprint.clone(),
+            expires_at_ms: now.saturating_add(RESPONSE_BINDING_LIFETIME_MS),
+            ambiguous: false,
+        },
+    );
+    persist_route_memory(state, &memory);
+}
+
+fn remember_unsupported_responses(state: &AppState, candidate: &Candidate) {
+    let Ok(mut memory) = state.route_memory.lock() else {
+        return;
+    };
+    let now = now_ms();
+    memory.unsupported_responses.retain(|_, until| *until > now);
+    if memory.unsupported_responses.len() >= 128 {
+        let oldest = memory
+            .unsupported_responses
+            .iter()
+            .min_by_key(|(_, until)| *until)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            memory.unsupported_responses.remove(&oldest);
+        }
+    }
+    memory.unsupported_responses.insert(
+        candidate.fingerprint.clone(),
+        now.saturating_add(RESPONSES_CAPABILITY_LIFETIME_MS),
+    );
+}
+
+fn responses_endpoint_unsupported(status: StatusCode, body: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(body).to_ascii_lowercase();
+    if continuation_error(body) || message.contains("safety") || message.contains("content policy")
+    {
+        return false;
+    }
+    if matches!(status, StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST)
+        && [
+            "responses_not_supported",
+            "model does not support responses",
+            "model does not support the responses",
+            "responses is not supported for this model",
+            "responses are not supported for this model",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+    {
+        return true;
+    }
+    if message.contains("model") && !message.contains("endpoint_not_found") {
+        return false;
+    }
+    if matches!(
+        status,
+        StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+    ) {
+        return true;
+    }
+    if status == StatusCode::NOT_FOUND
+        && matches!(message.trim(), "" | "not found" | "404 page not found")
+    {
+        return true;
+    }
+    matches!(status, StatusCode::NOT_FOUND | StatusCode::BAD_REQUEST)
+        && [
+            "endpoint_not_found",
+            "unsupported_endpoint",
+            "unsupported endpoint",
+            "responses is not supported",
+            "responses api is not supported",
+            "responses endpoint is not supported",
+            "post /v1/responses is not supported",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+}
+
+fn continuation_error(body: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(body).to_ascii_lowercase();
+    [
+        "previous_response",
+        "previous response",
+        "response_not_found",
+        "response not found",
+        "response has expired",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
+fn is_continuation_failure(status: StatusCode, body: &[u8]) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::NOT_FOUND
+            | StatusCode::CONFLICT
+            | StatusCode::UNPROCESSABLE_ENTITY
+    ) && continuation_error(body)
+}
+
+fn mark_response_failure(
+    state: &AppState,
+    candidate: &Candidate,
+    error: &(dyn std::error::Error + 'static),
+    bound_continuation: bool,
+) -> Option<FailureClass> {
+    if bound_continuation && proxy_error_from_chain(error).is_some_and(|proxy| {
+        let body = json!({"error":{"message":proxy.message,"code":proxy.error_code,"type":proxy.error_type}}).to_string();
+        is_continuation_failure(proxy.status, body.as_bytes())
+    }) {
+        return None;
+    }
+    mark_stream_failure(state, candidate, error)
+}
+
+fn copy_response_headers(response: &mut Response, headers: &HeaderMap) {
+    for (name, value) in headers {
+        if name != header::CONTENT_LENGTH
+            && name != header::TRANSFER_ENCODING
+            && name != header::CONNECTION
+            && name != header::CONTENT_ENCODING
+            && name != "x-echobird-routed-via"
+        {
+            response.headers_mut().insert(name.clone(), value.clone());
+        }
     }
 }
 
@@ -1441,6 +2692,10 @@ fn json_error(status: StatusCode, message: &str, attempts: Option<Value>) -> Res
 }
 
 #[cfg(test)]
+#[path = "responses_tests.rs"]
+mod responses_tests;
+
+#[cfg(test)]
 mod tests {
     use std::convert::Infallible;
     use std::net::SocketAddr;
@@ -1457,11 +2712,13 @@ mod tests {
         let base_url = format!("http://{addr}/v1");
         let api_key = "upstream-key".to_string();
         Candidate {
+            attempt: None,
             internal_id: id.to_string(),
             fingerprint: candidate_fingerprint(&model_id, &base_url, &api_key),
             model_id,
             base_url,
             api_key,
+            account_source: None,
         }
     }
 
@@ -1554,6 +2811,13 @@ mod tests {
         assert_eq!(
             classify_failure(StatusCode::BAD_REQUEST, b"insufficient quota"),
             Some(FailureClass::Billing)
+        );
+        assert_eq!(
+            classify_failure(
+                StatusCode::FORBIDDEN,
+                b"tools are not supported: blocked by safety policy"
+            ),
+            None
         );
     }
 
@@ -1665,6 +2929,41 @@ mod tests {
     }
 
     #[test]
+    fn exhausted_accounts_cool_down_all_bound_models_but_model_errors_stay_local() {
+        use crate::models::model::{AccountProvider, AccountSource};
+        let address = "127.0.0.1:8080".parse().unwrap();
+        let mut first = candidate(address, "first");
+        first.account_source = Some(AccountSource {
+            provider: AccountProvider::Kilo,
+            account_id: "account-one".into(),
+        });
+        let mut sibling = candidate(address, "sibling");
+        sibling.account_source = first.account_source.clone();
+        let mut other = candidate(address, "other");
+        other.account_source = Some(AccountSource {
+            provider: AccountProvider::Kilo,
+            account_id: "account-two".into(),
+        });
+        let state = AppState::for_tests().unwrap();
+        mark_failure(&state, &first, FailureClass::RateLimit, None);
+        assert!(candidate_is_cooling_down(&state, &sibling));
+        assert_eq!(
+            prioritized_candidates(&state, vec![first.clone(), sibling.clone(), other])
+                .iter()
+                .map(|c| c.internal_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["other"]
+        );
+        let state = AppState::for_tests().unwrap();
+        mark_failure(&state, &first, FailureClass::ModelUnavailable, None);
+        assert!(!candidate_is_cooling_down(&state, &sibling));
+        assert_eq!(
+            prioritized_candidates(&state, vec![first, sibling]).len(),
+            1
+        );
+    }
+
+    #[test]
     fn legacy_success_memory_does_not_override_configured_order() {
         let state = AppState::for_tests().unwrap();
         *state.route_memory.lock().unwrap() = serde_json::from_value(json!({
@@ -1699,6 +2998,7 @@ mod tests {
         };
         let restored: RouteMemory = serde_json::from_str(&serialized).unwrap();
         let restored_state = AppState {
+            fixture_responses: None,
             http_client: state.http_client.clone(),
             route_memory: Arc::new(Mutex::new(restored)),
             route_memory_path: None,
@@ -1946,6 +3246,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_bound_account_never_uses_its_url_or_key_and_falls_back() {
+        use crate::models::model::{AccountProvider, AccountSource};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let upstream = Router::new().route("/v1/chat/completions",post(move |Json(body):Json<Value>| {
+            counter.fetch_add(1,Ordering::SeqCst);
+            async move { Json(json!({"id":"fixture","model":body["model"],"choices":[{"message":{"role":"assistant","content":"ok"}}]})) }
+        }));
+        let addr = spawn_mock(upstream).await;
+        let mut missing = candidate(addr, "missing");
+        missing.api_key.clear();
+        missing.account_source = Some(AccountSource {
+            provider: AccountProvider::Codex,
+            account_id: "invalid-fixture-id".into(),
+        });
+        let mut sibling = missing.clone();
+        sibling.internal_id = "same-account-sibling".into();
+        let state = AppState::for_tests().unwrap();
+        let response = route_chat_with_policy(
+            &state,
+            &inbound_headers(),
+            json!({"model":"auto","messages":[{"role":"user","content":"test"}]}),
+            vec![missing, sibling, candidate(addr, "working")],
+            RoutePolicy {
+                max_attempts: 2,
+                ..RoutePolicy::default()
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "working/working-model"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.route_memory.lock().unwrap().candidates["missing"].failure,
+            Some(FailureClass::Authentication)
+        );
+        assert!(!state
+            .route_memory
+            .lock()
+            .unwrap()
+            .candidates
+            .contains_key("same-account-sibling"));
+    }
+
+    #[tokio::test]
     async fn never_falls_back_after_first_stream_chunk() {
         let first = Router::new().route(
             "/v1/chat/completions",
@@ -1953,7 +3301,7 @@ mod tests {
                 let (tx, rx) = tokio::sync::mpsc::channel(2);
                 tokio::spawn(async move {
                     tx.send(Ok::<Bytes, std::io::Error>(Bytes::from_static(
-                        b"data: first\n\n",
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n",
                     )))
                     .await
                     .unwrap();
@@ -2171,5 +3519,825 @@ mod tests {
         assert!(body.contains("\"partial_json\":\"{\\\"path\\\":\\\"a.txt\\\"}\""));
         assert!(body.contains("\"stop_reason\":\"tool_use\""));
         assert!(body.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn anthropic_parser_preserves_split_utf8_multiline_frames_and_tool_fragments() {
+        let text = "data: {\"choices\":\r\ndata: [{\"delta\":{\"content\":\"你好🌍\"}}]}\r\n\r\n";
+        let first_tool = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_utf8","function":{"name":"read_file","arguments":"{\"路径\":"}}]}}]});
+        let last_tool = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"你好\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":7}});
+        let input = format!("{text}data: {first_tool}\r\n\r\ndata: {last_tool}\r\n\r\n");
+        let mut adapter = AnthropicSseAdapter::new();
+        let mut output = Vec::new();
+        for byte in input.as_bytes() {
+            for chunk in adapter.push(std::slice::from_ref(byte)).unwrap() {
+                output.extend_from_slice(&chunk);
+            }
+        }
+        for chunk in adapter.finish().unwrap() {
+            output.extend_from_slice(&chunk);
+        }
+        let mut parser = crate::services::account_proxy::SseParser::default();
+        let frames: Vec<Value> = parser
+            .push(&output)
+            .into_iter()
+            .map(|(_, data)| serde_json::from_str(&data).unwrap())
+            .collect();
+        assert!(frames
+            .iter()
+            .any(|frame| frame["delta"]["text"] == "你好🌍"));
+        let tool = frames
+            .iter()
+            .find(|frame| frame["content_block"]["type"] == "tool_use")
+            .unwrap();
+        assert_eq!(tool["content_block"]["id"], "call_utf8");
+        assert_eq!(tool["content_block"]["name"], "read_file");
+        assert!(frames
+            .iter()
+            .any(|frame| frame["delta"]["partial_json"] == "{\"路径\":\"你好\"}"));
+        assert!(frames
+            .iter()
+            .any(|frame| frame["delta"]["stop_reason"] == "tool_use"
+                && frame["usage"]["output_tokens"] == 7));
+        assert_eq!(frames.last().unwrap()["type"], "message_stop");
+    }
+
+    #[test]
+    fn anthropic_parser_accepts_done_without_finish_reason() {
+        let mut adapter = AnthropicSseAdapter::new();
+        let events = adapter.push(b"data: [DONE]\n\n").unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.starts_with(b"event: message_stop\n")));
+        assert!(adapter.finish().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anthropic_stream_rejects_errors_invalid_json_and_unfinished_eof() {
+        let prefix = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n";
+        for tail in [
+            "",
+            "data: {\"error\":{\"message\":\"upstream failed\"}}\n\n",
+            "event: error\ndata: {\"message\":\"upstream failed\"}\n\n",
+            "data: {invalid json}\n\n",
+        ] {
+            let response =
+                openai_stream_to_anthropic(Response::new(Body::from(format!("{prefix}{tail}"))));
+            let mut output = response.into_body().into_data_stream();
+            let mut bytes = Vec::new();
+            let mut failed = false;
+            while let Some(item) = output.next().await {
+                match item {
+                    Ok(chunk) => bytes.extend_from_slice(&chunk),
+                    Err(_) => {
+                        failed = true;
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8(bytes).unwrap();
+            assert!(failed, "unfinished input must fail: {tail}");
+            assert!(text.contains("event: message_start"));
+            assert!(!text.contains("event: message_stop"));
+            assert!(!text.contains("\"stop_reason\":\"end_turn\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_anthropic_output_releases_pending_source_and_activity() {
+        struct PendingSource {
+            entered: Arc<tokio::sync::Notify>,
+            dropped: Arc<tokio::sync::Notify>,
+            drop_count: Arc<AtomicUsize>,
+            activity_guard: Option<RouteActivityGuard>,
+        }
+        impl futures_util::Stream for PendingSource {
+            type Item = Result<Bytes, std::io::Error>;
+
+            fn poll_next(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Option<Self::Item>> {
+                self.entered.notify_one();
+                std::task::Poll::Pending
+            }
+        }
+        impl Drop for PendingSource {
+            fn drop(&mut self) {
+                self.activity_guard.take();
+                self.drop_count.fetch_add(1, Ordering::SeqCst);
+                self.dropped.notify_one();
+            }
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(tokio::sync::Notify::new());
+        let drop_count = Arc::new(AtomicUsize::new(0));
+        let activity_guard = RouteActivityGuard::begin("pending-anthropic-fixture");
+        let attempt_id = activity_guard.attempt_id.unwrap();
+        let response =
+            openai_stream_to_anthropic(Response::new(Body::from_stream(PendingSource {
+                entered: entered.clone(),
+                dropped: dropped.clone(),
+                drop_count: drop_count.clone(),
+                activity_guard: Some(activity_guard),
+            })));
+        let mut output = response.into_body().into_data_stream();
+        assert!(output
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .starts_with(b"event: message_start\n"));
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(drop_count.load(Ordering::SeqCst), 0);
+        assert!(ROUTE_ACTIVITY
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .active_attempts
+            .contains_key(&attempt_id));
+        drop(output);
+        tokio::time::timeout(Duration::from_secs(5), dropped.notified())
+            .await
+            .unwrap();
+        assert_eq!(drop_count.load(Ordering::SeqCst), 1);
+        assert!(!ROUTE_ACTIVITY
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .active_attempts
+            .contains_key(&attempt_id));
+    }
+
+    fn bound_health_candidate(id: &str) -> Candidate {
+        let mut model = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), id);
+        model.account_source = Some(crate::models::model::AccountSource {
+            provider: crate::models::model::AccountProvider::Kilo,
+            account_id: "health-fixture-account".into(),
+        });
+        model
+    }
+
+    #[tokio::test]
+    async fn partial_stream_failures_accumulate_until_real_completion_without_replay() {
+        let complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream_complete = complete.clone();
+        let first_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let complete = upstream_complete.clone();
+                async move {
+                    let mut data =
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"中文\"}}]}\n\n".to_string();
+                    if complete.load(Ordering::SeqCst) {
+                        data.push_str("data: [DONE]\n\n");
+                    }
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from(data))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let backup_hits = Arc::new(AtomicUsize::new(0));
+        let counter = backup_hits.clone();
+        let backup_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"choices":[]})) }
+            }),
+        ))
+        .await;
+        let state = AppState::for_tests().unwrap();
+        for expected_failures in 1..=3 {
+            let started = now_ms();
+            let response = route_chat_with_candidates(
+                &state,
+                &inbound_headers(),
+                json!({"messages":[],"stream":true}),
+                vec![
+                    candidate(first_addr, "partial-stream"),
+                    candidate(backup_addr, "partial-backup"),
+                ],
+            )
+            .await;
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "partial-stream/partial-stream-model"
+            );
+            let mut stream = response.into_body().into_data_stream();
+            let first = stream.next().await.unwrap().unwrap();
+            assert!(String::from_utf8_lossy(&first).contains("中文"));
+            assert!(stream.next().await.unwrap().is_err());
+            let mut memory = state.route_memory.lock().unwrap();
+            let health = memory.candidates.get_mut("partial-stream").unwrap();
+            assert_eq!(health.consecutive_failures, expected_failures);
+            let cooldown = cooldown_for_failure(FailureClass::Transient, None, expected_failures);
+            assert!(health.cooldown_until_ms.unwrap() >= started + cooldown.as_millis() as u64);
+            health.cooldown_until_ms = Some(started.saturating_sub(1));
+        }
+        complete.store(true, Ordering::SeqCst);
+        let response = route_chat_with_candidates(
+            &state,
+            &inbound_headers(),
+            json!({"messages":[],"stream":true}),
+            vec![candidate(first_addr, "partial-stream")],
+        )
+        .await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("[DONE]"));
+        assert!(!state
+            .route_memory
+            .lock()
+            .unwrap()
+            .candidates
+            .contains_key("partial-stream"));
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn raw_stream_error_preserves_http_retry_after_without_replaying_output() {
+        let release_error = Arc::new(tokio::sync::Notify::new());
+        let release = release_error.clone();
+        let first_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let release = release.clone();
+                async move {
+                    let first = stream::once(async {
+                        Ok::<_, std::io::Error>(Bytes::from_static(
+                            b"data: {\"choices\":[{\"delta\":{\"content\":\"ready\"}}]}\n\n",
+                        ))
+                    });
+                    let error = stream::once(async move {
+                        release.notified().await;
+                        Ok::<_, std::io::Error>(Bytes::from_static(
+                            b"event: error\ndata: {\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit\"}}\n\n",
+                        ))
+                    });
+                    Response::builder()
+                        .header(header::CONTENT_TYPE, "text/event-stream")
+                        .header(header::RETRY_AFTER, "120")
+                        .body(Body::from_stream(first.chain(error)))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let backup_hits = Arc::new(AtomicUsize::new(0));
+        let counter = backup_hits.clone();
+        let backup_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!({"choices":[]})) }
+            }),
+        ))
+        .await;
+        let state = AppState::for_tests().unwrap();
+        let started = now_ms();
+        let response = route_chat_with_candidates(
+            &state,
+            &inbound_headers(),
+            json!({"messages":[],"stream":true}),
+            vec![
+                candidate(first_addr, "raw-stream-limit"),
+                candidate(backup_addr, "raw-limit-backup"),
+            ],
+        )
+        .await;
+        let mut body = response.into_body().into_data_stream();
+        let first = body.next().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("ready"));
+        release_error.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(5), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert!(body.next().await.is_none());
+        let memory = state.route_memory.lock().unwrap();
+        let health = &memory.candidates["raw-stream-limit"];
+        assert_eq!(health.failure, Some(FailureClass::RateLimit));
+        assert!(health.cooldown_until_ms.unwrap() >= started + 120_000);
+        assert_eq!(backup_hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn structured_body_failure_preserves_cooldown_and_explicit_model_scope() {
+        let state = AppState::for_tests().unwrap();
+        let model = bound_health_candidate("stream-quota");
+        let mut error = crate::services::account_proxy::ProxyError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit",
+        );
+        error.error_code = Some("rate_limit_exceeded".into());
+        error.retry_after = Some(HeaderValue::from_static("3600"));
+        error.model_scope = true;
+        let error = std::io::Error::other(std::io::Error::other(error));
+        let started = now_ms();
+        assert_eq!(
+            mark_stream_failure(&state, &model, &error),
+            Some(FailureClass::RateLimit)
+        );
+        let memory = state.route_memory.lock().unwrap();
+        assert!(memory.accounts.is_empty());
+        assert!(
+            memory.candidates["stream-quota"].cooldown_until_ms.unwrap() >= started + 3_600_000
+        );
+    }
+
+    #[tokio::test]
+    async fn incompatible_tools_request_does_not_cool_down_plain_text_model() {
+        let first_hits = Arc::new(AtomicUsize::new(0));
+        let first_counter = first_hits.clone();
+        let first_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let counter = first_counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    if body["tools"].as_array().is_some_and(|tools| !tools.is_empty()) {
+                        return openai_error(StatusCode::BAD_REQUEST, "tools are not supported");
+                    }
+                    Json(json!({"choices":[{"message":{"role":"assistant","content":"plain text"},"finish_reason":"stop"}]})).into_response()
+                }
+            }),
+        )).await;
+        let second_hits = Arc::new(AtomicUsize::new(0));
+        let second_counter = second_hits.clone();
+        let second_addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let counter = second_counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"choices":[{"message":{"role":"assistant","content":"tool capable"},"finish_reason":"stop"}]}))
+                }
+            }),
+        )).await;
+        let state = AppState::for_tests().unwrap();
+        let models = vec![
+            candidate(first_addr, "plain-first"),
+            candidate(second_addr, "tools-second"),
+        ];
+        let with_tools = route_chat_with_candidates(
+            &state,
+            &inbound_headers(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"messages":[],"stream":false,
+                "tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}]}),
+            models.clone(),
+        ).await;
+        assert_eq!(with_tools.status(), StatusCode::OK);
+        assert_eq!(
+            with_tools.headers()["X-EchoBird-Routed-Via"],
+            "tools-second/tools-second-model"
+        );
+        with_tools.into_body().collect().await.unwrap();
+        assert!(!state
+            .route_memory
+            .lock()
+            .unwrap()
+            .candidates
+            .contains_key("plain-first"));
+        let plain = route_chat_with_candidates(
+            &state,
+            &inbound_headers(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"messages":[],"stream":false}),
+            models,
+        )
+        .await;
+        assert_eq!(plain.status(), StatusCode::OK);
+        assert_eq!(
+            plain.headers()["X-EchoBird-Routed-Via"],
+            "plain-first/plain-first-model"
+        );
+        plain.into_body().collect().await.unwrap();
+        assert_eq!(first_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(second_hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn old_success_cannot_clear_a_newer_rate_limit_revision() {
+        let state = AppState::for_tests().unwrap();
+        let mut old = bound_health_candidate("concurrent");
+        begin_attempt(&state, &mut old);
+        bind_attempt_credentials(&state, &old, &json!({"accessToken":"T0"}));
+        let mut rejected = old.clone();
+        begin_attempt(&state, &mut rejected);
+        bind_attempt_credentials(&state, &rejected, &json!({"accessToken":"T0"}));
+        mark_failure(
+            &state,
+            &rejected,
+            FailureClass::RateLimit,
+            Some(Duration::from_secs(600)),
+        );
+        let key = account_health_key(&old).unwrap();
+        mark_success(&state, &old);
+        {
+            let mut memory = state.route_memory.lock().unwrap();
+            assert_eq!(
+                memory.candidates["concurrent"].failure,
+                Some(FailureClass::RateLimit)
+            );
+            assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
+            memory
+                .candidates
+                .get_mut("concurrent")
+                .unwrap()
+                .cooldown_until_ms = Some(now_ms().saturating_sub(1));
+            memory.accounts.get_mut(&key).unwrap().cooldown_until_ms =
+                Some(now_ms().saturating_sub(1));
+        }
+        mark_success(&state, &old);
+        assert!(state
+            .route_memory
+            .lock()
+            .unwrap()
+            .accounts
+            .contains_key(&key));
+        let mut fresh = old.clone();
+        begin_attempt(&state, &mut fresh);
+        bind_attempt_credentials(&state, &fresh, &json!({"accessToken":"T0"}));
+        mark_success(&state, &fresh);
+        let memory = state.route_memory.lock().unwrap();
+        assert!(!memory.candidates.contains_key("concurrent"));
+        assert!(!memory.accounts.contains_key(&key));
+    }
+
+    #[test]
+    fn short_rate_limit_cannot_shorten_existing_candidate_or_account_deadline() {
+        let state = AppState::for_tests().unwrap();
+        let mut model = bound_health_candidate("long-rate-limit");
+        begin_attempt(&state, &mut model);
+        bind_attempt_credentials(&state, &model, &json!({"accessToken":"T0"}));
+        mark_failure(
+            &state,
+            &model,
+            FailureClass::RateLimit,
+            Some(Duration::from_secs(600)),
+        );
+        let key = account_health_key(&model).unwrap();
+        let long_deadline =
+            state.route_memory.lock().unwrap().candidates["long-rate-limit"].cooldown_until_ms;
+        begin_attempt(&state, &mut model);
+        bind_attempt_credentials(&state, &model, &json!({"accessToken":"T0"}));
+        mark_failure(
+            &state,
+            &model,
+            FailureClass::RateLimit,
+            Some(Duration::from_secs(60)),
+        );
+        let memory = state.route_memory.lock().unwrap();
+        assert_eq!(
+            memory.candidates["long-rate-limit"].cooldown_until_ms,
+            long_deadline
+        );
+        assert_eq!(memory.accounts[&key].cooldown_until_ms, long_deadline);
+        assert_eq!(memory.candidates["long-rate-limit"].consecutive_failures, 2);
+    }
+
+    #[test]
+    fn another_model_success_preserves_active_account_billing_and_rate_limit() {
+        for failure in [FailureClass::Billing, FailureClass::RateLimit] {
+            let state = AppState::for_tests().unwrap();
+            let mut failed = bound_health_candidate("account-failed-model");
+            begin_attempt(&state, &mut failed);
+            bind_attempt_credentials(&state, &failed, &json!({"accessToken":"T0"}));
+            mark_failure(&state, &failed, failure, Some(Duration::from_secs(600)));
+            let key = account_health_key(&failed).unwrap();
+            let mut sibling = bound_health_candidate("account-success-model");
+            begin_attempt(&state, &mut sibling);
+            bind_attempt_credentials(&state, &sibling, &json!({"accessToken":"T0"}));
+            mark_success(&state, &sibling);
+            assert!(candidate_is_cooling_down(&state, &sibling));
+            let mut memory = state.route_memory.lock().unwrap();
+            assert!(!clear_account_authentication(
+                &mut memory,
+                &key,
+                &HashSet::new()
+            ));
+            assert_eq!(memory.accounts[&key].failure, Some(failure));
+            assert_eq!(
+                memory.candidates["account-failed-model"].failure,
+                Some(failure)
+            );
+        }
+    }
+
+    #[test]
+    fn old_unauthorized_response_is_ignored_after_credentials_rotate() {
+        let state = AppState::for_tests().unwrap();
+        let mut old = bound_health_candidate("rotated-token");
+        begin_attempt(&state, &mut old);
+        bind_attempt_credentials(&state, &old, &json!({"accessToken":"T0"}));
+        let mut fresh = old.clone();
+        begin_attempt(&state, &mut fresh);
+        bind_attempt_credentials(&state, &fresh, &json!({"accessToken":"T1"}));
+        mark_failure(&state, &old, FailureClass::Authentication, None);
+        {
+            let memory = state.route_memory.lock().unwrap();
+            assert!(memory.candidates.is_empty());
+            assert!(memory.accounts.is_empty());
+        }
+        mark_failure(&state, &fresh, FailureClass::Authentication, None);
+        let key = account_health_key(&fresh).unwrap();
+        let memory = state.route_memory.lock().unwrap();
+        assert_eq!(
+            memory.candidates["rotated-token"].failure,
+            Some(FailureClass::Authentication)
+        );
+        assert_eq!(
+            memory.accounts[&key].failure,
+            Some(FailureClass::Authentication)
+        );
+    }
+
+    #[test]
+    fn late_first_credential_bind_cannot_restore_rejected_token_version() {
+        let state = AppState::for_tests().unwrap();
+        let mut old = bound_health_candidate("late-token-bind");
+        begin_attempt(&state, &mut old);
+        let mut fresh = old.clone();
+        begin_attempt(&state, &mut fresh);
+        bind_attempt_credentials(&state, &fresh, &json!({"accessToken":"T1"}));
+        let key = account_health_key(&fresh).unwrap();
+        let current_version = state.route_memory.lock().unwrap().credential_versions[&key].clone();
+        bind_attempt_credentials(&state, &old, &json!({"accessToken":"T0"}));
+        mark_failure(&state, &old, FailureClass::Authentication, None);
+        {
+            let memory = state.route_memory.lock().unwrap();
+            assert_eq!(memory.credential_versions[&key], current_version);
+            assert!(memory.candidates.is_empty());
+            assert!(memory.accounts.is_empty());
+        }
+        mark_failure(&state, &fresh, FailureClass::Authentication, None);
+        let memory = state.route_memory.lock().unwrap();
+        assert_eq!(memory.candidates["late-token-bind"].consecutive_failures, 1);
+        assert_eq!(
+            memory.accounts[&key].failure,
+            Some(FailureClass::Authentication)
+        );
+    }
+
+    #[test]
+    fn reauthentication_only_clears_authentication_and_rejects_old_epoch_results() {
+        let state = AppState::for_tests().unwrap();
+        let mut auth = bound_health_candidate("reauthentication-auth");
+        begin_attempt(&state, &mut auth);
+        bind_attempt_credentials(&state, &auth, &json!({"accessToken":"T0"}));
+        mark_failure(&state, &auth, FailureClass::Authentication, None);
+        let billing = bound_health_candidate("reauthentication-billing");
+        let limited = bound_health_candidate("reauthentication-limited");
+        mark_failure_scoped(&state, &billing, FailureClass::Billing, None, true);
+        mark_failure_scoped(
+            &state,
+            &limited,
+            FailureClass::RateLimit,
+            Some(Duration::from_secs(600)),
+            true,
+        );
+        let key = account_health_key(&auth).unwrap();
+        {
+            let mut memory = state.route_memory.lock().unwrap();
+            assert!(clear_account_authentication(
+                &mut memory,
+                &key,
+                &HashSet::new()
+            ));
+            assert!(!memory.candidates.contains_key("reauthentication-auth"));
+            assert!(!memory.accounts.contains_key(&key));
+            assert_eq!(
+                memory.candidates["reauthentication-billing"].failure,
+                Some(FailureClass::Billing)
+            );
+            assert_eq!(
+                memory.candidates["reauthentication-limited"].failure,
+                Some(FailureClass::RateLimit)
+            );
+            let epoch = memory.account_epochs.entry(key.clone()).or_default();
+            *epoch = epoch.saturating_add(1);
+            memory.credential_versions.remove(&key);
+            memory.revision = memory.revision.saturating_add(1);
+        }
+        mark_failure(&state, &auth, FailureClass::Authentication, None);
+        mark_success(&state, &auth);
+        {
+            let memory = state.route_memory.lock().unwrap();
+            assert!(!memory.candidates.contains_key("reauthentication-auth"));
+            assert!(!memory.accounts.contains_key(&key));
+            assert!(memory.candidates.contains_key("reauthentication-billing"));
+            assert!(memory.candidates.contains_key("reauthentication-limited"));
+        }
+        let mut fresh = auth.clone();
+        begin_attempt(&state, &mut fresh);
+        bind_attempt_credentials(&state, &fresh, &json!({"accessToken":"T1"}));
+        mark_failure(&state, &fresh, FailureClass::Authentication, None);
+        assert!(state
+            .route_memory
+            .lock()
+            .unwrap()
+            .candidates
+            .contains_key("reauthentication-auth"));
+    }
+
+    #[test]
+    fn model_local_long_cooldown_is_not_promoted_to_account_authentication() {
+        for (failure, retry_after, model_scope) in [
+            (FailureClass::ModelUnavailable, None, false),
+            (
+                FailureClass::RateLimit,
+                Some(Duration::from_secs(24 * 60 * 60)),
+                true,
+            ),
+        ] {
+            let state = AppState::for_tests().unwrap();
+            let mut local = bound_health_candidate("local-long-cooldown");
+            let mut authentication = local.clone();
+            begin_attempt(&state, &mut local);
+            begin_attempt(&state, &mut authentication);
+            bind_attempt_credentials(&state, &local, &json!({"accessToken":"T0"}));
+            bind_attempt_credentials(&state, &authentication, &json!({"accessToken":"T0"}));
+            mark_failure_scoped(&state, &local, failure, retry_after, model_scope);
+            let key = account_health_key(&local).unwrap();
+            let long_deadline = state.route_memory.lock().unwrap().candidates
+                ["local-long-cooldown"]
+                .cooldown_until_ms;
+            assert!(state.route_memory.lock().unwrap().accounts.is_empty());
+            let started = now_ms();
+            mark_failure(&state, &authentication, FailureClass::Authentication, None);
+            let finished = now_ms();
+            let mut memory = state.route_memory.lock().unwrap();
+            assert_eq!(
+                memory.candidates["local-long-cooldown"].failure,
+                Some(failure)
+            );
+            assert_eq!(
+                memory.candidates["local-long-cooldown"].cooldown_until_ms,
+                long_deadline
+            );
+            let account = memory.accounts.get_mut(&key).unwrap();
+            assert_eq!(account.failure, Some(FailureClass::Authentication));
+            let auth_deadline = account.cooldown_until_ms.unwrap();
+            assert!(auth_deadline >= started + AUTH_OR_BILLING_COOLDOWN.as_millis() as u64);
+            assert!(auth_deadline <= finished + AUTH_OR_BILLING_COOLDOWN.as_millis() as u64);
+            assert!(Some(auth_deadline) < long_deadline);
+            account.cooldown_until_ms = Some(started.saturating_sub(1));
+            drop(memory);
+            assert!(!candidate_is_cooling_down(
+                &state,
+                &bound_health_candidate("local-sibling")
+            ));
+            assert!(candidate_is_cooling_down(&state, &local));
+        }
+    }
+
+    fn typed_body_failure(error: crate::services::account_proxy::ProxyError) -> Response {
+        Response::new(Body::from_stream(stream::once(async move {
+            Err::<Bytes, std::io::Error>(std::io::Error::other(std::io::Error::other(error)))
+        })))
+    }
+
+    #[tokio::test]
+    async fn early_typed_request_rejection_does_not_cool_down_or_call_backup() {
+        for streaming in [false, true] {
+            for (status, message) in [
+                (StatusCode::FORBIDDEN, "blocked by safety policy"),
+                (StatusCode::BAD_REQUEST, "invalid input"),
+            ] {
+                let mut error = crate::services::account_proxy::ProxyError::new(status, message);
+                error.error_code = Some("request_rejected".into());
+                let responses = Arc::new(Mutex::new(HashMap::from([
+                    ("typed-rejection".to_string(), typed_body_failure(error)),
+                    (
+                        "rejection-backup".to_string(),
+                        Response::new(Body::from("unused")),
+                    ),
+                ])));
+                let mut state = AppState::for_tests().unwrap();
+                state.fixture_responses = Some(responses.clone());
+                let response = route_chat_with_candidates(
+                    &state,
+                    &inbound_headers(),
+                    json!({"model":SMART_ROUTER_MODEL_ID,"messages":[],"stream":streaming}),
+                    vec![
+                        bound_health_candidate("typed-rejection"),
+                        bound_health_candidate("rejection-backup"),
+                    ],
+                )
+                .await;
+                assert_eq!(response.status(), status);
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                let error: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(error["error"]["message"], message);
+                assert_eq!(error["error"]["code"], "request_rejected");
+                let memory = state.route_memory.lock().unwrap();
+                assert!(memory.candidates.is_empty());
+                assert!(memory.accounts.is_empty());
+                let responses = responses.lock().unwrap();
+                assert!(!responses.contains_key("typed-rejection"));
+                assert!(responses.contains_key("rejection-backup"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn first_typed_body_rate_limit_preserves_retry_after_scope_and_calls_backup() {
+        for model_scope in [false, true] {
+            let mut error = crate::services::account_proxy::ProxyError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit",
+            );
+            error.error_code = Some("rate_limit_exceeded".into());
+            error.retry_after = Some(HeaderValue::from_static("3600"));
+            error.model_scope = model_scope;
+            let responses = Arc::new(Mutex::new(HashMap::from([
+                ("typed-rate-limit".to_string(), typed_body_failure(error)),
+                ("rate-backup".to_string(), Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))),
+            ])));
+            let mut state = AppState::for_tests().unwrap();
+            state.fixture_responses = Some(responses.clone());
+            let limited = bound_health_candidate("typed-rate-limit");
+            let key = account_health_key(&limited).unwrap();
+            let backup = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "rate-backup");
+            let started = now_ms();
+            let response = route_chat_with_candidates(
+                &state,
+                &inbound_headers(),
+                json!({"model":SMART_ROUTER_MODEL_ID,"messages":[],"stream":true}),
+                vec![limited, backup],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "rate-backup/rate-backup-model"
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&bytes).contains("[DONE]"));
+            assert!(responses.lock().unwrap().is_empty());
+            let memory = state.route_memory.lock().unwrap();
+            let limited = &memory.candidates["typed-rate-limit"];
+            assert_eq!(limited.failure, Some(FailureClass::RateLimit));
+            assert!(limited.cooldown_until_ms.unwrap() >= started + 3_600_000);
+            if model_scope {
+                assert!(memory.accounts.is_empty());
+            } else {
+                assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
+                assert_eq!(
+                    memory.accounts[&key].cooldown_until_ms,
+                    limited.cooldown_until_ms
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn delivered_stream_request_rejection_ends_without_health_or_backup() {
+        let error = crate::services::account_proxy::ProxyError::new(
+            StatusCode::FORBIDDEN,
+            "blocked by safety policy",
+        );
+        let body = Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )),
+            Err(std::io::Error::other(error)),
+        ]));
+        let responses = Arc::new(Mutex::new(HashMap::from([
+            ("delivered-rejection".to_string(), Response::new(body)),
+            (
+                "delivered-backup".to_string(),
+                Response::new(Body::from("unused")),
+            ),
+        ])));
+        let mut state = AppState::for_tests().unwrap();
+        state.fixture_responses = Some(responses.clone());
+        let response = route_chat_with_candidates(
+            &state,
+            &inbound_headers(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"messages":[],"stream":true}),
+            vec![
+                bound_health_candidate("delivered-rejection"),
+                bound_health_candidate("delivered-backup"),
+            ],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut output = response.into_body().into_data_stream();
+        let first = output.next().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("partial"));
+        assert!(output.next().await.unwrap().is_err());
+        assert!(output.next().await.is_none());
+        assert!(responses.lock().unwrap().contains_key("delivered-backup"));
+        let memory = state.route_memory.lock().unwrap();
+        assert!(memory.candidates.is_empty());
+        assert!(memory.accounts.is_empty());
     }
 }

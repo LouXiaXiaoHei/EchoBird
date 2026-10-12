@@ -398,6 +398,7 @@ pub fn get_models() -> Vec<ModelConfig> {
             model_id: Some(server_info.model_name.clone()),
             base_url: format!("http://127.0.0.1:{}/v1", server_info.port),
             api_key: server_info.api_key.clone(),
+            account_source: None,
             anthropic_url: Some(format!("http://127.0.0.1:{}/anthropic", server_info.port)),
             model_type: Some(crate::models::model::ModelType::Local),
             openai_tested: None,
@@ -470,6 +471,8 @@ pub struct AddModelInput {
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
+    pub account_source: Option<crate::models::model::AccountSource>,
+    #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
     pub scope: crate::models::model::ModelScope,
@@ -477,34 +480,52 @@ pub struct AddModelInput {
 
 pub fn add_model(input: AddModelInput) -> ModelConfig {
     let mut models = get_user_models();
+    let new_model = new_model_from(input, generate_internal_id());
 
-    let base_url = input.base_url.unwrap_or_default();
+    log::info!(
+        "[ModelManager] Added model: {} ({})",
+        new_model.name,
+        new_model.internal_id
+    );
+    models.push(new_model.clone());
+    save_user_models(&models);
+    new_model
+}
+
+fn new_model_from(input: AddModelInput, internal_id: String) -> ModelConfig {
+    let base_url = if input.account_source.is_some() {
+        "account://echobird".into()
+    } else {
+        input.base_url.unwrap_or_default()
+    };
     let auto_type = detect_model_type(&base_url);
-    let internal_id = generate_internal_id();
-
-    let new_model = ModelConfig {
-        internal_id: internal_id.clone(),
+    ModelConfig {
+        internal_id,
         name: input.name.unwrap_or_default(),
         model_id: input.model_id,
         base_url,
-        api_key: input.api_key.unwrap_or_default(),
-        anthropic_url: input.anthropic_url,
+        api_key: if input.account_source.is_some() {
+            String::new()
+        } else {
+            input.api_key.unwrap_or_default()
+        },
+        account_source: input.account_source.clone(),
+        anthropic_url: if input.account_source.is_some() {
+            None
+        } else {
+            input.anthropic_url
+        },
         model_type: auto_type,
         openai_tested: None,
         anthropic_tested: None,
         openai_latency: None,
         anthropic_latency: None,
-        scope: input.scope,
-    };
-
-    log::info!(
-        "[ModelManager] Added model: {} ({})",
-        new_model.name,
-        internal_id
-    );
-    models.push(new_model.clone());
-    save_user_models(&models);
-    new_model
+        scope: if input.account_source.is_some() {
+            crate::models::model::ModelScope::SmartRouter
+        } else {
+            input.scope
+        },
+    }
 }
 
 /// Delete a user model by internal ID
@@ -535,6 +556,8 @@ pub struct UpdateModelInput {
     #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default)]
+    pub account_source: Option<crate::models::model::AccountSource>,
+    #[serde(default)]
     pub model_id: Option<String>,
     #[serde(default)]
     pub openai_tested: Option<bool>,
@@ -549,41 +572,53 @@ pub struct UpdateModelInput {
 pub fn update_model(internal_id: &str, updates: UpdateModelInput) -> Option<ModelConfig> {
     let mut models = get_user_models();
     let index = models.iter().position(|m| m.internal_id == internal_id)?;
-
-    // Apply updates
-    if let Some(name) = updates.name {
-        models[index].name = name;
-    }
-    if let Some(url) = &updates.base_url {
-        models[index].base_url = url.clone();
-        models[index].model_type = detect_model_type(url);
-    }
-    if let Some(url) = updates.anthropic_url {
-        models[index].anthropic_url = if url.is_empty() { None } else { Some(url) };
-    }
-    if let Some(key) = updates.api_key {
-        models[index].api_key = key;
-    }
-    if let Some(id) = updates.model_id {
-        models[index].model_id = Some(id);
-    }
-    if let Some(v) = updates.openai_tested {
-        models[index].openai_tested = Some(v);
-    }
-    if let Some(v) = updates.anthropic_tested {
-        models[index].anthropic_tested = Some(v);
-    }
-    if let Some(v) = updates.openai_latency {
-        models[index].openai_latency = Some(v);
-    }
-    if let Some(v) = updates.anthropic_latency {
-        models[index].anthropic_latency = Some(v);
-    }
+    apply_model_updates(&mut models[index], updates);
 
     let updated = models[index].clone();
     save_user_models(&models);
     log::info!("[ModelManager] Updated model: {}", internal_id);
     Some(updated)
+}
+
+fn apply_model_updates(model: &mut ModelConfig, updates: UpdateModelInput) {
+    // Apply updates
+    if let Some(name) = updates.name {
+        model.name = name;
+    }
+    if let Some(url) = &updates.base_url {
+        model.base_url = url.clone();
+        model.model_type = detect_model_type(url);
+    }
+    if let Some(url) = updates.anthropic_url {
+        model.anthropic_url = if url.is_empty() { None } else { Some(url) };
+    }
+    if let Some(key) = updates.api_key {
+        model.api_key = key;
+    }
+    if let Some(id) = updates.model_id {
+        model.model_id = Some(id);
+    }
+    if let Some(source) = updates.account_source {
+        model.account_source = Some(source);
+    }
+    if model.account_source.is_some() {
+        model.api_key.clear();
+        model.base_url = "account://echobird".into();
+        model.anthropic_url = None;
+        model.scope = crate::models::model::ModelScope::SmartRouter;
+    }
+    if let Some(v) = updates.openai_tested {
+        model.openai_tested = Some(v);
+    }
+    if let Some(v) = updates.anthropic_tested {
+        model.anthropic_tested = Some(v);
+    }
+    if let Some(v) = updates.openai_latency {
+        model.openai_latency = Some(v);
+    }
+    if let Some(v) = updates.anthropic_latency {
+        model.anthropic_latency = Some(v);
+    }
 }
 
 // ─── Test & Ping ───
@@ -901,6 +936,82 @@ mod tests {
     use super::*;
     use crate::models::model::ModelConfig;
 
+    #[test]
+    fn account_model_add_and_update_discard_api_credentials_and_force_router_scope() {
+        use crate::models::model::{AccountProvider, AccountSource, ModelScope};
+        let source = AccountSource {
+            provider: AccountProvider::Codex,
+            account_id: "saved-id".into(),
+        };
+        let mut model = new_model_from(
+            AddModelInput {
+                account_source: Some(source.clone()),
+                base_url: Some("https://untrusted.example/v1".into()),
+                anthropic_url: Some("https://untrusted.example/anthropic".into()),
+                api_key: Some("must-never-be-stored".into()),
+                scope: ModelScope::ModelCenter,
+                model_id: Some("model".into()),
+                ..Default::default()
+            },
+            "fixture".into(),
+        );
+        assert_eq!(model.scope, ModelScope::SmartRouter);
+        assert_eq!(model.base_url, "account://echobird");
+        assert!(model.anthropic_url.is_none());
+        assert!(model.api_key.is_empty());
+        assert_eq!(model.account_source, Some(source.clone()));
+        apply_model_updates(
+            &mut model,
+            UpdateModelInput {
+                base_url: Some("https://another.example".into()),
+                anthropic_url: Some("https://another.example/anthropic".into()),
+                api_key: Some("also-discarded".into()),
+                name: Some("New name".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(model.name, "New name");
+        assert_eq!(model.account_source, Some(source));
+        assert_eq!(model.base_url, "account://echobird");
+        assert!(model.api_key.is_empty());
+        assert!(model.anthropic_url.is_none());
+        assert_eq!(model.scope, ModelScope::SmartRouter);
+    }
+
+    #[test]
+    fn converting_api_model_to_account_source_discards_old_api_credentials() {
+        use crate::models::model::{AccountProvider, AccountSource, ModelScope};
+        let mut model = new_model_from(
+            AddModelInput {
+                base_url: Some("https://api.example/v1".into()),
+                api_key: Some("old-api-key".into()),
+                anthropic_url: Some("https://api.example/anthropic".into()),
+                model_id: Some("old-model".into()),
+                ..Default::default()
+            },
+            "existing".into(),
+        );
+        assert_eq!(model.scope, ModelScope::ModelCenter);
+        assert_eq!(model.api_key, "old-api-key");
+        assert!(model.account_source.is_none());
+        apply_model_updates(
+            &mut model,
+            UpdateModelInput {
+                account_source: Some(AccountSource {
+                    provider: AccountProvider::WorkBuddy,
+                    account_id: "saved-id".into(),
+                }),
+                model_id: Some("account-model".into()),
+                ..Default::default()
+            },
+        );
+        assert!(model.api_key.is_empty());
+        assert_eq!(model.base_url, "account://echobird");
+        assert!(model.anthropic_url.is_none());
+        assert_eq!(model.scope, ModelScope::SmartRouter);
+        assert_eq!(model.model_id.as_deref(), Some("account-model"));
+    }
+
     fn mk_model(id: &str) -> ModelConfig {
         ModelConfig {
             internal_id: id.to_string(),
@@ -908,6 +1019,7 @@ mod tests {
             model_id: None,
             base_url: String::new(),
             api_key: String::new(),
+            account_source: None,
             anthropic_url: None,
             model_type: None,
             openai_tested: None,

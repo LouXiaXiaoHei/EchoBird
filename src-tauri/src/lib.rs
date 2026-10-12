@@ -11,6 +11,9 @@ pub mod models;
 pub mod services;
 pub mod utils;
 
+use commands::account_proxy_commands;
+use commands::copilot_account_commands;
+use commands::kilo_account_commands;
 use commands::mod_stub;
 use commands::model_commands;
 use commands::process_commands;
@@ -187,6 +190,18 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "zcode",
             include_str!("../../docs/api/tools/install/zcode.json"),
+        ),
+        (
+            "kilodesktop",
+            include_str!("../../docs/api/tools/install/kilodesktop.json"),
+        ),
+        (
+            "copilot",
+            include_str!("../../docs/api/tools/install/copilot.json"),
+        ),
+        (
+            "copilotdesktop",
+            include_str!("../../docs/api/tools/install/copilotdesktop.json"),
         ),
         ("dsh", include_str!("../../docs/api/tools/install/dsh.json")),
         (
@@ -1131,6 +1146,24 @@ pub fn run() {
             tool_commands::open_folder,
             tool_commands::open_tool_paths_config,
             model_commands::get_models,
+            account_proxy_commands::list_proxy_accounts,
+            account_proxy_commands::get_account_proxy_models,
+            kilo_account_commands::list_kilo_accounts,
+            kilo_account_commands::start_kilo_login,
+            kilo_account_commands::poll_kilo_login,
+            kilo_account_commands::cancel_kilo_login,
+            kilo_account_commands::switch_kilo_account,
+            kilo_account_commands::refresh_kilo_account,
+            kilo_account_commands::delete_kilo_account,
+            kilo_account_commands::capture_kilo_account,
+            copilot_account_commands::list_copilot_accounts,
+            copilot_account_commands::import_copilot_accounts,
+            copilot_account_commands::start_copilot_login,
+            copilot_account_commands::poll_copilot_login,
+            copilot_account_commands::cancel_copilot_login,
+            copilot_account_commands::switch_copilot_account,
+            copilot_account_commands::refresh_copilot_account,
+            copilot_account_commands::delete_copilot_account,
             model_commands::add_model,
             model_commands::delete_model,
             model_commands::update_model,

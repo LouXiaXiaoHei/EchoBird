@@ -1,6 +1,11 @@
 mod runtime;
 mod server;
 
+pub(crate) use server::forget_account_authentication;
+
+#[cfg(test)]
+pub(crate) use server::route_live_account_probe;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -29,7 +34,7 @@ pub fn port() -> u16 {
     PORT.load(Ordering::Relaxed)
 }
 
-fn is_router_url(raw: &str) -> bool {
+pub(crate) fn is_router_url(raw: &str) -> bool {
     is_loopback_url_on_port(raw, port()) || is_loopback_url_on_port(raw, SMART_ROUTER_PORT)
 }
 
@@ -213,6 +218,7 @@ pub fn get_candidate_models() -> Vec<ModelConfig> {
                 model_id: Some(local_server.model_name),
                 base_url: format!("http://127.0.0.1:{}/v1", local_server.port),
                 api_key: local_server.api_key,
+                account_source: None,
                 anthropic_url: Some(format!("http://127.0.0.1:{}/anthropic", local_server.port)),
                 model_type: Some(ModelType::Local),
                 openai_tested: None,
@@ -232,11 +238,15 @@ fn model_is_routable(model: &ModelConfig) -> bool {
             .model_id
             .as_deref()
             .is_some_and(|model_id| !model_id.trim().is_empty())
-        && !model.base_url.trim().is_empty()
-        && !is_router_url(&model.base_url)
-        && !model_manager::decrypt_key_for_use(&model.api_key)
-            .trim()
-            .is_empty()
+        && (model
+            .account_source
+            .as_ref()
+            .is_some_and(|s| !s.account_id.is_empty())
+            || (!model.base_url.trim().is_empty()
+                && !is_router_url(&model.base_url)
+                && !model_manager::decrypt_key_for_use(&model.api_key)
+                    .trim()
+                    .is_empty()))
 }
 
 fn local_server_is_routable(server: &crate::services::local_llm::LocalServerInfo) -> bool {
@@ -321,6 +331,7 @@ pub fn model_config() -> Option<ModelConfig> {
         model_id: Some(SMART_ROUTER_MODEL_ID.to_string()),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         api_key: config.api_key,
+        account_source: None,
         anthropic_url: Some(format!("http://127.0.0.1:{port}")),
         model_type: Some(ModelType::Local),
         openai_tested: None,
@@ -438,6 +449,7 @@ mod tests {
             model_id: Some("model-id".to_string()),
             base_url: "https://example.com/v1".to_string(),
             api_key: "key".to_string(),
+            account_source: None,
             anthropic_url: None,
             model_type: Some(ModelType::Cloud),
             openai_tested: None,
@@ -471,6 +483,7 @@ mod tests {
             model_id: Some("model-id".to_string()),
             base_url: "https://example.com/v1".to_string(),
             api_key: "key".to_string(),
+            account_source: None,
             anthropic_url: None,
             model_type: Some(ModelType::Cloud),
             openai_tested: None,

@@ -1149,11 +1149,39 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
             || super::tool_config_manager::minimaxcode::desktop_region(path).is_some())
 }
 
+fn copilot_env_executable(pc: &PathsConfig) -> Option<String> {
+    if pc.env_var.as_deref() != Some("COPILOT_CLI_PATH") {
+        return None;
+    }
+    let path = expand_path(&std::env::var("COPILOT_CLI_PATH").ok()?);
+    valid_executable(pc, &path).then(|| path.to_string_lossy().into_owned())
+}
+
 fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String> {
+    if let Some(path) = copilot_env_executable(pc) {
+        return Some(path);
+    }
     let paths = get_platform_paths(&pc.paths);
     let resolve = |value: &str| {
         let path = expand_path(value);
+        #[cfg(windows)]
+        if pc.name == "Kilo Desktop" {
+            let root = if path.is_dir() {
+                Some(path.as_path())
+            } else {
+                path.parent()
+            };
+            if let Some(binary) = root.and_then(|root| kilo_versioned_executable(root, false)) {
+                return Some(binary.to_string_lossy().into_owned());
+            }
+        }
         let candidate = if path.is_dir() {
+            #[cfg(windows)]
+            if matches!(pc.name.as_str(), "Kilo CLI" | "Kilo Desktop") {
+                if let Some(binary) = kilo_versioned_executable(&path, pc.name == "Kilo CLI") {
+                    return Some(binary.to_string_lossy().into_owned());
+                }
+            }
             PathBuf::from(resolve_install_directory(&path, &paths)?)
         } else {
             path
@@ -1175,9 +1203,275 @@ fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String>
             }
             filenames_of(&paths).iter().find_map(|name| {
                 let path = which::which(name).ok()?;
+                #[cfg(windows)]
+                if pc.name == "Kilo Desktop" {
+                    if let Some(binary) = path
+                        .parent()
+                        .and_then(|root| kilo_versioned_executable(root, false))
+                    {
+                        return Some(binary.to_string_lossy().into_owned());
+                    }
+                }
                 valid_executable(pc, &path).then(|| path.to_string_lossy().into_owned())
             })
         })
+}
+
+#[cfg(any(windows, test))]
+fn kilo_versioned_executable(root: &Path, cli: bool) -> Option<PathBuf> {
+    let suffixes: &[&str] = if cli {
+        &[
+            "resources/kilo/windows-x64-baseline/bin/kilo.exe",
+            "resources/kilo/windows-arm64/bin/kilo.exe",
+        ]
+    } else {
+        &["kilo-desktop.exe"]
+    };
+    let mut versions: Vec<(Vec<u32>, PathBuf)> = fs::read_dir(root)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let name = name.to_str()?.strip_prefix("app-")?;
+            let version = name
+                .split('.')
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            entry.path().is_dir().then(|| (version, entry.path()))
+        })
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut directories: Vec<PathBuf> = versions.into_iter().map(|(_, path)| path).collect();
+    if cli {
+        directories.insert(0, root.to_path_buf());
+    } else {
+        // Squirrel's root executable forwards to a versioned native app.
+        directories.push(root.to_path_buf());
+    }
+    directories
+        .into_iter()
+        .flat_map(|dir| suffixes.iter().map(move |suffix| dir.join(suffix)))
+        .find(|path| path.is_file())
+}
+
+#[cfg(any(windows, test))]
+fn kilo_native_binary(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0; 2];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && header == *b"MZ"
+}
+
+#[cfg(any(windows, test))]
+fn kilo_package_roots(prefix: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![prefix.join("node_modules")];
+    if let Ok(versions) = fs::read_dir(prefix.join("global")) {
+        roots.extend(
+            versions
+                .flatten()
+                .filter(|entry| entry.path().is_dir())
+                .map(|entry| entry.path().join("node_modules")),
+        );
+    }
+    roots
+}
+
+#[cfg(any(windows, test))]
+fn kilo_package_runtime(roots: &[PathBuf], arch: &str) -> Option<PathBuf> {
+    let packages: &[&str] = if arch == "aarch64" {
+        &["@kilocode/cli-windows-arm64/bin/kilo.exe"]
+    } else {
+        &[
+            "@kilocode/cli-windows-x64-baseline/bin/kilo.exe",
+            "@kilocode/cli-windows-x64/bin/kilo.exe",
+        ]
+    };
+    roots.iter().find_map(|root| {
+        let cli = root.join("@kilocode/cli");
+        let cached = cli.join("bin/.kilo");
+        if kilo_native_binary(&cached) {
+            return Some(cached);
+        }
+        [root.clone(), cli.join("node_modules")]
+            .into_iter()
+            .find_map(|modules| {
+                packages
+                    .iter()
+                    .map(|suffix| modules.join(suffix))
+                    .find(|path| kilo_native_binary(path))
+            })
+    })
+}
+
+/// Kilo model arguments must reach a native executable without a batch decoder.
+#[cfg(windows)]
+pub(crate) fn get_kilo_runtime_path() -> Option<String> {
+    if let Some(detected) = get_tool_exe_path("kilo") {
+        let path = Path::new(&detected);
+        if kilo_native_binary(path) {
+            return Some(detected);
+        }
+        if let Some(parent) = path.parent() {
+            if let Some(native) =
+                kilo_package_runtime(&kilo_package_roots(parent), std::env::consts::ARCH)
+            {
+                return Some(native.to_string_lossy().into_owned());
+            }
+        }
+    }
+    if let Some(desktop) = get_tool_exe_path("kilodesktop") {
+        if let Some(root) = Path::new(&desktop).parent() {
+            if let Some(native) =
+                kilo_versioned_executable(root, true).filter(|path| kilo_native_binary(path))
+            {
+                return Some(native.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let mut prefixes = Vec::new();
+    if let Some(roaming) = dirs::data_dir() {
+        prefixes.push(roaming.join("npm"));
+    }
+    if let Some(local) = dirs::data_local_dir() {
+        prefixes.push(
+            std::env::var_os("PNPM_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| local.join("pnpm")),
+        );
+    }
+    if let Some(home) = dirs::home_dir() {
+        let bun = std::env::var_os("BUN_INSTALL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".bun"));
+        prefixes.push(bun.join("install/global"));
+    }
+    let roots = prefixes
+        .iter()
+        .flat_map(|prefix| kilo_package_roots(prefix))
+        .collect::<Vec<_>>();
+    kilo_package_runtime(&roots, std::env::consts::ARCH)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[test]
+fn kilo_native_packages_resolve_npm_cache_and_pnpm_without_launching_batch_shims() {
+    let root = std::env::temp_dir().join(format!("echobird-kilo-native-{}", uuid::Uuid::new_v4()));
+    let prefix = root.join("npm");
+    let modules = prefix.join("node_modules");
+    let cached = modules.join("@kilocode/cli/bin/.kilo");
+    let baseline = modules.join("@kilocode/cli-windows-x64-baseline/bin/kilo.exe");
+    fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    fs::create_dir_all(baseline.parent().unwrap()).unwrap();
+    fs::write(prefix.join("kilo.cmd"), b"batch fixture").unwrap();
+    fs::write(&cached, b"script fixture").unwrap();
+    fs::write(&baseline, b"MZnative fixture").unwrap();
+    assert!(!kilo_native_binary(&prefix.join("kilo.cmd")));
+    assert_eq!(
+        kilo_package_runtime(&kilo_package_roots(&prefix), "x86_64"),
+        Some(baseline)
+    );
+    fs::write(&cached, b"MZcache fixture").unwrap();
+    assert_eq!(
+        kilo_package_runtime(&kilo_package_roots(&prefix), "x86_64"),
+        Some(cached)
+    );
+    let pnpm = root.join("pnpm");
+    let arm = pnpm.join("global/5/node_modules/@kilocode/cli-windows-arm64/bin/kilo.exe");
+    fs::create_dir_all(arm.parent().unwrap()).unwrap();
+    fs::write(&arm, b"MZarm fixture").unwrap();
+    assert_eq!(
+        kilo_package_runtime(&kilo_package_roots(&pnpm), "aarch64"),
+        Some(arm)
+    );
+    assert!(kilo_package_runtime(&kilo_package_roots(&pnpm), "x86_64").is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn kilo_squirrel_detection_selects_the_latest_installed_binary_without_update_launcher() {
+    let root = std::env::temp_dir().join(format!("kilo-path-{}", uuid::Uuid::new_v4()));
+    for version in ["0.1.9", "0.1.11"] {
+        let dir = root.join(format!("app-{version}"));
+        fs::create_dir_all(dir.join("resources/kilo/windows-x64-baseline/bin")).unwrap();
+        fs::write(dir.join("kilo-desktop.exe"), b"fixture").unwrap();
+        fs::write(
+            dir.join("resources/kilo/windows-x64-baseline/bin/kilo.exe"),
+            b"fixture",
+        )
+        .unwrap();
+    }
+    fs::write(root.join("Update.exe"), b"fixture").unwrap();
+    fs::write(root.join("kilo-desktop.exe"), b"Squirrel stub fixture").unwrap();
+    assert_eq!(
+        kilo_versioned_executable(&root, false).unwrap(),
+        root.join("app-0.1.11/kilo-desktop.exe")
+    );
+    assert_eq!(
+        kilo_versioned_executable(&root, true).unwrap(),
+        root.join("app-0.1.11/resources/kilo/windows-x64-baseline/bin/kilo.exe")
+    );
+    fs::remove_file(root.join("app-0.1.11/kilo-desktop.exe")).unwrap();
+    assert_eq!(
+        kilo_versioned_executable(&root, false).unwrap(),
+        root.join("app-0.1.9/kilo-desktop.exe")
+    );
+    fs::remove_file(root.join("app-0.1.9/kilo-desktop.exe")).unwrap();
+    assert_eq!(
+        kilo_versioned_executable(&root, false).unwrap(),
+        root.join("kilo-desktop.exe")
+    );
+    fs::remove_file(root.join("kilo-desktop.exe")).unwrap();
+    assert!(kilo_versioned_executable(&root, false).is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn kilo_desktop_stub_file_and_directory_resolve_to_the_same_native_version() {
+    let root = std::env::temp_dir().join(format!("kilo-native-{}", uuid::Uuid::new_v4()));
+    for version in ["0.1.9", "0.1.11"] {
+        let directory = root.join(format!("app-{version}"));
+        fs::create_dir_all(directory.join("resources/kilo/windows-x64-baseline/bin")).unwrap();
+        fs::write(directory.join("kilo-desktop.exe"), b"MZnative fixture").unwrap();
+        fs::write(
+            directory.join("resources/kilo/windows-x64-baseline/bin/kilo.exe"),
+            b"MZCLI fixture",
+        )
+        .unwrap();
+    }
+    fs::write(root.join("kilo-desktop.exe"), b"MZstub fixture").unwrap();
+    fs::write(root.join("Update.exe"), b"MZupdater fixture").unwrap();
+    let mut definition: PathsConfig =
+        serde_json::from_str(include_str!("../../../tools/kilodesktop/paths.json")).unwrap();
+    definition.install_hints = None;
+    let expected = root.join("app-0.1.11/kilo-desktop.exe");
+    for candidate in [
+        root.join("kilo-desktop.exe"),
+        root.clone(),
+        expected.clone(),
+    ] {
+        definition.paths.win32 = Some(vec![candidate.to_string_lossy().into_owned()]);
+        let expected = Some(expected.clone());
+        assert_eq!(detect_tool(&definition).await.map(PathBuf::from), expected);
+        assert_eq!(
+            find_tool_executable(&definition, false).map(PathBuf::from),
+            expected
+        );
+        assert_eq!(
+            find_tool_executable(&definition, true).map(PathBuf::from),
+            expected
+        );
+    }
+    let embedded = kilo_versioned_executable(expected.parent().unwrap(), true).unwrap();
+    assert_eq!(
+        embedded,
+        root.join("app-0.1.11/resources/kilo/windows-x64-baseline/bin/kilo.exe")
+    );
+    assert!(kilo_native_binary(&embedded));
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// Detect if a tool is installed, returns executable path
@@ -1201,7 +1495,11 @@ async fn detect_tool(pc: &PathsConfig) -> Option<String> {
     if let Some(ref env_var) = pc.env_var {
         if let Ok(custom_path) = std::env::var(env_var) {
             let expanded = expand_path(&custom_path);
-            if expanded.exists() {
+            if if env_var == "COPILOT_CLI_PATH" {
+                valid_executable(pc, &expanded)
+            } else {
+                expanded.exists()
+            } {
                 return Some(expanded.to_string_lossy().to_string());
             }
         }
@@ -1666,6 +1964,159 @@ pub fn get_tool_exe_path(tool_id: &str) -> Option<String> {
     find_tool_executable(&def.paths_config, true)
 }
 
+/// The official desktop SDK downloads a CLI runtime, but that cache is not a standalone installation.
+pub(crate) fn get_copilot_runtime_path() -> Option<String> {
+    get_tool_exe_path("copilot").or_else(|| {
+        get_tool_exe_path("copilotdesktop")?;
+        let root = dirs::cache_dir()?.join("github-copilot-sdk/cli");
+        copilot_cached_runtime(&root).map(|path| path.to_string_lossy().into_owned())
+    })
+}
+
+fn copilot_cached_runtime(root: &Path) -> Option<PathBuf> {
+    let mut versions: Vec<(Vec<u32>, PathBuf)> = fs::read_dir(root)
+        .ok()?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let name = entry.file_name();
+            let version = name
+                .to_str()?
+                .split(['.', '-'])
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let dir = entry.path();
+            if !dir.join(".copilot-cli.ok").is_file() {
+                return None;
+            }
+            let path = dir.join(if cfg!(windows) {
+                "copilot.exe"
+            } else {
+                "copilot"
+            });
+            if !path.is_file() {
+                return None;
+            }
+            #[cfg(windows)]
+            {
+                use std::io::Read;
+                let mut signature = [0; 2];
+                fs::File::open(&path)
+                    .ok()?
+                    .read_exact(&mut signature)
+                    .ok()?;
+                if signature != *b"MZ" {
+                    return None;
+                }
+            }
+            Some((version, path))
+        })
+        .collect();
+    versions.sort_by(|a, b| b.0.cmp(&a.0));
+    versions.into_iter().map(|(_, path)| path).next()
+}
+
+#[test]
+fn copilot_runtime_requires_the_sdk_marker_and_prefers_a_numeric_new_version() {
+    let root = std::env::temp_dir().join(format!("copilot-path-{}", uuid::Uuid::new_v4()));
+    let file = if cfg!(windows) {
+        "copilot.exe"
+    } else {
+        "copilot"
+    };
+    for version in ["1.0.9-3", "1.0.94-3", "1.0.100-1"] {
+        let dir = root.join(version);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(file), b"MZfixture").unwrap();
+        if version != "1.0.100-1" {
+            fs::write(dir.join(".copilot-cli.ok"), b"").unwrap();
+        }
+    }
+    assert_eq!(
+        copilot_cached_runtime(&root).unwrap(),
+        root.join("1.0.94-3").join(file)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn copilot_environment_path_is_shared_by_detection_and_executable_resolution() {
+    struct RestoreEnvironment(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                std::env::set_var("COPILOT_CLI_PATH", value);
+            } else {
+                std::env::remove_var("COPILOT_CLI_PATH");
+            }
+        }
+    }
+    let _restore = RestoreEnvironment(std::env::var_os("COPILOT_CLI_PATH"));
+    let root = std::env::temp_dir().join(format!("copilot-env-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(root.join("bin with spaces")).unwrap();
+    let executable = root.join("bin with spaces").join(if cfg!(windows) {
+        "copilot.cmd"
+    } else {
+        "copilot"
+    });
+    fs::write(&executable, b"fixture").unwrap();
+    let mut definition: PathsConfig =
+        serde_json::from_str(include_str!("../../../tools/copilot/paths.json")).unwrap();
+    definition.command.clear();
+    definition.paths.win32 = Some(Vec::new());
+    definition.paths.darwin = Some(Vec::new());
+    definition.paths.linux = Some(Vec::new());
+    std::env::set_var("COPILOT_CLI_PATH", &executable);
+    let expected = Some(executable.to_string_lossy().into_owned());
+    assert_eq!(detect_tool(&definition).await, expected);
+    assert_eq!(find_tool_executable(&definition, true), expected);
+    assert_eq!(find_tool_executable(&definition, false), expected);
+    std::env::set_var("COPILOT_CLI_PATH", executable.parent().unwrap());
+    assert!(detect_tool(&definition).await.is_none());
+    assert!(find_tool_executable(&definition, true).is_none());
+    fs::remove_file(&executable).unwrap();
+    std::env::set_var("COPILOT_CLI_PATH", &executable);
+    assert!(detect_tool(&definition).await.is_none());
+    assert!(find_tool_executable(&definition, false).is_none());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn copilot_desktop_linux_catalog_resolves_both_official_appimage_architectures() {
+    let mut definition: PathsConfig =
+        serde_json::from_str(include_str!("../../../tools/copilotdesktop/paths.json")).unwrap();
+    let linux_paths = definition.paths.linux.take().unwrap();
+    let names = filenames_of(&linux_paths);
+    assert_eq!(
+        names,
+        [
+            "GitHub-Copilot-linux-x64.AppImage",
+            "GitHub-Copilot-linux-arm64.AppImage"
+        ]
+    );
+    let root = std::env::temp_dir().join(format!("copilot-appimages-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&root).unwrap();
+    let paths: Vec<String> = names
+        .iter()
+        .map(|name| root.join(name).to_string_lossy().into_owned())
+        .collect();
+    definition.paths.win32 = Some(paths.clone());
+    definition.paths.darwin = Some(paths.clone());
+    definition.paths.linux = Some(paths);
+    definition.install_hints = None;
+    for name in names {
+        let executable = root.join(name);
+        fs::write(&executable, b"AppImage filename fixture").unwrap();
+        let expected = Some(executable.to_string_lossy().into_owned());
+        assert_eq!(detect_tool(&definition).await, expected);
+        assert_eq!(find_tool_executable(&definition, true), expected);
+        fs::remove_file(&executable).unwrap();
+    }
+    assert!(detect_tool(&definition).await.is_none());
+    assert!(find_tool_executable(&definition, false).is_none());
+    fs::remove_dir(root).unwrap();
+}
+
 fn resolve_install_directory(hit_path: &Path, platform_paths: &[String]) -> Option<String> {
     if hit_path.is_dir() {
         let root = if hit_path.extension().is_some_and(|ext| ext == "app") {
@@ -1873,7 +2324,12 @@ async fn scan_single_tool(def: ToolDefinition) -> DetectedTool {
                 super::tool_config_manager::vscode::installed_version(Path::new(&path))
             });
         } else if version.is_none() && !pc.command.is_empty() && !pc.no_model_config {
-            version = platform::get_version(&pc.command).await;
+            let command = if matches!(def.id.as_str(), "kilo" | "copilot") {
+                installed_path.as_deref().unwrap_or(&pc.command)
+            } else {
+                &pc.command
+            };
+            version = platform::get_version(command).await;
         }
         // Desktop GUI apps have no CLI `--version` (their `command` is empty),
         // but Windows records a clean DisplayVersion in the registry Uninstall
@@ -2096,6 +2552,27 @@ mod tests {
             assert!(super::detect_tool(&definition).await.is_none());
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "explicit read-only installed Kilo/Copilot detection verification"]
+    async fn installed_kilo_copilot_detection_probe() {
+        crate::services::bundled_assets::register(&crate::BUNDLED);
+        let definitions = super::get_definitions();
+        for id in ["kilo", "kilodesktop", "copilot", "copilotdesktop"] {
+            let definition = definitions.iter().find(|def| def.id == id).unwrap().clone();
+            let detected = super::scan_single_tool(definition).await;
+            eprintln!(
+                "tool={id} installed={} version={}",
+                detected.installed,
+                detected.version.as_deref().unwrap_or("unknown")
+            );
+            if id != "copilot" {
+                assert!(detected.installed, "expected installed client {id}");
+            }
+        }
+        assert!(super::get_copilot_runtime_path().is_some());
     }
 
     #[tokio::test]

@@ -471,5 +471,53 @@ export function accountCenterProviders(
         })
       )
     ),
+    provider(
+      'kilo',
+      'Kilo',
+      '/icons/tools/kilo.png',
+      ['kilo', 'kilodesktop'],
+      context.kiloAccounts,
+      (account) => ({
+        identity: account.email,
+        plan: account.plan,
+        metrics: [
+          {
+            label: t('model.balance'),
+            value:
+              account.balance == null
+                ? '—'
+                : new Intl.NumberFormat(locale, {
+                    style: 'currency',
+                    currency: 'USD',
+                    maximumFractionDigits: 2,
+                  }).format(account.balance),
+          },
+        ],
+      })
+    ),
+    provider(
+      'copilot',
+      'GitHub Copilot',
+      '/icons/tools/copilot.png',
+      ['copilot', 'copilotdesktop'],
+      context.copilotAccounts,
+      (account) => ({
+        identity: account.login,
+        detail: account.host !== 'github.com' ? account.host : undefined,
+        plan: account.plan,
+        metrics: [
+          {
+            label: t('accountCenter.quota'),
+            value: number(account.remaining),
+            resetAt: account.resetAt,
+            percent:
+              account.remaining != null && account.total != null && account.total > 0
+                ? (account.remaining / account.total) * 100
+                : undefined,
+            showProgress: true,
+          },
+        ],
+      })
+    ),
   ];
 }

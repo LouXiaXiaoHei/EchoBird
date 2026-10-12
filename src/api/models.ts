@@ -1,6 +1,6 @@
 // Model APIs — CRUD, test, ping, encryption
 import { invoke } from '@tauri-apps/api/core';
-import type { ModelConfig, ModelTestResult, PingResult } from './types';
+import type { AccountSource, ModelConfig, ModelTestResult, PingResult } from './types';
 
 export async function getModels(): Promise<ModelConfig[]> {
   return invoke('get_models');
@@ -10,6 +10,7 @@ export async function addModel(input: {
   name: string;
   baseUrl: string;
   apiKey: string;
+  accountSource?: AccountSource;
   anthropicUrl?: string;
   modelId?: string;
   scope?: 'modelCenter' | 'smartRouter';
@@ -31,6 +32,7 @@ export async function updateModel(
     name?: string;
     baseUrl?: string;
     apiKey?: string;
+    accountSource?: AccountSource;
     anthropicUrl?: string;
     modelId?: string;
   }

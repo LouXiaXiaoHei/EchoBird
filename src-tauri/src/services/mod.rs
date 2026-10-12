@@ -1,3 +1,5 @@
+pub mod account_model_sources;
+pub mod account_proxy;
 pub(crate) mod agent_context;
 pub(crate) mod agent_history;
 pub mod agent_loop;
@@ -19,6 +21,7 @@ pub mod codex_catalog;
 #[path = "codex_proxy/mod.rs"]
 pub mod codex_runtime;
 pub mod codex_session_merge;
+pub mod copilot_accounts;
 pub mod cue_accounts;
 pub mod cursor_accounts;
 pub(crate) mod cursor_auth;
@@ -31,6 +34,7 @@ pub mod free_model_directory;
 pub mod grok_accounts;
 pub mod grok_bot_accounts;
 pub mod json_repair;
+pub mod kilo_accounts;
 pub mod llm_client;
 pub mod local_llm;
 pub(crate) mod local_proxy;

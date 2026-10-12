@@ -83,6 +83,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream", "gzip"
 url = "2"
 rand = "0.8"
 futures-util = "0.3"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
 
 # Local HTTP servers for the Anthropic model-id router and smart router.
 axum = "0.8"

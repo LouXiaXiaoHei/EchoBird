@@ -83,6 +83,8 @@ beforeEach(() => {
     cursorAccounts: group,
     grokBotAccounts: group,
     grokAccounts: group,
+    kiloAccounts: { ...group, accounts: [] },
+    copilotAccounts: { ...group, accounts: [] },
     manusAccounts: group,
     cueAccounts: group,
     antigravityAccounts: group,

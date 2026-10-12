@@ -49,6 +49,20 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 vi.mock('../../api/tauri', () => {
   const names = [
     'listZCodeAccounts',
+    'listKiloAccounts',
+    'startKiloLogin',
+    'pollKiloLogin',
+    'cancelKiloLogin',
+    'switchKiloAccount',
+    'refreshKiloAccount',
+    'deleteKiloAccount',
+    'listCopilotAccounts',
+    'startCopilotLogin',
+    'pollCopilotLogin',
+    'cancelCopilotLogin',
+    'switchCopilotAccount',
+    'refreshCopilotAccount',
+    'deleteCopilotAccount',
     'startZCodeLogin',
     'pollZCodeLogin',
     'cancelZCodeLogin',
@@ -224,12 +238,12 @@ async function tick() {
     await vi.advanceTimersByTimeAsync(1);
   });
 }
-async function mount(tool: Tool, installed = true) {
+async function mount(tool: Tool | api.KiloTool | api.CopilotTool, installed = true) {
   useToolsStore.getState().setDetectedTools([
     {
       id: tool,
       name: tool,
-      category: tool === 'grok' || tool === 'antigravity' ? 'CLI Code' : 'Desktop',
+      category: ['grok', 'antigravity', 'kilo', 'copilot'].includes(tool) ? 'CLI Code' : 'Desktop',
       noModelConfig: ['antigravity', 'antigravitydesktop', 'cursor', 'trae', 'traecn'].includes(
         tool
       ),
@@ -254,6 +268,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   for (const name of listNames) vi.mocked(api[name]).mockResolvedValue([]);
+  vi.mocked(api.listKiloAccounts).mockResolvedValue([]);
+  vi.mocked(api.listCopilotAccounts).mockResolvedValue([]);
   for (const [name, action] of Object.entries(api))
     if (name.startsWith('cancel') && vi.isMockFunction(action)) action.mockResolvedValue(undefined);
   vi.mocked(api.startCodexLogin).mockResolvedValue('fixture-login');
@@ -295,6 +311,346 @@ function mockAccountOrderStorage(raw?: string) {
   vi.stubGlobal('localStorage', storage);
   return storage;
 }
+
+const kiloFixture: api.KiloAccount = {
+  id: 'kilo-fixture',
+  email: 'kilo@example.test',
+  active: true,
+  plan: null,
+  balance: null,
+};
+const copilotFixture: api.CopilotAccount = {
+  id: 'copilot-fixture',
+  login: 'github-user',
+  host: 'github.com',
+  active: true,
+  plan: null,
+  remaining: null,
+  total: null,
+  resetAt: null,
+};
+const clientCases = [
+  {
+    family: 'kilo',
+    tool: 'kilo',
+    list: 'listKiloAccounts',
+    apply: 'switchKiloAccount',
+    refresh: 'refreshKiloAccount',
+  },
+  {
+    family: 'kilo',
+    tool: 'kilodesktop',
+    list: 'listKiloAccounts',
+    apply: 'switchKiloAccount',
+    refresh: 'refreshKiloAccount',
+  },
+  {
+    family: 'copilot',
+    tool: 'copilot',
+    list: 'listCopilotAccounts',
+    apply: 'switchCopilotAccount',
+    refresh: 'refreshCopilotAccount',
+  },
+  {
+    family: 'copilot',
+    tool: 'copilotdesktop',
+    list: 'listCopilotAccounts',
+    apply: 'switchCopilotAccount',
+    refresh: 'refreshCopilotAccount',
+  },
+] as const;
+const clientGroup = (family: 'kilo' | 'copilot') =>
+  family === 'kilo' ? state.kiloAccounts : state.copilotAccounts;
+
+it.each(['kilo', 'copilot'] as const)(
+  '%s: successful login saves the summary without quota refresh or native apply',
+  async (family) => {
+    const start = family === 'kilo' ? 'startKiloLogin' : 'startCopilotLogin';
+    const poll = family === 'kilo' ? 'pollKiloLogin' : 'pollCopilotLogin';
+    const refresh = family === 'kilo' ? 'refreshKiloAccount' : 'refreshCopilotAccount';
+    const apply = family === 'kilo' ? 'switchKiloAccount' : 'switchCopilotAccount';
+    const row = family === 'kilo' ? kiloFixture : copilotFixture;
+    vi.mocked(api[start]).mockResolvedValue({
+      loginId: 'approved-login',
+      verificationUri: 'https://kilo.ai/login',
+      expiresAt: Date.now() / 1000 + 60,
+    } as never);
+    vi.mocked(api[poll]).mockResolvedValue(row as never);
+    await mount(family);
+    vi.mocked(
+      api[family === 'kilo' ? 'listKiloAccounts' : 'listCopilotAccounts']
+    ).mockResolvedValue([row] as never);
+    await act(async () => {
+      await clientGroup(family).add();
+    });
+    expect(clientGroup(family).accounts).toEqual([row]);
+    expect(api[refresh]).not.toHaveBeenCalled();
+    expect(api[apply]).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(clientGroup(family).busy).toBe(false);
+  }
+);
+
+it.each(['kilo', 'copilot'] as const)(
+  '%s: account rows isolate refresh and nested keyboard actions while preserving selection',
+  async (family) => {
+    const list = family === 'kilo' ? 'listKiloAccounts' : 'listCopilotAccounts';
+    const refreshName = family === 'kilo' ? 'refreshKiloAccount' : 'refreshCopilotAccount';
+    const row = family === 'kilo' ? kiloFixture : copilotFixture;
+    vi.mocked(api[list]).mockResolvedValue([row] as never);
+    await mount(family);
+    await act(async () => {
+      renderer.update(
+        <AppManagerProvider>
+          <Harness panel />
+        </AppManagerProvider>
+      );
+    });
+    const identity = family === 'kilo' ? kiloFixture.email : copilotFixture.login;
+    const radio = renderer.root.findByProps({ role: 'radio' });
+    expect(radio.props.className).toContain('h-12');
+    const preventDefault = vi.fn();
+    act(() =>
+      radio.props.onKeyDown({ key: 'Enter', target: {}, currentTarget: radio, preventDefault })
+    );
+    expect(preventDefault).not.toHaveBeenCalled();
+    act(() =>
+      radio.props.onKeyDown({ key: ' ', target: radio, currentTarget: radio, preventDefault })
+    );
+    expect(preventDefault).toHaveBeenCalledOnce();
+    expect(clientGroup(family).selectedId).toBe(row.id);
+    let complete!: (value: unknown) => void;
+    vi.mocked(api[refreshName]).mockReturnValue(
+      new Promise((resolve) => {
+        complete = resolve;
+      }) as never
+    );
+    const stopPropagation = vi.fn();
+    await act(async () => {
+      renderer.root
+        .findByProps({ 'aria-label': `agent.refreshAccount ${identity}` })
+        .props.onClick({ stopPropagation });
+    });
+    expect(stopPropagation).toHaveBeenCalledOnce();
+    expect(
+      renderer.root.findByProps({ 'aria-label': `agent.refreshAccount ${identity}` }).props.disabled
+    ).toBe(true);
+    expect(clientGroup(family).selectedId).toBe(row.id);
+    await act(async () => {
+      complete(row);
+    });
+    expect(
+      renderer.root.findByProps({ 'aria-label': `agent.refreshAccount ${identity}` }).props.disabled
+    ).toBe(false);
+    expect(clientGroup(family).selectedId).toBe(row.id);
+    expect(api[refreshName]).toHaveBeenCalledExactlyOnceWith(row.id);
+  }
+);
+
+it.each(clientCases)(
+  '$tool: passive navigation preserves cached rows and never applies or refreshes',
+  async (client) => {
+    const row = client.family === 'kilo' ? kiloFixture : copilotFixture;
+    vi.mocked(api[client.list]).mockResolvedValue([row] as never);
+    await mount(client.tool);
+    expect(api[client.list]).toHaveBeenCalledTimes(1);
+    if (client.family === 'copilot')
+      expect(api.listCopilotAccounts).toHaveBeenCalledWith(client.tool);
+    expect(clientGroup(client.family).accounts).toEqual([row]);
+    for (const [name, action] of Object.entries(api)) {
+      if (/^(start|refresh|switch|delete|claim|restore)/.test(name) && vi.isMockFunction(action))
+        expect(action).not.toHaveBeenCalled();
+    }
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    await tick();
+    vi.mocked(api[client.list]).mockRejectedValueOnce(new Error('accountError.read'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    await tick();
+    expect(clientGroup(client.family).accounts).toEqual([row]);
+    expect(state.applyError).toBeNull();
+    expect(api[client.apply]).not.toHaveBeenCalled();
+    expect(api[client.refresh]).not.toHaveBeenCalled();
+    expect(folderPicker).not.toHaveBeenCalled();
+  }
+);
+
+it('Copilot CLI and Desktop load their own saved selection during passive tool switching', async () => {
+  const cliRow = { ...copilotFixture, id: 'cli-saved', login: 'cli-user' };
+  const desktopRow = { ...copilotFixture, id: 'desktop-saved', login: 'desktop-user' };
+  vi.mocked(api.listCopilotAccounts).mockImplementation(async (toolId) =>
+    toolId === 'copilotdesktop' ? [desktopRow] : [cliRow]
+  );
+  await mount('copilot');
+  act(() =>
+    useToolsStore.getState().setDetectedTools([
+      { id: 'copilot', name: 'Copilot CLI', category: 'CLI Code', installed: true },
+      { id: 'copilotdesktop', name: 'Copilot Desktop', category: 'Desktop', installed: true },
+    ])
+  );
+  expect(state.copilotAccounts.selectedId).toBe(cliRow.id);
+  act(() => state.setSelectedTool('copilotdesktop'));
+  await tick();
+  expect(api.listCopilotAccounts).toHaveBeenLastCalledWith('copilotdesktop');
+  expect(state.copilotAccounts.selectedId).toBe(desktopRow.id);
+  act(() => state.setSelectedTool('copilot'));
+  await tick();
+  expect(api.listCopilotAccounts).toHaveBeenLastCalledWith('copilot');
+  expect(state.copilotAccounts.selectedId).toBe(cliRow.id);
+  expect(api.startCopilotLogin).not.toHaveBeenCalled();
+  expect(api.refreshCopilotAccount).not.toHaveBeenCalled();
+  expect(api.switchCopilotAccount).not.toHaveBeenCalled();
+  expect(api.startTool).not.toHaveBeenCalled();
+});
+
+it.each(clientCases)('$tool: an uninstalled tool never loads account data', async (client) => {
+  await mount(client.tool, false);
+  expect(api[client.list]).not.toHaveBeenCalled();
+  act(() => useNavigationStore.getState().setActivePage('accounts'));
+  await tick();
+  expect(api[client.list]).not.toHaveBeenCalled();
+});
+
+it.each(clientCases)(
+  '$tool: positive control applies the account before native launch',
+  async (client) => {
+    const row = client.family === 'kilo' ? kiloFixture : copilotFixture;
+    vi.mocked(api[client.list]).mockResolvedValue([row] as never);
+    await mount(client.tool);
+    act(() => state.setLaunchAfterApply(true));
+    let complete!: (value: unknown) => void;
+    vi.mocked(api[client.apply]).mockReturnValueOnce(
+      new Promise((resolve) => {
+        complete = resolve;
+      }) as never
+    );
+    let task!: Promise<void>;
+    act(() => {
+      task = state.handleLaunch();
+    });
+    await tick();
+    expect(api[client.apply]).toHaveBeenCalledExactlyOnceWith(row.id, client.tool);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(api[client.apply]).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      complete(row);
+      await task;
+    });
+    expect(api.startTool).toHaveBeenCalledWith(
+      client.tool,
+      undefined,
+      client.tool === 'kilo' || client.tool === 'copilot' ? 'E:/fixture-project' : undefined
+    );
+    expect(api[client.refresh]).not.toHaveBeenCalled();
+    expect(state.applyError).toBeNull();
+  }
+);
+
+it.each(clientCases)(
+  '$tool: native apply failure remains visible and prevents launch',
+  async (client) => {
+    const row = client.family === 'kilo' ? kiloFixture : copilotFixture;
+    vi.mocked(api[client.list]).mockResolvedValue([row] as never);
+    vi.mocked(api[client.apply]).mockRejectedValueOnce(new Error('accountError.write'));
+    await mount(client.tool);
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(clientGroup(client.family).accounts).toEqual([row]);
+    expect(state.applyError).toBe('accountError.write');
+    expect(api.startTool).not.toHaveBeenCalled();
+  }
+);
+
+it.each(clientCases)(
+  '$tool: account and API model choices are exclusive without native writes',
+  async (client) => {
+    vi.mocked(api[client.list]).mockResolvedValue([
+      client.family === 'kilo' ? kiloFixture : copilotFixture,
+    ] as never);
+    await mount(client.tool);
+    act(() => state.handleSelectModel(client.tool, 'fixture-model'));
+    expect(clientGroup(client.family).selectedId).toBeNull();
+    act(() => clientGroup(client.family).select('chosen-account'));
+    expect(state.toolModelConfig[client.tool]).toBeNull();
+    expect(clientGroup(client.family).selectedId).toBe('chosen-account');
+    expect(api[client.apply]).not.toHaveBeenCalled();
+  }
+);
+
+it.each(['kilo', 'copilot'] as const)(
+  '%s: switching between CLI and Desktop cancels login and ignores late completion',
+  async (family) => {
+    const expiresAt = Date.now() / 1000 + 60;
+    const start = family === 'kilo' ? 'startKiloLogin' : 'startCopilotLogin';
+    const poll = family === 'kilo' ? 'pollKiloLogin' : 'pollCopilotLogin';
+    const cancel = family === 'kilo' ? 'cancelKiloLogin' : 'cancelCopilotLogin';
+    vi.mocked(api[start]).mockResolvedValue({
+      loginId: 'fixture-login',
+      verificationUri: 'https://kilo.ai/login',
+      expiresAt,
+    } as never);
+    let resolve!: (value: unknown) => void;
+    vi.mocked(api[poll]).mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      }) as never
+    );
+    await mount(family);
+    act(() =>
+      useToolsStore.getState().setDetectedTools([
+        { id: family, name: family, category: 'CLI Code', installed: true },
+        { id: `${family}desktop`, name: family, category: 'Desktop', installed: true },
+      ])
+    );
+    let task!: Promise<void>;
+    await act(async () => {
+      task = clientGroup(family).add();
+    });
+    expect(api[start]).toHaveBeenCalledTimes(1);
+    if (family === 'kilo') expect(api.openExternal).toHaveBeenCalledWith('https://kilo.ai/login');
+    else expect(api.openExternal).not.toHaveBeenCalled();
+    act(() => state.setSelectedTool(`${family}desktop`));
+    await tick();
+    expect(api[cancel]).toHaveBeenCalledWith('fixture-login');
+    await act(async () => {
+      resolve(family === 'kilo' ? kiloFixture : copilotFixture);
+      await task;
+    });
+    expect(clientGroup(family).accounts).toEqual([]);
+    expect(clientGroup(family).busy).toBe(false);
+  }
+);
+
+it.each(['kilo', 'copilot'] as const)(
+  '%s: login has a 60-second deadline and adding never refreshes quota',
+  async (family) => {
+    const start = family === 'kilo' ? 'startKiloLogin' : 'startCopilotLogin';
+    const poll = family === 'kilo' ? 'pollKiloLogin' : 'pollCopilotLogin';
+    const cancel = family === 'kilo' ? 'cancelKiloLogin' : 'cancelCopilotLogin';
+    const refresh = family === 'kilo' ? 'refreshKiloAccount' : 'refreshCopilotAccount';
+    vi.mocked(api[start]).mockResolvedValue({
+      loginId: 'deadline-login',
+      verificationUri: 'https://kilo.ai/login',
+      expiresAt: Date.now() / 1000 + 600,
+    } as never);
+    vi.mocked(api[poll]).mockResolvedValue(null);
+    await mount(family);
+    let task!: Promise<void>;
+    await act(async () => {
+      task = clientGroup(family).add();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_001);
+      await task;
+    });
+    expect(api[cancel]).toHaveBeenCalledWith('deadline-login');
+    expect(clientGroup(family).busy).toBe(false);
+    expect(api[refresh]).not.toHaveBeenCalled();
+  }
+);
 
 function accountCardIds() {
   return renderer.root
