@@ -332,10 +332,9 @@ impl ProcessManager {
         let echobird_dir = dirs::home_dir().unwrap_or_default().join(".echobird");
         let config_path = echobird_dir.join(format!("{}.json", tool_id));
 
-        // Read echobird config for env vars and model info
+        // Read echobird config for env vars
         let mut api_key_env: Option<String> = None;
         let mut base_url_env: Option<String> = None;
-        let mut model_id: Option<String> = None;
         let mut custom_api_key_env_name: Option<String> = None;
         if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -346,10 +345,6 @@ impl ProcessManager {
                         .map(|s| s.to_string());
                     base_url_env = config
                         .get("baseUrl")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    model_id = config
-                        .get("modelId")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     custom_api_key_env_name = config
@@ -372,23 +367,16 @@ impl ProcessManager {
         // Build the final command with tool-specific args
         let mut full_command = command.to_string();
 
-        // MiMo Code / Kilo Code keep no ~/.echobird relay file — pull the
-        // selection from their native config so they get the same --model
-        // injection as OpenCode.
-        if tool_id == "mimocode" {
-            model_id = crate::services::tool_config_manager::mimocode_echobird_model();
-        }
-        if tool_id == "kilo" {
-            model_id = crate::services::tool_config_manager::kilo_echobird_model();
-        }
-
-        // OpenCode family: append --model echobird/{modelId} to force model
-        // selection (beats project-level config and the TUI's recent-model
-        // history, both of which can override the global config's `model`).
-        if matches!(tool_id, "opencode" | "mimocode" | "kilo") {
-            if let Some(ref mid) = model_id {
-                full_command = format!("{} --model echobird/{}", command, mid);
-            }
+        // OpenCode reads the selected model from its native config; the V2
+        // default command does not accept --model. MiMo / Kilo still use the
+        // flag to override project config and recent-model history.
+        let model_id = match tool_id {
+            "mimocode" => crate::services::tool_config_manager::mimocode_echobird_model(),
+            "kilo" => crate::services::tool_config_manager::kilo_echobird_model(),
+            _ => None,
+        };
+        if let Some(mid) = model_id {
+            full_command = format!("{} --model echobird/{}", command, mid);
         }
 
         #[cfg(windows)]
