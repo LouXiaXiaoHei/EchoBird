@@ -194,10 +194,15 @@ pub async fn get_model_directory() -> serde_json::Value {
 }
 
 /// Remote-updatable free-model catalog. Returns `null` when the
-/// remote and cache are unavailable so the frontend uses its bundled JSON.
+/// remote and cache are unavailable.
 #[tauri::command]
 pub async fn get_free_model_directory() -> serde_json::Value {
     crate::services::free_model_directory::fetch_free_model_directory().await
+}
+
+#[tauri::command]
+pub fn get_cached_free_model_directory() -> serde_json::Value {
+    crate::services::free_model_directory::load_cached_free_model_directory()
 }
 
 #[tauri::command]

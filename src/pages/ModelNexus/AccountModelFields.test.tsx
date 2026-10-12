@@ -20,7 +20,15 @@ let renderer: ReactTestRenderer;
 let current: NewModelForm;
 let stored: Map<string, string>;
 let setItem: ReturnType<typeof vi.fn>;
-function Harness({ accountId = '', modelId = '' }: { accountId?: string; modelId?: string }) {
+function Harness({
+  accountId = '',
+  modelId = '',
+  active = true,
+}: {
+  accountId?: string;
+  modelId?: string;
+  active?: boolean;
+}) {
   const [form, setForm] = useState<NewModelForm>({
     name: 'Codex',
     baseUrl: '',
@@ -38,6 +46,7 @@ function Harness({ accountId = '', modelId = '' }: { accountId?: string; modelId
       modelId={form.modelId}
       modelIdOptions={form.modelIdOptions}
       setForm={setForm}
+      active={active}
     />
   );
 }
@@ -69,14 +78,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it('loads only saved accounts before selection, then automatically reads and saves the directory', async () => {
+it('defaults to the first saved account and automatically reads and caches its model directory', async () => {
   await open();
   expect(api.listProxyAccounts).toHaveBeenCalledWith('codex');
-  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
-  expect(setItem).not.toHaveBeenCalled();
-  await act(async () => {
-    field('accountProxy.account').props.onChange('first');
-  });
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: 'first' });
+  expect(field('accountProxy.account').props.value).toBe('first');
   expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith({
     provider: 'codex',
     accountId: 'first',
@@ -84,6 +90,7 @@ it('loads only saved accounts before selection, then automatically reads and sav
   expect(current.modelIdOptions).toEqual(['gpt-fixture', 'gpt-other']);
   expect(current.modelId).toBe('gpt-fixture');
   expect(current.apiKey).toBe('');
+  expect(current.name).toBe('First');
   expect(api.getCachedAccountProxyModels(current.accountSource!)).toEqual(current.modelIdOptions);
   expect(setItem).toHaveBeenCalledOnce();
   expect(renderer.root.findAllByType('button')).toHaveLength(0);
@@ -91,6 +98,96 @@ it('loads only saved accounts before selection, then automatically reads and sav
     selectOnly: true,
     refreshLabel: 'btn.refresh',
   });
+});
+
+it('uses the first saved account cache without another directory request', async () => {
+  api.cacheAccountProxyModels({ provider: 'codex', accountId: 'first' }, ['cached-model']);
+  setItem.mockClear();
+  await open();
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: 'first' });
+  expect(current.name).toBe('First');
+  expect(current.modelId).toBe('cached-model');
+  expect(current.modelIdOptions).toEqual(['cached-model']);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+});
+
+it('preserves an explicitly selected non-first account and its cached model', async () => {
+  api.cacheAccountProxyModels({ provider: 'codex', accountId: 'second' }, [
+    'second-model',
+    'second-other',
+  ]);
+  setItem.mockClear();
+  await open('second', 'second-other');
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: 'second' });
+  expect(current.name).toBe('Second');
+  expect(current.modelId).toBe('second-other');
+  expect(field('accountProxy.account').props.value).toBe('second');
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+});
+
+it('keeps an empty selection when the provider has no saved accounts', async () => {
+  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([]);
+  await open();
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: '' });
+  expect(field('accountProxy.account').props).toMatchObject({ value: '', options: [] });
+  expect(field('model.modelId').props.disabled).toBe(true);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+});
+
+it('defaults only for the current provider and ignores a late account list from the previous provider', async () => {
+  let resolve!: (accounts: api.ProxyAccount[]) => void;
+  vi.mocked(api.listProxyAccounts)
+    .mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    )
+    .mockResolvedValueOnce([
+      { source: { provider: 'kilo', accountId: 'kilo-first' }, label: 'Kilo First' },
+    ]);
+  api.cacheAccountProxyModels({ provider: 'kilo', accountId: 'kilo-first' }, ['kilo-model']);
+  setItem.mockClear();
+  await open();
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: '' });
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  await act(async () => field('accountProxy.provider').props.onChange('kilo'));
+  expect(current.accountSource).toEqual({ provider: 'kilo', accountId: 'kilo-first' });
+  expect(current.name).toBe('Kilo First');
+  expect(current.modelId).toBe('kilo-model');
+  await act(async () =>
+    resolve([{ source: { provider: 'codex', accountId: 'late-codex' }, label: 'Late Codex' }])
+  );
+  expect(current.accountSource).toEqual({ provider: 'kilo', accountId: 'kilo-first' });
+  expect(current.name).toBe('Kilo First');
+  expect(field('accountProxy.account').props.options).toEqual(['kilo-first']);
+  expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+});
+
+it('does not default or fetch models after closing while the saved accounts are still loading', async () => {
+  let resolve!: (accounts: api.ProxyAccount[]) => void;
+  vi.mocked(api.listProxyAccounts).mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    })
+  );
+  await open();
+  await act(async () => renderer.update(<Harness active={false} />));
+  const closingForm = current;
+  await act(async () =>
+    resolve([{ source: { provider: 'codex', accountId: 'late-first' }, label: 'Late First' }])
+  );
+  expect(current).toBe(closingForm);
+  expect(current.accountSource).toEqual({ provider: 'codex', accountId: '' });
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
 });
 
 it('reuses the persisted account directory on a new edit form and preserves the selected model', async () => {
@@ -128,6 +225,7 @@ it('shows the account label after loading without displaying the internal accoun
     value: 'first',
     optionLabels: { first: 'First · Pro 100' },
   });
+  expect(current.name).toBe('First');
 });
 
 it('isolates account and provider caches and restores them without another request', async () => {
@@ -135,8 +233,10 @@ it('isolates account and provider caches and restores them without another reque
   vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['second-model']);
   await act(async () => field('accountProxy.account').props.onChange('second'));
   expect(current.modelId).toBe('second-model');
+  expect(current.name).toBe('Second');
   await act(async () => field('accountProxy.account').props.onChange('first'));
   expect(current.modelIdOptions).toEqual(['gpt-fixture', 'gpt-other']);
+  expect(current.name).toBe('First');
   await act(async () => field('accountProxy.provider').props.onChange('kilo'));
   expect(current.modelIdOptions).toEqual([]);
   expect(current.accountSource).toEqual({ provider: 'kilo', accountId: '' });

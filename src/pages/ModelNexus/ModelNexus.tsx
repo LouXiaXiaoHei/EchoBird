@@ -1285,7 +1285,11 @@ export function AddModelModal() {
                   ? '编辑账号配置'
                   : t('model.editConfig')
                 : modelModalDestination === 'freeRouter'
-                  ? t('freeModels.addToRouter')
+                  ? t(
+                      newModelForm.accountSource
+                        ? 'freeModels.addAccountToRouter'
+                        : 'freeModels.addToRouter'
+                    )
                   : t('btn.addModel')}
             </span>
           </div>
@@ -1301,18 +1305,20 @@ export function AddModelModal() {
         {/* Form */}
         <div className="px-5 pb-5">
           <div className="space-y-4">
-            <div>
-              <label className="block text-xs text-cyber-text-secondary mb-1">
-                {t('model.name')}
-              </label>
-              <input
-                type="text"
-                placeholder="e.g. My Model"
-                value={newModelForm.name}
-                onChange={(e) => setNewModelForm((prev) => ({ ...prev, name: e.target.value }))}
-                className="w-full bg-cyber-input border border-cyber-border px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button"
-              />
-            </div>
+            {!newModelForm.accountSource && (
+              <div>
+                <label className="block text-xs text-cyber-text-secondary mb-1">
+                  {t('model.name')}
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. My Model"
+                  value={newModelForm.name}
+                  onChange={(e) => setNewModelForm((prev) => ({ ...prev, name: e.target.value }))}
+                  className="w-full bg-cyber-input border border-cyber-border px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button"
+                />
+              </div>
+            )}
             {newModelForm.accountSource ? (
               <AccountModelFields
                 source={newModelForm.accountSource}
@@ -1550,6 +1556,7 @@ export function AddModelModal() {
                       baseUrl: updatedModel.baseUrl,
                       modelId: updatedModel.modelId ?? newModelForm.modelId,
                       accountSource: updatedModel.accountSource,
+                      scope: updatedModel.scope,
                     });
                     updateUserModel(updatedModel, newModelForm);
                   }
@@ -1571,6 +1578,7 @@ export function AddModelModal() {
                         baseUrl: newModel.baseUrl,
                         modelId: newModel.modelId ?? newModelForm.modelId,
                         accountSource: newModel.accountSource,
+                        scope: newModel.scope,
                       });
                     } catch (error) {
                       await api.deleteModel(newModel.internalId).catch((rollbackError) => {

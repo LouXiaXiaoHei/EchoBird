@@ -8,7 +8,8 @@ pub(crate) use server::route_live_account_probe;
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -56,6 +57,8 @@ struct StoredConfig {
     candidate_ids: Vec<String>,
     #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    defaults_initialization_pending: bool,
 }
 
 impl Default for StoredConfig {
@@ -65,6 +68,7 @@ impl Default for StoredConfig {
             version: default_version(),
             candidate_ids: Vec::new(),
             api_key: String::new(),
+            defaults_initialization_pending: false,
         }
     }
 }
@@ -113,14 +117,35 @@ fn generate_api_key() -> String {
 }
 
 fn save_config_unlocked(config: &StoredConfig) -> Result<(), String> {
-    let path = config_path();
+    save_config_at(&config_path(), config)
+}
+
+fn save_config_at(path: &Path, config: &StoredConfig) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("create smart router config directory failed: {e}"))?;
     }
     let content = serde_json::to_string_pretty(config)
         .map_err(|e| format!("serialize smart router config failed: {e}"))?;
-    fs::write(&path, content).map_err(|e| format!("write {} failed: {e}", path.display()))
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temporary);
+    }
+    result.map_err(|e| format!("write {} failed: {e}", path.display()))
 }
 
 fn load_config_unlocked() -> Result<StoredConfig, String> {
@@ -131,7 +156,13 @@ fn load_config_unlocked() -> Result<StoredConfig, String> {
         serde_json::from_str(&content)
             .map_err(|e| format!("parse {} failed: {e}", path.display()))?
     } else {
-        StoredConfig::default()
+        let mut config = StoredConfig::default();
+        if let Some(models) = model_manager::prepare_initial_router_defaults()? {
+            config.candidate_ids = models.into_iter().map(|model| model.internal_id).collect();
+            config.defaults_initialization_pending = true;
+            save_config_unlocked(&config)?;
+        }
+        config
     };
 
     if config.api_key.is_empty() {
@@ -139,6 +170,12 @@ fn load_config_unlocked() -> Result<StoredConfig, String> {
         save_config_unlocked(&config)?;
     } else if !config.api_key.starts_with("enc:v1:") {
         config.api_key = model_manager::encrypt_key_for_storage(&config.api_key);
+        save_config_unlocked(&config)?;
+    }
+
+    if config.defaults_initialization_pending {
+        model_manager::persist_initial_router_defaults()?;
+        config.defaults_initialization_pending = false;
         save_config_unlocked(&config)?;
     }
 
@@ -244,9 +281,13 @@ fn model_is_routable(model: &ModelConfig) -> bool {
             .is_some_and(|s| !s.account_id.is_empty())
             || (!model.base_url.trim().is_empty()
                 && !is_router_url(&model.base_url)
-                && !model_manager::decrypt_key_for_use(&model.api_key)
+                && (!model_manager::decrypt_key_for_use(&model.api_key)
                     .trim()
-                    .is_empty()))
+                    .is_empty()
+                    || crate::services::free_model_directory::is_keyless_model(
+                        &model.base_url,
+                        model.model_id.as_deref().unwrap_or_default(),
+                    ))))
 }
 
 fn local_server_is_routable(server: &crate::services::local_llm::LocalServerInfo) -> bool {
@@ -261,12 +302,22 @@ fn router_owns_model(model: &ModelConfig) -> bool {
 }
 
 fn usable_candidate_count(candidate_ids: &[String]) -> usize {
-    let user_models = model_manager::get_user_models();
-    let local_server = crate::services::local_llm::get_server_info_sync();
+    usable_candidate_count_from(
+        candidate_ids,
+        &model_manager::get_user_models(),
+        &crate::services::local_llm::get_server_info_sync(),
+    )
+}
+
+fn usable_candidate_count_from(
+    candidate_ids: &[String],
+    user_models: &[ModelConfig],
+    local_server: &crate::services::local_llm::LocalServerInfo,
+) -> usize {
     candidate_ids
         .iter()
         .filter(|candidate_id| {
-            (candidate_id.as_str() == "local-server" && local_server_is_routable(&local_server))
+            (candidate_id.as_str() == "local-server" && local_server_is_routable(local_server))
                 || user_models.iter().any(|model| {
                     model.internal_id == candidate_id.as_str() && model_is_routable(model)
                 })
@@ -406,10 +457,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn config_initialization_journal_survives_atomic_replacement() {
+        let path = std::env::temp_dir().join(format!(
+            "echobird-router-journal-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let mut config = StoredConfig {
+            candidate_ids: vec!["first".into(), "second".into()],
+            defaults_initialization_pending: true,
+            ..StoredConfig::default()
+        };
+        save_config_at(&path, &config).unwrap();
+        let pending: StoredConfig = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(pending.defaults_initialization_pending);
+        assert!(pending.api_key.is_empty());
+        config.api_key = "enc:v1:local-key".into();
+        config.defaults_initialization_pending = false;
+        save_config_at(&path, &config).unwrap();
+        let completed: StoredConfig = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(!completed.defaults_initialization_pending);
+        assert_eq!(completed.candidate_ids, pending.candidate_ids);
+        assert_eq!(completed.api_key, config.api_key);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn failed_config_replacement_preserves_storage_and_cleans_staging_file() {
+        let directory =
+            std::env::temp_dir().join(format!("echobird-router-journal-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join("smart-router.json");
+        fs::create_dir(&path).unwrap();
+        let previous = path.join("previous");
+        fs::write(&previous, "keep existing storage").unwrap();
+        assert!(save_config_at(&path, &StoredConfig::default()).is_err());
+        assert_eq!(
+            fs::read_to_string(&previous).unwrap(),
+            "keep existing storage"
+        );
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_file(previous).unwrap();
+        fs::remove_dir(path).unwrap();
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
     fn enabled_defaults_on_and_persists_without_changing_candidates() {
         let mut config: StoredConfig =
             serde_json::from_str(r#"{"candidateIds":["first","second"],"apiKey":"key"}"#).unwrap();
         assert!(config.enabled);
+        assert!(!config.defaults_initialization_pending);
         config.enabled = false;
         let restored: StoredConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
@@ -473,6 +570,49 @@ mod tests {
         assert!(!model_is_routable(&model));
         model.api_key = "   ".to_string();
         assert!(!model_is_routable(&model));
+    }
+
+    #[test]
+    fn keyless_candidates_count_only_for_their_catalog_model_and_endpoint() {
+        let mut model: ModelConfig = serde_json::from_value(serde_json::json!({
+            "internalId": "keyless",
+            "name": "Keyless",
+            "modelId": "kilo-auto/free",
+            "baseUrl": "https://api.kilo.ai/api/gateway",
+            "apiKey": ""
+        }))
+        .unwrap();
+        let ids = vec![model.internal_id.clone()];
+        let local_server = crate::services::local_llm::LocalServerInfo::default();
+        for (base_url, model_id) in [
+            ("https://api.kilo.ai/api/gateway", "kilo-auto/free"),
+            ("https://opencode.ai/zen/v1", "space-bunny-free"),
+        ] {
+            model.base_url = base_url.into();
+            model.model_id = Some(model_id.into());
+            assert!(model_is_routable(&model));
+            assert_eq!(
+                usable_candidate_count_from(&ids, &[model.clone()], &local_server),
+                1
+            );
+        }
+        for (base_url, model_id) in [
+            ("https://example.com/v1", "kilo-auto/free"),
+            (
+                "https://api.kilo.ai/api/gateway",
+                "anthropic/claude-sonnet-4",
+            ),
+            ("https://opencode.ai/zen/v1", "claude-opus-5"),
+            ("https://opencode.ai/zen/v1", ""),
+        ] {
+            model.base_url = base_url.into();
+            model.model_id = Some(model_id.into());
+            assert!(!model_is_routable(&model));
+            assert_eq!(
+                usable_candidate_count_from(&ids, &[model.clone()], &local_server),
+                0
+            );
+        }
     }
 
     #[test]

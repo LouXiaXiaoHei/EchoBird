@@ -53,6 +53,7 @@ vi.mock('../../api/tauri', () => ({
   setSmartRouterCandidates: vi.fn(),
   removeSmartRouterCandidate: vi.fn(),
   getFreeModelDirectory: vi.fn(),
+  getCachedFreeModelDirectory: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../../api/accountProxy', async (original) => ({
   ...(await original<typeof import('../../api/accountProxy')>()),

@@ -196,6 +196,7 @@ export type TKey =
   // Free Model Hunter
   | 'freeModels.search'
   | 'freeModels.noCard'
+  | 'freeModels.noApiKey'
   | 'freeModels.filter.all'
   | 'freeModels.filter.perpetual'
   | 'freeModels.filter.quota'
@@ -229,6 +230,7 @@ export type TKey =
   | 'freeModels.saved.added'
   | 'freeModels.saved.addFailed'
   | 'freeModels.addToRouter'
+  | 'freeModels.addAccountToRouter'
   | 'freeModels.help'
   | 'freeModels.help.routerTitle'
   | 'freeModels.help.routerDesc'
@@ -261,7 +263,10 @@ export type TKey =
   | 'freeModels.router.limitReached'
   | 'freeModels.router.priority'
   | 'freeModels.router.reorderHint'
-  | 'freeModels.router.removeConfirm'
+  | 'freeModels.router.removeHintPrefix'
+  | 'freeModels.router.removeHintSuffix'
+  | 'freeModels.router.dropToRemove'
+  | 'freeModels.router.releaseToRemove'
 
   // App Manager
   | 'aiDesktop.officialWebsite'

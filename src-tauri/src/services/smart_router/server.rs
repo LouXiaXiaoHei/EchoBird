@@ -20,7 +20,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use super::{
     api_key_for_use, candidate_ids, PublicActivity, SMART_ROUTER_INTERNAL_ID, SMART_ROUTER_MODEL_ID,
 };
-use crate::services::model_manager;
+use crate::services::{free_model_directory, model_manager};
 use crate::utils::platform::echobird_dir;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -546,10 +546,18 @@ async fn route_messages_with_candidates(
 }
 
 fn resolve_candidates() -> Vec<Candidate> {
-    let ids = candidate_ids();
-    let user_models = model_manager::get_user_models();
-    let local_server = crate::services::local_llm::get_server_info_sync();
+    resolve_candidates_from(
+        candidate_ids(),
+        &model_manager::get_user_models(),
+        &crate::services::local_llm::get_server_info_sync(),
+    )
+}
 
+fn resolve_candidates_from(
+    ids: Vec<String>,
+    user_models: &[crate::models::model::ModelConfig],
+    local_server: &crate::services::local_llm::LocalServerInfo,
+) -> Vec<Candidate> {
     ids.into_iter()
         .filter_map(|id| {
             if id == "local-server" && local_server.running {
@@ -573,7 +581,10 @@ fn resolve_candidates() -> Vec<Candidate> {
                 return None;
             }
             let api_key = model_manager::decrypt_key_for_use(&model.api_key);
-            if api_key.trim().is_empty() && model.account_source.is_none() {
+            if api_key.trim().is_empty()
+                && model.account_source.is_none()
+                && !free_model_directory::is_keyless_model(&model.base_url, model_id)
+            {
                 return None;
             }
 
@@ -858,12 +869,14 @@ async fn send_api_request(
         } else {
             chat_completions_url(&candidate.base_url)
         })
-        .bearer_auth(&candidate.api_key)
         .header(header::CONTENT_TYPE, "application/json")
         .header("HTTP-Referer", "https://echobird.ai")
         .header("X-OpenRouter-Title", "EchoBird")
         .header("X-OpenRouter-Categories", "programming-app,personal-agent")
         .json(&body);
+    if let Some(api_key) = upstream_bearer_token(candidate) {
+        request = request.bearer_auth(api_key);
+    }
     if let Some(user_agent) = headers.get(header::USER_AGENT) {
         request = request.header(header::USER_AGENT, user_agent.clone());
     }
@@ -882,6 +895,18 @@ async fn send_api_request(
         .map_err(|error| error.to_string())
     } else {
         Ok(response)
+    }
+}
+
+fn upstream_bearer_token(candidate: &Candidate) -> Option<&str> {
+    if !candidate.api_key.trim().is_empty() {
+        Some(&candidate.api_key)
+    } else if free_model_directory::keyless_auth(&candidate.base_url, &candidate.model_id)
+        == Some(free_model_directory::KeylessAuth::PublicBearer)
+    {
+        Some("public")
+    } else {
+        None
     }
 }
 
@@ -2738,6 +2763,164 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         addr
+    }
+
+    #[test]
+    fn resolves_keyless_catalog_entries_without_admitting_other_blank_keys() {
+        let models: Vec<crate::models::model::ModelConfig> = serde_json::from_value(json!([
+            {"internalId":"kilo", "name":"Kilo", "modelId":"kilo-auto/free",
+                "baseUrl":"https://api.kilo.ai/api/gateway", "apiKey":""},
+            {"internalId":"zen", "name":"Zen", "modelId":"space-bunny-free",
+                "baseUrl":"https://opencode.ai/zen/v1", "apiKey":"   "},
+            {"internalId":"paid", "name":"Paid", "modelId":"claude-opus-5",
+                "baseUrl":"https://opencode.ai/zen/v1", "apiKey":""},
+            {"internalId":"spoof", "name":"Spoof", "modelId":"kilo-auto/free",
+                "baseUrl":"https://example.com/v1", "apiKey":""},
+            {"internalId":"blank", "name":"Blank", "modelId":"ordinary-model",
+                "baseUrl":"https://example.com/v1", "apiKey":""},
+            {"internalId":"account", "name":"Account", "modelId":"account-model",
+                "baseUrl":"account://kilo", "apiKey":"",
+                "accountSource":{"provider":"kilo", "accountId":"saved-account"}},
+            {"internalId":"loop", "name":"Loop", "modelId":"auto",
+                "baseUrl":"http://127.0.0.1:53683/v1", "apiKey":"key"}
+        ]))
+        .unwrap();
+        let resolved = resolve_candidates_from(
+            [
+                "paid", "zen", "account", "missing", "kilo", "spoof", "blank", "loop",
+            ]
+            .map(String::from)
+            .to_vec(),
+            &models,
+            &crate::services::local_llm::LocalServerInfo::default(),
+        );
+        assert_eq!(
+            resolved
+                .iter()
+                .map(|item| item.internal_id.as_str())
+                .collect::<Vec<_>>(),
+            ["zen", "account", "kilo"]
+        );
+        assert!(resolved.iter().all(|item| item.api_key.trim().is_empty()));
+        assert!(resolved[1].account_source.is_some());
+    }
+
+    #[tokio::test]
+    async fn blank_upstream_keys_send_no_authorization_for_chat_or_responses() {
+        let captured = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let handler = {
+            let captured = captured.clone();
+            move |headers: HeaderMap| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(
+                        headers
+                            .get(header::AUTHORIZATION)
+                            .map(|value| value.to_str().unwrap().to_string()),
+                    );
+                    Json(json!({
+                        "id":"response-auth", "object":"response", "status":"completed",
+                        "model":"fixture-model", "output":[],
+                        "choices":[{"message":{"role":"assistant", "content":"ok"}}]
+                    }))
+                }
+            }
+        };
+        let addr = spawn_mock(
+            Router::new()
+                .route("/v1/chat/completions", post(handler.clone()))
+                .route("/v1/responses", post(handler)),
+        )
+        .await;
+        let state = AppState::for_tests().unwrap();
+        for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+            for key in ["", " \t ", "upstream-key"] {
+                let mut upstream = candidate(addr, "keyless");
+                upstream.api_key = key.into();
+                let response = send_api_request(
+                    &state,
+                    &inbound_headers(),
+                    &upstream,
+                    &json!({"model":"fixture-model", "stream":false}),
+                    protocol,
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+        }
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![
+                None,
+                None,
+                Some("Bearer upstream-key".into()),
+                None,
+                None,
+                Some("Bearer upstream-key".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn public_bearer_applies_only_to_known_free_models_and_never_replaces_a_user_key() {
+        let mut upstream = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "free");
+        upstream.api_key.clear();
+        upstream.base_url = "https://opencode.ai/zen/v1".into();
+        upstream.model_id = "space-bunny-free".into();
+        assert_eq!(upstream_bearer_token(&upstream), Some("public"));
+        upstream.api_key = "real-account-key".into();
+        assert_eq!(upstream_bearer_token(&upstream), Some("real-account-key"));
+        upstream.api_key.clear();
+        upstream.model_id = "claude-opus-5".into();
+        assert_eq!(upstream_bearer_token(&upstream), None);
+        upstream.model_id = "space-bunny-free".into();
+        upstream.base_url = "https://example.com/zen/v1".into();
+        assert_eq!(upstream_bearer_token(&upstream), None);
+        upstream.base_url = "https://api.kilo.ai/api/gateway".into();
+        upstream.model_id = "kilo-auto/free".into();
+        assert_eq!(upstream_bearer_token(&upstream), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "Calls a public upstream model; run explicitly for live verification"]
+    async fn live_keyless_kilo_routes_through_the_actual_candidate_resolver() {
+        let model: crate::models::model::ModelConfig = serde_json::from_value(json!({
+            "internalId":"live-keyless-kilo", "name":"Kilo AI",
+            "modelId":"kilo-auto/free", "baseUrl":"https://api.kilo.ai/api/gateway",
+            "apiKey":""
+        }))
+        .unwrap();
+        let candidates = resolve_candidates_from(
+            vec![model.internal_id.clone()],
+            &[model],
+            &crate::services::local_llm::LocalServerInfo::default(),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].api_key.is_empty());
+        let state = AppState::for_tests().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            HeaderValue::from_str(&format!("EchoBird/{}", env!("CARGO_PKG_VERSION"))).unwrap(),
+        );
+        let response = route_chat_with_candidates(
+            &state,
+            &headers,
+            json!({"model":SMART_ROUTER_MODEL_ID, "stream":false, "max_tokens":128,
+                "messages":[{"role":"user", "content":"Reply with exactly OK and nothing else."}]}),
+            candidates,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            reply["choices"][0]["message"]["content"]
+                .as_str()
+                .map(str::trim),
+            Some("OK")
+        );
     }
 
     #[test]

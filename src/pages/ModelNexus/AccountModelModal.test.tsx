@@ -49,7 +49,7 @@ function Harness() {
 }
 const saved = {
   internalId: 'proxy-fixture',
-  name: 'Codex',
+  name: 'Saved',
   baseUrl: 'account://echobird',
   apiKey: '',
   modelId: 'gpt-fixture',
@@ -66,7 +66,7 @@ async function open(accountId = 'saved') {
   });
   await act(async () => {
     context.setNewModelForm({
-      name: 'Codex',
+      name: '',
       baseUrl: 'account://echobird',
       anthropicUrl: '',
       apiKey: 'discard-this-key',
@@ -91,6 +91,15 @@ beforeEach(() => {
   vi.mocked(accountApi.getAccountProxyModels)
     .mockReset()
     .mockResolvedValue(['gpt-fixture', 'gpt-other']);
+  vi.mocked(accountApi.listProxyAccounts)
+    .mockReset()
+    .mockResolvedValue([
+      {
+        source: { provider: 'codex', accountId: 'saved' },
+        label: 'Saved',
+        plan: 'prolite',
+      },
+    ]);
   vi.mocked(api.addModel).mockResolvedValue(saved);
   addSelectedModel.mockResolvedValue(undefined);
 });
@@ -101,11 +110,18 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-it('hides the key and saves only the binding through the existing router workflow', async () => {
+it('hides the name and key and saves the account label with its binding through the existing router workflow', async () => {
   await open();
+  expect(
+    renderer.root.findAllByType('label').some((label) => label.children.includes('model.name'))
+  ).toBe(false);
   expect(
     renderer.root.findAllByType('label').some((label) => label.children.includes('model.apiKey'))
   ).toBe(false);
+  expect(context.newModelForm.name).toBe('Saved');
+  expect(renderer.root.findByProps({ id: 'model-config-dialog-title' }).children).toEqual([
+    'freeModels.addAccountToRouter',
+  ]);
   expect(
     renderer.root.findAllByType('input').some((input) => input.props.placeholder === 'sk-...')
   ).toBe(false);
@@ -118,6 +134,7 @@ it('hides the key and saves only the binding through the existing router workflo
   expect(api.addModel).toHaveBeenCalledWith(
     expect.objectContaining({
       apiKey: '',
+      name: 'Saved',
       accountSource: saved.accountSource,
       scope: 'smartRouter',
     })
@@ -142,9 +159,19 @@ it('hides the key and saves only the binding through the existing router workflo
   expect(renderer.root.findByProps({ id: 'model-config-dialog-title' }).children).toEqual([
     'model.editConfig',
   ]);
+  expect(
+    renderer.root.findAllByType('label').some((label) => label.children.includes('model.name'))
+  ).toBe(true);
+  const nameInput = renderer.root
+    .findAllByType('input')
+    .find((input) => input.props.placeholder === 'e.g. My Model')!;
+  expect(nameInput).toBeDefined();
+  await act(async () => nameInput.props.onChange({ target: { value: 'My API model' } }));
+  expect(context.newModelForm.name).toBe('My API model');
 });
 
 it('requires a saved account before writing and keeps the form available', async () => {
+  vi.mocked(accountApi.listProxyAccounts).mockResolvedValueOnce([]);
   await open('');
   await act(async () => {
     await saveButton().props.onClick();
@@ -152,6 +179,50 @@ it('requires a saved account before writing and keeps the form available', async
   expect(api.addModel).not.toHaveBeenCalled();
   expect(showToast).toHaveBeenCalledWith('warning', 'accountProxy.selectRequired');
   expect(context.showAddModelModal).toBe(true);
+});
+
+it('defaults the empty account form without starting quota, applying the account or saving a model', async () => {
+  await open('');
+  expect(context.newModelForm.accountSource).toEqual(saved.accountSource);
+  expect(context.newModelForm.name).toBe('Saved');
+  expect(accountApi.listProxyAccounts).toHaveBeenCalledExactlyOnceWith('codex');
+  expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(saved.accountSource);
+  expect(api.queryModelUsage).not.toHaveBeenCalled();
+  expect(api.addModel).not.toHaveBeenCalled();
+  expect(api.updateModel).not.toHaveBeenCalled();
+  expect(api.deleteModel).not.toHaveBeenCalled();
+  expect(addSelectedModel).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+  await act(async () => {
+    context.setNewModelForm((form) => ({ ...form, accountSource: undefined, name: 'API Model' }));
+  });
+  expect(renderer.root.findByProps({ id: 'model-config-dialog-title' }).children).toEqual([
+    'freeModels.addToRouter',
+  ]);
+});
+
+it('ignores an account list arriving after closing and does not start the default account directory', async () => {
+  vi.useFakeTimers();
+  let resolve!: (accounts: accountApi.ProxyAccount[]) => void;
+  vi.mocked(accountApi.listProxyAccounts).mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    })
+  );
+  await open('');
+  act(() => context.closeModelModal());
+  const closingForm = context.newModelForm;
+  await act(async () =>
+    resolve([{ source: saved.accountSource, label: 'Saved', plan: 'prolite' }])
+  );
+  expect(context.newModelForm).toBe(closingForm);
+  expect(context.newModelForm.accountSource?.accountId).toBe('');
+  expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(localStorage.setItem).not.toHaveBeenCalled();
+  expect(api.queryModelUsage).not.toHaveBeenCalled();
+  expect(api.addModel).not.toHaveBeenCalled();
+  expect(addSelectedModel).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
 });
 
 it('removes the new model if adding the router candidate fails', async () => {

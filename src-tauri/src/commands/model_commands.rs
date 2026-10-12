@@ -62,7 +62,7 @@ pub async fn update_model(
         || updates.api_key.is_some()
         || updates.model_id.is_some()
         || updates.account_source.is_some();
-    let updated = model_manager::update_model(&internal_id, updates);
+    let updated = model_manager::update_model(&internal_id, updates)?;
     if resets_route_memory && updated.is_some() {
         crate::services::smart_router::forget_candidate_memory(&internal_id);
     }

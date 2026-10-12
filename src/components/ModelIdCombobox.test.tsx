@@ -1,4 +1,4 @@
-import { useState, type ComponentProps } from 'react';
+import { useCallback, useState, type ComponentProps } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ModelIdCombobox } from './ModelIdCombobox';
@@ -12,6 +12,7 @@ type Props = ComponentProps<typeof ModelIdCombobox>;
 let renderer: ReactTestRenderer;
 let props: Props;
 const blur = vi.fn();
+const focus = vi.fn();
 const addEventListener = vi.fn();
 const removeEventListener = vi.fn();
 const body = {};
@@ -28,6 +29,63 @@ function Harness(input: Props) {
       }}
     />
   );
+}
+
+function ControlledHarness(input: Props) {
+  const [value, setValue] = useState(input.value);
+  const [open, setOpen] = useState(input.open ?? false);
+  const reportOpen = input.onOpenChange;
+  const onOpenChange = useCallback(
+    (next: boolean) => {
+      reportOpen?.(next);
+      setOpen(next);
+    },
+    [reportOpen]
+  );
+  return (
+    <>
+      <button aria-label="Open from card" onClick={() => setOpen(true)} />
+      <button aria-label="Toggle from card" onClick={() => setOpen((current) => !current)} />
+      <ModelIdCombobox
+        {...input}
+        value={value}
+        open={open}
+        onOpenChange={onOpenChange}
+        onChange={(next) => {
+          input.onChange(next);
+          setValue(next);
+        }}
+      />
+    </>
+  );
+}
+
+function mountControlled(extra: Partial<Props> = {}) {
+  props = {
+    value: 'one',
+    options: ['one', 'two'],
+    compact: true,
+    selectOnly: true,
+    ariaLabel: 'Route model',
+    onChange: vi.fn(),
+    onOpenChange: vi.fn(),
+    ...extra,
+  };
+  act(() => {
+    renderer = create(<ControlledHarness {...props} />, {
+      createNodeMock: () => ({
+        blur,
+        focus,
+        contains: () => false,
+        getBoundingClientRect: () => ({ left: 12, width: 160, top: 100, bottom: 130 }),
+      }),
+    });
+  });
+}
+
+async function updateControlled(extra: Partial<Props>) {
+  props = { ...props, ...extra };
+  await act(async () => renderer.update(<ControlledHarness {...props} />));
 }
 
 function mount(extra: Partial<Props> = {}) {
@@ -61,7 +119,10 @@ const key = (name: string) => {
 };
 
 beforeEach(() => {
+  addEventListener.mockReset();
+  removeEventListener.mockReset();
   vi.stubGlobal('window', {
+    innerWidth: 800,
     innerHeight: 800,
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
@@ -97,8 +158,10 @@ it('preserves API browse, search, keyboard selection and the positioned body por
   act(() => input().props.onFocus());
   expect(options().map((node) => node.children[0])).toEqual(['gpt-a', 'gpt-b', 'claude-a']);
   expect(portal.mock.calls[portal.mock.calls.length - 1]?.[1]).toBe(body);
-  expect(menus()[0].props.style).toMatchObject({ left: 12, width: 240, top: 131 });
+  expect(menus()[0].props.style).toMatchObject({ left: 12, width: 240, top: 131, maxHeight: 240 });
   expect(menus()[0].props.className).toContain('z-[9999]');
+  expect(menus()[0].props.className).not.toContain('model-id-combobox-menu');
+  expect(menus()[0].props.style.transformOrigin).toBeUndefined();
   act(() => input().props.onChange({ target: { value: 'gpt' } }));
   expect(options().map((node) => node.children[0])).toEqual(['gpt-a', 'gpt-b']);
   key('ArrowDown');
@@ -114,6 +177,243 @@ it('preserves API browse, search, keyboard selection and the positioned body por
   act(() => input().props.onClick());
   const outside = addEventListener.mock.calls.find(([name]) => name === 'mousedown')?.[1];
   act(() => outside({ target: {} }));
+  expect(menus()).toHaveLength(0);
+});
+
+it('opens controlled compact choices from the card, focuses the trigger, and closes once on selection', () => {
+  mountControlled();
+  expect(menus()).toHaveLength(0);
+  expect(focus).not.toHaveBeenCalled();
+  act(() => button('Open from card').props.onClick());
+  expect(options().map((node) => node.children[0])).toEqual(['one', 'two']);
+  expect(button('Route model').props['aria-expanded']).toBe(true);
+  expect(focus).toHaveBeenCalledOnce();
+  expect(props.onOpenChange).not.toHaveBeenCalled();
+  const openMenu = menus()[0];
+  expect(openMenu.props.className).toContain('model-id-combobox-menu');
+  expect(openMenu.props.className).not.toContain('is-drop-up');
+  expect(openMenu.props.style.transformOrigin).toBe('top');
+  expect(openMenu.props.style.maxHeight).toBe(360);
+  act(() => button('Open from card').props.onClick());
+  expect(menus()[0]).toBe(openMenu);
+  expect(focus).toHaveBeenCalledOnce();
+  act(() => options()[1].props.onMouseDown({ preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('two');
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  expect(blur).toHaveBeenCalledOnce();
+  expect(menus()).toHaveLength(0);
+  expect(button('Route model').props['aria-expanded']).toBe(false);
+  act(() => button('Open from card').props.onClick());
+  expect(focus).toHaveBeenCalledTimes(2);
+  expect(button('Route model').findByType('span').children).toEqual(['two']);
+});
+
+it('preserves external card and logo mousedown until click toggles the menu, while real outside clicks close it', () => {
+  const cardTarget = {} as Node;
+  const logoTarget = {} as Node;
+  const outsideTarget = {} as Node;
+  const listeners = new Set<(event: { target: Node }) => void>();
+  addEventListener.mockImplementation((name, listener) => {
+    if (name === 'mousedown') listeners.add(listener);
+  });
+  removeEventListener.mockImplementation((name, listener) => {
+    if (name === 'mousedown') listeners.delete(listener);
+  });
+  mountControlled({
+    externalTriggerRef: {
+      current: {
+        contains: (target: Node) => target === cardTarget || target === logoTarget,
+      } as HTMLElement,
+    },
+  });
+  const mouseDown = (target: Node) => {
+    act(() => listeners.forEach((listener) => listener({ target })));
+  };
+  const clickCard = () => act(() => button('Toggle from card').props.onClick());
+
+  mouseDown(cardTarget);
+  clickCard();
+  expect(menus()).toHaveLength(1);
+  const firstMenu = menus()[0];
+  mouseDown(logoTarget);
+  expect(menus()[0]).toBe(firstMenu);
+  expect(props.onOpenChange).not.toHaveBeenCalled();
+  clickCard();
+  expect(menus()).toHaveLength(0);
+  expect(listeners.size).toBe(0);
+
+  mouseDown(logoTarget);
+  clickCard();
+  expect(menus()).toHaveLength(1);
+  expect(menus()[0]).not.toBe(firstMenu);
+  mouseDown(cardTarget);
+  expect(menus()).toHaveLength(1);
+  clickCard();
+  expect(menus()).toHaveLength(0);
+
+  clickCard();
+  mouseDown(outsideTarget);
+  expect(menus()).toHaveLength(0);
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('clears a hovered option when card mousedown and click close then reopen, while fresh keyboard choices still work', async () => {
+  const cardTarget = {} as Node;
+  const listeners = new Set<(event: { target: Node }) => void>();
+  addEventListener.mockImplementation((name, listener) => {
+    if (name === 'mousedown') listeners.add(listener);
+  });
+  removeEventListener.mockImplementation((name, listener) => {
+    if (name === 'mousedown') listeners.delete(listener);
+  });
+  mountControlled({
+    externalTriggerRef: {
+      current: { contains: (target: Node) => target === cardTarget } as HTMLElement,
+    },
+  });
+  const clickCard = async () => {
+    act(() => listeners.forEach((listener) => listener({ target: cardTarget })));
+    await act(async () => button('Toggle from card').props.onClick());
+  };
+  const press = (key: string) => {
+    act(() => button('Route model').props.onKeyDown({ key, preventDefault: vi.fn() }));
+  };
+
+  await clickCard();
+  act(() => options()[1].props.onMouseEnter());
+  expect(options()[1].props.className.split(' ')).toContain('bg-cyber-text/10');
+  await clickCard();
+  expect(menus()).toHaveLength(0);
+  await clickCard();
+  expect(options()[1].props.className.split(' ')).not.toContain('bg-cyber-text/10');
+  press('Enter');
+  expect(props.onChange).not.toHaveBeenCalled();
+  press('ArrowDown');
+  press('Enter');
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('one');
+  expect(menus()).toHaveLength(0);
+
+  await act(async () => button('Route model').props.onClick());
+  press('ArrowDown');
+  press('ArrowDown');
+  press('Enter');
+  expect(vi.mocked(props.onChange).mock.calls.map(([id]) => id)).toEqual(['one', 'two']);
+  expect(menus()).toHaveLength(0);
+});
+
+it('reports one controlled transition for trigger toggles, Escape and outside clicks', () => {
+  mountControlled();
+  const trigger = () => button('Route model');
+  act(() => trigger().props.onClick());
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(true);
+  expect(menus()).toHaveLength(1);
+  act(() => trigger().props.onClick());
+  expect(vi.mocked(props.onOpenChange!).mock.calls.map(([open]) => open)).toEqual([true, false]);
+  expect(menus()).toHaveLength(0);
+  vi.mocked(props.onOpenChange!).mockClear();
+
+  act(() => button('Open from card').props.onClick());
+  act(() => trigger().props.onKeyDown({ key: 'Escape', preventDefault: vi.fn() }));
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  expect(menus()).toHaveLength(0);
+  vi.mocked(props.onOpenChange!).mockClear();
+
+  act(() => button('Open from card').props.onClick());
+  const outsideListeners = addEventListener.mock.calls.filter(([name]) => name === 'mousedown');
+  const outside = outsideListeners[outsideListeners.length - 1]?.[1];
+  act(() => outside({ target: {} }));
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  expect(menus()).toHaveLength(0);
+  expect(removeEventListener).toHaveBeenCalledWith('mousedown', outside);
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('resets controlled open state while disabled and stays closed after enabling', async () => {
+  mountControlled({ disabled: true });
+  await act(async () => button('Open from card').props.onClick());
+  expect(menus()).toHaveLength(0);
+  expect(focus).not.toHaveBeenCalled();
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  act(() => button('Route model').props.onClick());
+  expect(props.onOpenChange).toHaveBeenCalledOnce();
+  await updateControlled({ disabled: false });
+  expect(menus()).toHaveLength(0);
+  expect(focus).not.toHaveBeenCalled();
+  act(() => button('Open from card').props.onClick());
+  expect(menus()).toHaveLength(1);
+  expect(focus).toHaveBeenCalledOnce();
+  await updateControlled({ disabled: true });
+  expect(menus()).toHaveLength(0);
+  expect(props.onOpenChange).toHaveBeenCalledTimes(2);
+  await updateControlled({ disabled: false });
+  expect(menus()).toHaveLength(0);
+});
+
+it('rejects controlled opens without options and does not open when options later load', async () => {
+  mountControlled({ options: [] });
+  await act(async () => button('Open from card').props.onClick());
+  expect(menus()).toHaveLength(0);
+  expect(focus).not.toHaveBeenCalled();
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+  expect(button('Route model').props.disabled).toBe(true);
+  await updateControlled({ options: ['one', 'two'] });
+  expect(menus()).toHaveLength(0);
+  expect(focus).not.toHaveBeenCalled();
+  act(() => button('Open from card').props.onClick());
+  expect(menus()).toHaveLength(1);
+  expect(focus).toHaveBeenCalledOnce();
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('keeps all cached compact choices through display-label updates and viewport resize, then selects the current ID', async () => {
+  const ids = Array.from({ length: 40 }, (_, index) => `model-${index}`);
+  mountControlled({ value: ids[0], options: ids, optionLabels: { [ids[39]]: 'Short name' } });
+  act(() => button('Open from card').props.onClick());
+  const menu = menus()[0];
+  expect(options()).toHaveLength(40);
+  expect(menu.props.style.maxHeight).toBe(360);
+  expect(menu.props.className).toContain('overflow-y-auto');
+  expect(options()[39].children).toEqual(['Short name']);
+
+  const longLabel = 'provider/a-long-display-label-with-a-version-and-release-identifier';
+  await updateControlled({ optionLabels: { [ids[39]]: longLabel } });
+  expect(menus()[0]).toBe(menu);
+  expect(options()[39].children).toEqual([longLabel]);
+  expect(menus()[0].props.style.width).toBe('max-content');
+  expect(props.onChange).not.toHaveBeenCalled();
+
+  const newId = 'opaque-updated-id';
+  await updateControlled({
+    options: [...ids.slice(0, 39), newId],
+    optionLabels: { [newId]: longLabel },
+  });
+  expect(options()).toHaveLength(40);
+  expect(menus()[0]).toBe(menu);
+  expect(options()[39].children).toEqual([longLabel]);
+  const resize = vi
+    .mocked(window.addEventListener)
+    .mock.calls.find(([name]) => name === 'resize')?.[1] as (() => void) | undefined;
+  expect(resize).toBeTypeOf('function');
+  Object.assign(window, { innerWidth: 200, innerHeight: 220 });
+  act(() => resize?.());
+  expect(menus()[0]).toBe(menu);
+  expect(menu.props.style.top).toBeUndefined();
+  expect(menu.props.style.bottom).toBe(121);
+  expect(menu.props.style.maxHeight).toBe(91);
+  expect(menu.props.style.bottom + menu.props.style.maxHeight).toBe(212);
+  expect(menu.props.style.maxWidth).toBe('calc(100vw - 16px)');
+  expect(options()).toHaveLength(40);
+
+  Object.assign(window, { innerWidth: 800, innerHeight: 800 });
+  act(() => resize?.());
+  expect(menu.props.style.top).toBe(131);
+  expect(menu.props.style.maxHeight).toBe(360);
+  expect(menu.props.style.bottom).toBeUndefined();
+  expect(props.onChange).not.toHaveBeenCalled();
+  act(() => options()[39].props.onMouseDown({ preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith(newId);
+  expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   expect(menus()).toHaveLength(0);
 });
 
@@ -217,12 +517,12 @@ it('refreshes independently of menu state and selection, with a separate busy lo
   expect(options()).toHaveLength(2);
 });
 
-it('closes an open disabled field and prevents all selection or refresh callbacks', () => {
+it('closes an open disabled field and prevents all selection or refresh callbacks', async () => {
   const refresh = vi.fn();
   mount({ options: ['one'], onRefresh: refresh, refreshLabel: 'Read models' });
   act(() => input().props.onFocus());
   expect(menus()).toHaveLength(1);
-  update({ disabled: true });
+  await act(async () => update({ disabled: true }));
   expect(input().props.disabled).toBe(true);
   expect(menus()).toHaveLength(0);
   act(() => {
@@ -251,4 +551,94 @@ it('does not commit an out-of-range option after the directory changes', () => {
   key('ArrowUp');
   key('Enter');
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith('one');
+});
+
+it('keeps compact route choices usable for short and long IDs, within the viewport, and through keyboard and disabled states', async () => {
+  const shortId = 'model-a';
+  const longId = 'provider/model-with-a-long-version-and-release-identifier';
+  props = {
+    value: shortId,
+    options: [shortId, longId],
+    onChange: vi.fn(),
+    compact: true,
+    selectOnly: true,
+    ariaLabel: 'Route model',
+  };
+  vi.stubGlobal('window', {
+    innerWidth: 800,
+    innerHeight: 800,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  });
+  const triggerBounds = { left: 740, width: 52, top: 740, bottom: 764 };
+  act(() => {
+    renderer = create(<Harness {...props} />, {
+      createNodeMock: () => ({
+        blur,
+        contains: () => false,
+        getBoundingClientRect: () => triggerBounds,
+      }),
+    });
+  });
+  const trigger = () => button('Route model');
+  const press = (name: string) => {
+    const preventDefault = vi.fn();
+    act(() => trigger().props.onKeyDown({ key: name, preventDefault }));
+    return preventDefault;
+  };
+  expect(JSON.stringify(renderer.toJSON())).toContain(shortId);
+  act(() => trigger().props.onClick());
+  expect(options().map((node) => node.children[0])).toEqual([shortId, longId]);
+  expect(portal.mock.calls[portal.mock.calls.length - 1]?.[1]).toBe(body);
+  const menuPosition = menus()[0].props.style;
+  expect(menuPosition.left).toBeGreaterThanOrEqual(8);
+  expect(menuPosition.width).toBe('max-content');
+  expect(menuPosition.minWidth).toBe('min(52px, calc(100vw - 16px))');
+  expect(menuPosition.maxWidth).toBe('calc(100vw - 16px)');
+  expect(menuPosition['--model-menu-left']).toBe('740px');
+  expect(menuPosition.top).toBeUndefined();
+  expect(menuPosition.transformOrigin).toBe('bottom');
+  expect(menus()[0].props.className).toContain('is-drop-up');
+  expect(menuPosition.bottom).toBeGreaterThan(0);
+  expect(menuPosition.bottom + menuPosition.maxHeight).toBeLessThanOrEqual(800);
+  const resize = vi
+    .mocked(window.addEventListener)
+    .mock.calls.find(([name]) => name === 'resize')?.[1] as (() => void) | undefined;
+  Object.assign(window, { innerWidth: 120, innerHeight: 120 });
+  Object.assign(triggerBounds, { left: 4, top: 40, bottom: 64 });
+  act(() => resize?.());
+  expect(menus()[0].props.style.left).toBe(8);
+  expect(menus()[0].props.style.maxHeight).toBe(47);
+  expect(menus()[0].props.style.top + menus()[0].props.style.maxHeight).toBe(112);
+  expect(options()).toHaveLength(2);
+  Object.assign(window, { innerWidth: 800, innerHeight: 800 });
+  Object.assign(triggerBounds, { left: 740, top: 740, bottom: 764 });
+  act(() => resize?.());
+  const preventDefault = vi.fn();
+  act(() => options()[1].props.onMouseDown({ preventDefault }));
+  expect(preventDefault).toHaveBeenCalledOnce();
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith(longId);
+  expect(JSON.stringify(renderer.toJSON())).toContain(longId);
+  expect(menus()).toHaveLength(0);
+  press('ArrowDown');
+  expect(options().map((node) => node.children[0])).toEqual([shortId, longId]);
+  press('ArrowDown');
+  expect(press('Enter')).toHaveBeenCalledOnce();
+  expect(vi.mocked(props.onChange).mock.calls.map(([id]) => id)).toEqual([longId, shortId]);
+  expect(menus()).toHaveLength(0);
+  act(() => trigger().props.onClick());
+  press('Escape');
+  expect(menus()).toHaveLength(0);
+  act(() => trigger().props.onClick());
+  expect(menus()).toHaveLength(1);
+  await act(async () => update({ disabled: true }));
+  expect(trigger().props.disabled).toBe(true);
+  expect(menus()).toHaveLength(0);
+  act(() => trigger().props.onClick());
+  press('ArrowDown');
+  press('Enter');
+  expect(menus()).toHaveLength(0);
+  expect(props.onChange).toHaveBeenCalledTimes(2);
+  update({ disabled: false });
+  expect(menus()).toHaveLength(0);
 });

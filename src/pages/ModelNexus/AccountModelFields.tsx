@@ -11,8 +11,7 @@ import type { AccountProvider, AccountSource } from '../../api/types';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { useI18n } from '../../hooks/useI18n';
 import { useToast } from '../../components/Toast';
-import { accountPlanLabel } from '../AppManager/accountPlanLabel';
-import { codexPlanLabel } from '../AppManager/codexPlanLabel';
+import { accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
 import type { NewModelForm } from './context';
 
 export function AccountModelFields({
@@ -53,6 +52,29 @@ export function AccountModelFields({
       ignore = true;
     };
   }, [provider, active]);
+
+  useEffect(() => {
+    if (!active || loadedProvider !== provider) return;
+    const account =
+      accounts.find(
+        (row) => row.source.provider === provider && row.source.accountId === accountId
+      ) ?? (!accountId ? accounts.find((row) => row.source.provider === provider) : undefined);
+    if (!account) return;
+    setForm((form) => {
+      if (form.accountSource?.provider !== provider || form.accountSource.accountId !== accountId)
+        return form;
+      if (!accountId) {
+        return {
+          ...form,
+          name: account.label,
+          accountSource: account.source,
+          modelId: '',
+          modelIdOptions: [],
+        };
+      }
+      return form.name !== account.label ? { ...form, name: account.label } : form;
+    });
+  }, [accounts, loadedProvider, provider, accountId, active, setForm]);
 
   const applyModels = useCallback(
     (models: string[]) => {
@@ -114,6 +136,13 @@ export function AccountModelFields({
     setFetching(false);
     setForm((form) => ({
       ...form,
+      name:
+        accounts.find(
+          (account) =>
+            account.source.provider === next.provider && account.source.accountId === next.accountId
+        )?.label ??
+        accountProxyProviders.find((entry) => entry.id === next.provider)?.name ??
+        '',
       accountSource: next,
       modelId: '',
       modelIdOptions: [],
@@ -153,12 +182,7 @@ export function AccountModelFields({
           options={savedAccounts.map((account) => account.source.accountId)}
           optionLabels={Object.fromEntries(
             savedAccounts.map((account) => {
-              const plan =
-                account.source.provider === 'codex'
-                  ? codexPlanLabel(account.plan)
-                  : account.plan
-                    ? accountPlanLabel(account.plan)
-                    : '';
+              const plan = accountProxyPlanLabel(account);
               return [account.source.accountId, `${account.label}${plan ? ` · ${plan}` : ''}`];
             })
           )}

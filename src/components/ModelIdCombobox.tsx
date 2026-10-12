@@ -1,6 +1,7 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, RefreshCw } from 'lucide-react';
+import './ModelIdCombobox.css';
 
 interface ModelIdComboboxProps {
   value: string;
@@ -9,8 +10,12 @@ interface ModelIdComboboxProps {
   options?: string[];
   placeholder?: string;
   selectOnly?: boolean;
+  compact?: boolean;
   optionLabels?: Record<string, string>;
   disabled?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  externalTriggerRef?: RefObject<HTMLElement | null>;
   ariaLabel?: string;
   onRefresh?: () => void;
   refreshLabel?: string;
@@ -35,6 +40,7 @@ type MenuPos = {
 };
 
 const MENU_MAX = 240;
+const COMPACT_MENU_MAX = 360;
 
 /**
  * Single-box searchable model-id picker. One input the user can freely type
@@ -50,8 +56,12 @@ export function ModelIdCombobox({
   options = [],
   placeholder,
   selectOnly = false,
+  compact = false,
   optionLabels,
   disabled = false,
+  open,
+  onOpenChange,
+  externalTriggerRef,
   ariaLabel,
   onRefresh,
   refreshLabel,
@@ -59,7 +69,16 @@ export function ModelIdCombobox({
   onPaste,
   pasteLabel,
 }: ModelIdComboboxProps) {
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isControlled = open !== undefined;
+  const isOpen = open ?? internalOpen;
+  const setIsOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (!isControlled) setInternalOpen(nextOpen);
+      onOpenChange?.(nextOpen);
+    },
+    [isControlled, onOpenChange]
+  );
   const [activeIdx, setActiveIdx] = useState(-1);
   // Browse vs. search: focus / chevron / arrow = browse (show ALL options so
   // the full list is visible even when the field already holds a valid id);
@@ -67,7 +86,7 @@ export function ModelIdCombobox({
   const [searching, setSearching] = useState(false);
   const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Dedupe defensively so duplicate ids in the directory data can't collide on
@@ -92,10 +111,30 @@ export function ModelIdCombobox({
         ? 'pr-16'
         : '';
 
-  if (disabled && isOpen) {
-    setIsOpen(false);
-    setActiveIdx(-1);
-  }
+  useEffect(() => {
+    if (!isOpen || (!disabled && (!isControlled || hasOptions))) return;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      setIsOpen(false);
+      setActiveIdx(-1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [disabled, hasOptions, isControlled, isOpen, setIsOpen]);
+
+  useEffect(() => {
+    if (!compact || !isControlled || !showList) return;
+    inputRef.current?.focus();
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setActiveIdx(-1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [compact, isControlled, showList]);
 
   // Position the portal menu against the input, flipping up when the space
   // below is tight. Recomputed on open and on any scroll/resize while open.
@@ -108,9 +147,12 @@ export function ModelIdCombobox({
       const spaceBelow = window.innerHeight - r.bottom;
       const spaceAbove = r.top;
       const dropUp = spaceBelow < Math.min(MENU_MAX, 160) && spaceAbove > spaceBelow;
-      const maxHeight = Math.max(80, Math.min(MENU_MAX, (dropUp ? spaceAbove : spaceBelow) - 8));
+      const availableHeight = Math.max(0, (dropUp ? spaceAbove : spaceBelow) - (compact ? 9 : 8));
+      const maxHeight = compact
+        ? Math.min(COMPACT_MENU_MAX, availableHeight)
+        : Math.max(80, Math.min(MENU_MAX, availableHeight));
       setMenuPos({
-        left: r.left,
+        left: compact ? Math.max(8, r.left) : r.left,
         width: r.width,
         below: r.bottom + 1,
         above: window.innerHeight - r.top + 1,
@@ -125,20 +167,22 @@ export function ModelIdCombobox({
       window.removeEventListener('scroll', compute, true);
       window.removeEventListener('resize', compute);
     };
-  }, [showList, filtered.length]);
+  }, [showList, filtered.length, compact]);
 
   // Close when clicking outside (input container OR the portal menu).
   useEffect(() => {
+    if (!isOpen) return;
     const handleClickOutside = (event: MouseEvent) => {
       const t = event.target as Node;
       if (containerRef.current?.contains(t)) return;
       if (menuRef.current?.contains(t)) return;
+      if (externalTriggerRef?.current?.contains(t)) return;
       setIsOpen(false);
       setActiveIdx(-1);
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  }, [externalTriggerRef, isOpen, setIsOpen]);
 
   const pick = (id: string) => {
     if (disabled) return;
@@ -157,6 +201,7 @@ export function ModelIdCombobox({
     if (disabled) return;
     if (!showList) {
       if (e.key === 'ArrowDown' && hasOptions) {
+        if (compact) e.preventDefault();
         setSearching(false);
         setIsOpen(true);
       }
@@ -180,41 +225,69 @@ export function ModelIdCombobox({
   };
 
   return (
-    <div ref={containerRef} className="relative">
-      <input
-        ref={inputRef}
-        type="text"
-        placeholder={placeholder}
-        value={label(value)}
-        readOnly={selectOnly}
-        style={selectOnly ? { cursor: 'default' } : undefined}
-        disabled={disabled}
-        aria-label={ariaLabel}
-        onChange={(e) => {
-          if (selectOnly || disabled) return;
-          onChange(e.target.value);
-          setIsOpen(true);
-          setSearching(true);
-          setActiveIdx(-1);
-        }}
-        onFocus={() => {
-          if (!disabled && hasOptions) {
-            setIsOpen(true);
+    <div ref={containerRef} className={compact ? 'relative flex min-w-0' : 'relative'}>
+      {compact ? (
+        <button
+          ref={(node) => {
+            inputRef.current = node;
+          }}
+          type="button"
+          disabled={disabled || !hasOptions}
+          aria-label={ariaLabel}
+          aria-expanded={showList}
+          onClick={() => {
+            if (disabled || !hasOptions) return;
             setSearching(false);
             setActiveIdx(-1);
-          }
-        }}
-        // Clicking the input always (re)opens the list — even when it already
-        // has focus (where onFocus won't fire again), so a closed list is
-        // never stuck shut.
-        onClick={() => {
-          if (!disabled && hasOptions) setIsOpen(true);
-        }}
-        onKeyDown={handleKeyDown}
-        // Reserve space for the field's actions; paste is shown only for free text.
-        className={`w-full bg-cyber-input border border-cyber-border ${padding} px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button`}
-      />
-      {hasChevron && (
+            setIsOpen(!isOpen);
+          }}
+          onKeyDown={handleKeyDown}
+          className="inline-flex min-w-0 max-w-full items-center gap-1 text-left text-xs text-cyber-text-secondary hover:text-cyber-text disabled:opacity-50 focus-visible:outline focus-visible:outline-1 focus-visible:outline-cyber-accent"
+        >
+          <span className="min-w-0 truncate">{label(value) || placeholder}</span>
+          <ChevronDown
+            size={12}
+            className={`shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`}
+          />
+        </button>
+      ) : (
+        <input
+          ref={(node) => {
+            inputRef.current = node;
+          }}
+          type="text"
+          placeholder={placeholder}
+          value={label(value)}
+          readOnly={selectOnly}
+          style={selectOnly ? { cursor: 'default' } : undefined}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          onChange={(e) => {
+            if (selectOnly || disabled) return;
+            onChange(e.target.value);
+            setIsOpen(true);
+            setSearching(true);
+            setActiveIdx(-1);
+          }}
+          onFocus={() => {
+            if (!disabled && hasOptions) {
+              setIsOpen(true);
+              setSearching(false);
+              setActiveIdx(-1);
+            }
+          }}
+          // Clicking the input always (re)opens the list — even when it already
+          // has focus (where onFocus won't fire again), so a closed list is
+          // never stuck shut.
+          onClick={() => {
+            if (!disabled && hasOptions) setIsOpen(true);
+          }}
+          onKeyDown={handleKeyDown}
+          // Reserve space for the field's actions; paste is shown only for free text.
+          className={`w-full bg-cyber-input border border-cyber-border ${padding} px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button`}
+        />
+      )}
+      {hasChevron && !compact && (
         <button
           type="button"
           tabIndex={-1}
@@ -223,10 +296,10 @@ export function ModelIdCombobox({
             if (disabled || !hasOptions) return;
             setSearching(false);
             setActiveIdx(-1);
-            setIsOpen((o) => !o);
+            setIsOpen(!isOpen);
           }}
           aria-label="Toggle model id suggestions"
-          className="absolute right-1.5 top-1/2 -translate-y-1/2 text-cyber-text-muted hover:text-cyber-text"
+          className={`absolute ${compact ? 'right-0' : 'right-1.5'} top-1/2 -translate-y-1/2 text-cyber-text-muted hover:text-cyber-text`}
         >
           <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} />
         </button>
@@ -264,15 +337,21 @@ export function ModelIdCombobox({
         createPortal(
           <div
             ref={menuRef}
-            style={{
-              position: 'fixed',
-              left: menuPos.left,
-              width: menuPos.width,
-              top: menuPos.dropUp ? undefined : menuPos.below,
-              bottom: menuPos.dropUp ? menuPos.above : undefined,
-              maxHeight: menuPos.maxHeight,
-            }}
-            className="overflow-y-auto z-[9999] bg-cyber-surface border border-cyber-border/60 rounded-button shadow-lg cursor-default"
+            style={
+              {
+                position: 'fixed',
+                left: menuPos.left,
+                width: compact ? 'max-content' : menuPos.width,
+                minWidth: compact ? `min(${menuPos.width}px, calc(100vw - 16px))` : undefined,
+                maxWidth: compact ? 'calc(100vw - 16px)' : undefined,
+                top: menuPos.dropUp ? undefined : menuPos.below,
+                bottom: menuPos.dropUp ? menuPos.above : undefined,
+                maxHeight: menuPos.maxHeight,
+                transformOrigin: compact ? (menuPos.dropUp ? 'bottom' : 'top') : undefined,
+                '--model-menu-left': compact ? `${menuPos.left}px` : undefined,
+              } as React.CSSProperties
+            }
+            className={`overflow-y-auto z-[9999] bg-cyber-surface border border-cyber-border/60 rounded-button shadow-lg cursor-default ${compact ? `model-id-combobox-menu${menuPos.dropUp ? ' is-drop-up' : ''}` : ''}`}
           >
             {filtered.map((opt, idx) => (
               <div
