@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
-import type { ModelConfig, AgentEvent, ParasiteEvent } from '../../api/types';
+import type { ModelConfig, AgentEvent, ParasiteEvent, ReasoningEffort } from '../../api/types';
 import { useChatPersistence } from '../../hooks/useChatPersistence';
 import type { DiskMsg } from '../../hooks/useChatPersistence';
 import { errorToKey } from '../../utils/normalizeError';
@@ -12,6 +12,7 @@ import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
+import { getReasoningLevels, loadReasoningPreferences, REASONING_STORAGE_KEY } from './reasoning';
 
 export function selectAgentProtocol(baseUrl: string, anthropicUrl?: string) {
   const useAnthropic = !baseUrl && !!anthropicUrl;
@@ -77,6 +78,31 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const [isProcessing, setIsProcessing] = useState(false);
+  const [reasoningPreferences, setReasoningPreferences] = useState(loadReasoningPreferences);
+  const reasoningModel = models.find((m) => m.internalId === agentModel);
+  const reasoningLevels = parasiteAgent ? [] : getReasoningLevels(reasoningModel);
+  // Include the actual model and endpoint, so editing a saved entry cannot reuse
+  // a previous provider's preference for a different model under the same ID.
+  const reasoningKey = reasoningModel
+    ? JSON.stringify([
+        reasoningModel.internalId,
+        reasoningModel.modelId || reasoningModel.name,
+        reasoningModel.baseUrl,
+        reasoningModel.anthropicUrl || '',
+      ])
+    : '';
+  const savedEffort = reasoningPreferences[reasoningKey];
+  const reasoningEffort = reasoningLevels.includes(savedEffort) ? savedEffort : undefined;
+  const setReasoningEffort = (effort: ReasoningEffort | undefined) => {
+    if (runningRef.current || resettingRef.current || isProcessing || !reasoningLevels.length)
+      return;
+    if (effort && !reasoningLevels.includes(effort)) return;
+    const next = { ...reasoningPreferences };
+    if (effort) next[reasoningKey] = effort;
+    else delete next[reasoningKey];
+    localStorage.setItem(REASONING_STORAGE_KEY, JSON.stringify(next));
+    setReasoningPreferences(next);
+  };
   const [agentState, setAgentState] = useState('idle');
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatCursorPos, setChatCursorPos] = useState(0);
@@ -552,6 +578,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
           server_ids: selectedServerId === 'local' ? [] : [selectedServerId],
           skills: [],
           locale: locale || undefined,
+          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
         });
       } catch (e) {
         if (runningRef.current !== run) return;
@@ -577,6 +604,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
       parasiteAgent,
       setChatOutput,
       finishRun,
+      reasoningEffort,
     ]
   );
 
@@ -688,6 +716,9 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         deleteConversation,
         isProcessing: isProcessing || isResetting,
         agentModelData,
+        reasoningLevels,
+        reasoningEffort,
+        setReasoningEffort,
         agentState,
         chatInputFocused,
         setChatInputFocused,

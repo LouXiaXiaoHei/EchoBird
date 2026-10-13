@@ -71,6 +71,8 @@ pub struct AgentRequest {
     pub skills: Vec<String>,     // skill descriptions
     /// UI locale ("en" or "zh-Hans"). Used to hint the agent's response language.
     pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 impl AgentRequest {
@@ -277,6 +279,7 @@ pub async fn run_agent(
             base_url: anth_url.clone(),
             api_key: decrypted_key.clone(),
             model: request.model_name.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
         };
         (LlmProvider::Anthropic, LlmClient::new(cfg)?)
     } else {
@@ -285,6 +288,7 @@ pub async fn run_agent(
             base_url: request.base_url.clone(),
             api_key: decrypted_key.clone(),
             model: request.model_name.clone(),
+            reasoning_effort: request.reasoning_effort.clone(),
         };
         (LlmProvider::OpenAI, LlmClient::new(cfg)?)
     };
@@ -1877,6 +1881,7 @@ mod conversation_tests {
         let mut request = legacy_request();
         assert!(request.conversation_id.is_none());
         assert!(request.request_id.is_none());
+        assert!(request.reasoning_effort.is_none());
         assert_eq!(request.session_key(), "server-a");
         request.server_ids.clear();
         assert_eq!(request.session_key(), "local");

@@ -10,6 +10,7 @@ import type { MotherAgentCtx } from './types';
 
 let state: Partial<MotherAgentCtx>;
 let locale = 'en';
+let activePage = 'mother';
 let renderer: ReactTestRenderer | undefined;
 
 vi.mock('./context', () => ({ useMotherAgent: () => state }));
@@ -19,7 +20,7 @@ vi.mock('../../hooks/useI18n', () => ({
 vi.mock('../../hooks/useDocumentVisible', () => ({ useDocumentVisible: () => true }));
 vi.mock('../../stores/navigationStore', () => ({
   useNavigationStore: (selector: (value: { activePage: string }) => unknown) =>
-    selector({ activePage: 'mother' }),
+    selector({ activePage }),
 }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
 vi.mock('../../components/RemoteModelSelector', () => ({ RemoteModelSelector: () => null }));
@@ -46,6 +47,8 @@ beforeEach(() => {
     }
   );
   locale = 'en';
+  activePage = 'mother';
+  vi.stubGlobal('document', new EventTarget());
   state = {
     conversations: [
       {
@@ -89,7 +92,46 @@ beforeEach(() => {
     parasiteAvailable: [],
     maDiskTotal: 0,
     loadOlderChat: vi.fn(async () => []),
+    reasoningLevels: [],
+    setReasoningEffort: vi.fn(),
   };
+});
+
+it('closes the actual composer effort popup on pending requests, model changes, and page exit', () => {
+  state = {
+    ...state,
+    parasiteAgent: null,
+    reasoningLevels: ['low', 'high', 'max'],
+    reasoningEffort: 'high',
+  };
+  act(() => {
+    renderer = create(<MotherAgentMain />);
+  });
+  const open = () =>
+    act(() =>
+      renderer!.root.findByProps({ 'aria-label': 'Reasoning effort: High' }).props.onClick()
+    );
+  const slider = () => renderer!.root.findAllByProps({ type: 'range' });
+  open();
+  expect(slider()).toHaveLength(1);
+  state = { ...state, isProcessing: true };
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  state = { ...state, isProcessing: false };
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  open();
+  state = { ...state, agentModel: 'another-model' };
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  open();
+  activePage = 'apps';
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  activePage = 'mother';
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  expect(state.setReasoningEffort).not.toHaveBeenCalled();
 });
 
 afterEach(() => {

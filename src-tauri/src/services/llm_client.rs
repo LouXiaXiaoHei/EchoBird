@@ -40,6 +40,8 @@ pub struct LlmConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -211,6 +213,7 @@ impl LlmClient {
         if !tools_json.is_empty() {
             body["tools"] = json!(tools_json);
         }
+        super::reasoning_effort::apply(&mut body, &self.config)?;
 
         // Pre-validate the Authorization header so we don't burn retry
         // attempts on a request that can never succeed.
@@ -472,6 +475,7 @@ impl LlmClient {
         if !tools_json.is_empty() {
             body["tools"] = json!(tools_json);
         }
+        super::reasoning_effort::apply(&mut body, &self.config)?;
 
         // Pre-validate the api-key header so we don't burn retry
         // attempts on a request that can never succeed.
@@ -1085,6 +1089,121 @@ fn message_to_anthropic_json(m: &Message) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reasoning_reaches_http_on_each_tool_loop_call_and_default_stays_unchanged() {
+        use axum::{extract::State, routing::post, Json, Router};
+        use tokio::sync::mpsc;
+
+        async fn capture(
+            State(tx): State<mpsc::UnboundedSender<Value>>,
+            Json(body): Json<Value>,
+        ) -> impl axum::response::IntoResponse {
+            let anthropic = body.get("system").is_some();
+            tx.send(body).unwrap();
+            let data = if anthropic {
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"fixture answer\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+            } else {
+                "data: {\"choices\":[{\"delta\":{\"content\":\"fixture answer\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"
+            };
+            ([("content-type", "text/event-stream")], data)
+        }
+
+        let (tx, mut captured) = mpsc::unbounded_channel();
+        let router = Router::new()
+            .route("/v1/chat/completions", post(capture))
+            .route("/v1/messages", post(capture))
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let tools = vec![ToolDef {
+            name: "fixture_tool".into(),
+            description: "fixture".into(),
+            parameters: json!({"type":"object", "properties":{}}),
+        }];
+        let mut messages = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Text("fixture prompt".into()),
+        }];
+
+        for (provider, model, effort) in [
+            (LlmProvider::OpenAI, "deepseek-flash", Some("high")),
+            (LlmProvider::OpenAI, "gpt-5.2", Some("xhigh")),
+            (LlmProvider::Anthropic, "claude-opus-4-6", Some("max")),
+            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("low")),
+            (LlmProvider::OpenAI, "unknown", None),
+            (LlmProvider::Anthropic, "unknown", None),
+        ] {
+            let client = LlmClient::new(LlmConfig {
+                provider,
+                model: model.into(),
+                base_url: base_url.clone(),
+                api_key: "fixture-key".into(),
+                reasoning_effort: effort.map(str::to_owned),
+            })
+            .unwrap();
+            for _ in 0..2 {
+                let mut stream = client
+                    .chat_stream(&messages, &tools, "fixture system")
+                    .await
+                    .unwrap();
+                let mut text = String::new();
+                while let Some(event) = stream.recv().await {
+                    if let LlmEvent::TextDelta(delta) = event {
+                        text.push_str(&delta);
+                    }
+                }
+                assert_eq!(text, "fixture answer");
+                let body = captured.recv().await.unwrap();
+                assert_eq!(body["model"], model);
+                assert!(!body["tools"].as_array().unwrap().is_empty());
+                match (provider, effort) {
+                    (LlmProvider::OpenAI, Some(effort)) => {
+                        assert_eq!(body["reasoning_effort"], effort);
+                        assert!(body.get("output_config").is_none());
+                    }
+                    (LlmProvider::Anthropic, Some(effort)) => {
+                        assert_eq!(body["output_config"]["effort"], effort);
+                        assert_eq!(body["max_tokens"], 32768);
+                        assert!(body.get("reasoning_effort").is_none());
+                    }
+                    (_, None) => {
+                        assert!(body.get("reasoning_effort").is_none());
+                        assert!(body.get("output_config").is_none());
+                        assert!(body.get("thinking").is_none());
+                        if provider == LlmProvider::Anthropic {
+                            assert_eq!(body["max_tokens"], 4096);
+                        }
+                    }
+                }
+                if model.starts_with("deepseek") && effort.is_some() {
+                    assert_eq!(body["thinking"]["type"], "enabled");
+                }
+                if model.starts_with("claude") {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                }
+                messages = vec![
+                    Message {
+                        role: "assistant".into(),
+                        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                            id: "fixture-call".into(),
+                            name: "fixture_tool".into(),
+                            input: json!({}),
+                        }]),
+                    },
+                    Message {
+                        role: "user".into(),
+                        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                            tool_use_id: "fixture-call".into(),
+                            content: "fixture result".into(),
+                        }]),
+                    },
+                ];
+            }
+        }
+        server.abort();
+    }
 
     // ---- is_retryable_status ----
 

@@ -370,6 +370,13 @@ const zhHans: Partial<Translations> = {
   'hint.myProjects':
     '给你 Vibe Coding 的应用或游戏切换模型，参考黑白棋和 AI 翻译的 models.json 或复制它到你的项目。',
   'mother.selectModel': '选择模型',
+  'mother.reasoning.title': '推理强度',
+  'mother.reasoning.default': '默认',
+  'mother.reasoning.low': '低',
+  'mother.reasoning.medium': '中',
+  'mother.reasoning.high': '高',
+  'mother.reasoning.xhigh': '超高',
+  'mother.reasoning.max': '极致',
   'mother.hintInstall': '安装 {agent}',
   'mother.enterMessage': '输入消息...',
   'mother.servers': '服务器',

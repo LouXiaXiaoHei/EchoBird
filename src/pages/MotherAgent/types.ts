@@ -1,4 +1,4 @@
-import type { ModelConfig } from '../../api/types';
+import type { ModelConfig, ReasoningEffort } from '../../api/types';
 import type { BubbleChip } from '../../components/chat/ChatBubble';
 import type { ChatConversation } from '../../hooks/useChatPersistence';
 
@@ -45,6 +45,9 @@ export interface MotherAgentCtx {
   agentState: string;
   isProcessing: boolean;
   agentModelData: ModelConfig | undefined;
+  reasoningLevels: ReasoningEffort[];
+  reasoningEffort: ReasoningEffort | undefined;
+  setReasoningEffort: (effort: ReasoningEffort | undefined) => void;
   chatInputFocused: boolean;
   setChatInputFocused: (v: boolean) => void;
   chatCursorPos: number;

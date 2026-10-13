@@ -97,6 +97,41 @@
   outline-offset: 3px;
 }
 
+.mother-reasoning-slider {
+  appearance: none;
+  height: 40px;
+  background: transparent;
+  touch-action: none;
+}
+
+.mother-reasoning-slider::-webkit-slider-runnable-track {
+  height: 24px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    rgb(var(--accent-rgb)) var(--reasoning-progress),
+    rgb(var(--bg-elevated-rgb)) var(--reasoning-progress)
+  );
+}
+
+.mother-reasoning-slider::-webkit-slider-thumb {
+  appearance: none;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  margin-top: -4px;
+  border: 1px solid rgb(var(--border-rgb));
+  border-radius: 50%;
+  background: rgb(var(--text-primary-rgb));
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+}
+
+.mother-reasoning-slider:focus-visible {
+  outline: 2px solid rgb(var(--accent-rgb));
+  outline-offset: 2px;
+  border-radius: 999px;
+}
+
 .usage-card-action-button:hover {
   color: rgb(var(--text-primary-rgb));
 }

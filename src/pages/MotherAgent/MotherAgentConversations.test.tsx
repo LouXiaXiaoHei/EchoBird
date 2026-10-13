@@ -7,6 +7,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { MotherAgentProvider } from './MotherAgentProvider';
 import { useMotherAgent } from './context';
 import type { MotherAgentCtx } from './types';
+import { REASONING_STORAGE_KEY } from './reasoning';
 
 vi.mock('../../api/tauri', () => ({
   getModels: vi.fn(),
@@ -142,6 +143,146 @@ afterEach(() => {
   renderer = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe('Mother Agent reasoning workflow', () => {
+  const deepseek = { ...model, internalId: 'deepseek', modelId: 'deepseek-flash' };
+  const gpt = { ...model, internalId: 'gpt', modelId: 'gpt-5.2' };
+  const preferenceKey = (entry: ModelConfig) =>
+    JSON.stringify([
+      entry.internalId,
+      entry.modelId || entry.name,
+      entry.baseUrl,
+      entry.anthropicUrl || '',
+    ]);
+  beforeEach(() => {
+    stored.set('echobird_agent_model', deepseek.internalId);
+    vi.mocked(api.getModels).mockResolvedValue([deepseek, gpt, model]);
+  });
+
+  it('starts with default and sends no extra parameter without an explicit choice', async () => {
+    await mount();
+    expect(state.reasoningEffort).toBeUndefined();
+    expect(state.reasoningLevels).toEqual(['low', 'high', 'max']);
+    expect(stored.has(REASONING_STORAGE_KEY)).toBe(false);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    await send('Use model default');
+    expect(api.sendAgentMessage).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
+      'reasoning_effort'
+    );
+  });
+
+  it('remembers each model separately without model requests, native settings changes, or dialogs', async () => {
+    await mount();
+    act(() => state.setReasoningEffort('max'));
+    act(() => state.setAgentModel(gpt.internalId));
+    expect(state.reasoningEffort).toBeUndefined();
+    act(() => state.setReasoningEffort('xhigh'));
+    act(() => state.setAgentModel(deepseek.internalId));
+    expect(state.reasoningEffort).toBe('max');
+    act(() => state.setAgentModel(gpt.internalId));
+    expect(state.reasoningEffort).toBe('xhigh');
+    act(() => useNavigationStore.setState({ activePage: 'apps' }));
+    act(() => useNavigationStore.setState({ activePage: 'mother' }));
+    act(() => state.createConversation());
+    expect(state.reasoningEffort).toBe('xhigh');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(api.parasiteSendMessage).not.toHaveBeenCalled();
+    expect(api.saveSSHServer).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+    act(() => renderer?.unmount());
+    renderer = undefined;
+    await mount();
+    expect(state.reasoningEffort).toBe('xhigh');
+  });
+
+  it('snapshots the choice and blocks changes during a run and reset', async () => {
+    await mount();
+    act(() => state.setReasoningEffort('max'));
+    await send('Complex task');
+    act(() => state.setReasoningEffort('low'));
+    expect(state.reasoningEffort).toBe('max');
+    expect(api.sendAgentMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ reasoning_effort: 'max' })
+    );
+    emitAgent({ type: 'done', conversation_id: activeSession() });
+    const reset = deferred<string>();
+    vi.mocked(api.resetAgent).mockReturnValueOnce(reset.promise);
+    act(() => {
+      void state.clearChat();
+    });
+    act(() => state.setReasoningEffort('low'));
+    expect(state.reasoningEffort).toBe('max');
+    await act(async () => reset.resolve('ok'));
+    act(() => state.setReasoningEffort('low'));
+    await send('Quick follow up');
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('low');
+  });
+
+  it('omits stale or unsupported choices and keeps Claude Code native settings', async () => {
+    stored.set(REASONING_STORAGE_KEY, JSON.stringify({ [preferenceKey(deepseek)]: 'medium' }));
+    await mount();
+    expect(state.reasoningEffort).toBeUndefined();
+    const original = stored.get(REASONING_STORAGE_KEY);
+    act(() => state.setReasoningEffort('medium'));
+    expect(stored.get(REASONING_STORAGE_KEY)).toBe(original);
+    act(() => state.setReasoningEffort('high'));
+    act(() => state.setParasiteAgent('claudecode'));
+    expect(state.reasoningLevels).toEqual([]);
+    expect(state.reasoningEffort).toBeUndefined();
+    await send('Native turn');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(vi.mocked(api.parasiteSendMessage).mock.lastCall?.[0]).not.toHaveProperty(
+      'reasoningEffort'
+    );
+    emitParasite({ type: 'done', conversation_id: activeSession() });
+    act(() => state.setParasiteAgent(null));
+    expect(state.reasoningEffort).toBe('high');
+    act(() => state.setAgentModel(model.internalId));
+    act(() => state.setReasoningEffort('high'));
+    await send('Unknown model');
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
+      'reasoning_effort'
+    );
+  });
+
+  it('invalidates a preference when an existing entry changes model and allows reset to default', async () => {
+    await mount();
+    act(() => state.setReasoningEffort('max'));
+    vi.mocked(api.getModels).mockResolvedValue([
+      { ...deepseek, modelId: 'deepseek-v4-pro' },
+      gpt,
+      model,
+    ]);
+    await act(async () => {
+      window.dispatchEvent(new Event('models-changed'));
+    });
+    expect(state.reasoningEffort).toBeUndefined();
+    act(() => state.setReasoningEffort('high'));
+    act(() => state.setReasoningEffort(undefined));
+    await send('Default again');
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
+      'reasoning_effort'
+    );
+  });
+
+  it('preserves the chosen level and shows request failures without silently downgrading or retrying', async () => {
+    await mount();
+    act(() => state.setReasoningEffort('max'));
+    vi.mocked(api.sendAgentMessage).mockRejectedValueOnce('fixture provider rejected request');
+    await send('Test failure');
+    expect(state.isProcessing).toBe(false);
+    expect(state.reasoningEffort).toBe('max');
+    expect(state.chatOutput).toContainEqual({
+      type: 'error',
+      text: 'fixture provider rejected request',
+    });
+    expect(api.sendAgentMessage).toHaveBeenCalledOnce();
+    await send('Explicit retry');
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('max');
+  });
 });
 
 describe('Mother Agent saved conversation workflow', () => {

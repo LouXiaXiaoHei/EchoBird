@@ -379,6 +379,13 @@ export type TKey =
   | 'hint.responsesRequired'
   // Mother Agent
   | 'mother.selectModel'
+  | 'mother.reasoning.title'
+  | 'mother.reasoning.default'
+  | 'mother.reasoning.low'
+  | 'mother.reasoning.medium'
+  | 'mother.reasoning.high'
+  | 'mother.reasoning.xhigh'
+  | 'mother.reasoning.max'
   | 'mother.hintInstall'
   | 'mother.hintShowSpecs'
   | 'mother.hintShowSpecsLocal'

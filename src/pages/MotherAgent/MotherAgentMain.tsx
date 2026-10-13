@@ -12,6 +12,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useMotherAgent } from './context';
 import { QuickCommandChips } from './QuickCommandChips';
+import { ReasoningControl } from './ReasoningControl';
 import { MA_PAGE_SIZE, type ChatMessage } from './types';
 
 // ===== Main Content (center area) — CHAT =====
@@ -27,6 +28,9 @@ export function MotherAgentMain() {
     chatOutput,
     isProcessing,
     agentModelData: _agentModelData,
+    reasoningLevels,
+    reasoningEffort,
+    setReasoningEffort,
     agentState: _agentState,
     chatEndRef,
     chatInputRef,
@@ -462,6 +466,22 @@ export function MotherAgentMain() {
                   disabledLabel: t('status.notInstalled'),
                 },
               ]}
+            />
+            <ReasoningControl
+              key={JSON.stringify([
+                parasiteAgent || agentModel,
+                _agentModelData?.modelId || _agentModelData?.name,
+                _agentModelData?.baseUrl,
+                _agentModelData?.anthropicUrl,
+                _agentModelData?.scope,
+                activeConversationId,
+                isProcessing,
+                isMotherActive,
+              ])}
+              levels={reasoningLevels || []}
+              value={reasoningEffort}
+              disabled={isProcessing || !isMotherActive}
+              onChange={setReasoningEffort}
             />
             {isProcessing ? (
               <button

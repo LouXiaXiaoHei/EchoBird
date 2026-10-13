@@ -218,6 +218,8 @@ export interface StoreModel {
 
 // ─── Agent Types ───
 
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface AgentRequest {
   message: string;
   conversation_id?: string;
@@ -234,6 +236,7 @@ export interface AgentRequest {
   skills: string[];
   /** UI locale code (e.g. "zh-Hans", "en"). Hints the agent's response language. */
   locale?: string;
+  reasoning_effort?: ReasoningEffort;
 }
 
 export type AgentEvent = { conversation_id?: string; request_id?: string } & (

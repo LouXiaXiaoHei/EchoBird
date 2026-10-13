@@ -405,6 +405,13 @@ const ja: Partial<Translations> = {
   'hint.myProjects':
     'Vibe Coding したアプリ / ゲームのモデルを切り替え。リバーシ / AI 翻訳 の models.json を参考にするか、あなたのプロジェクトにコピーしてください。',
   'mother.selectModel': 'モデルを選択',
+  'mother.reasoning.title': '推論の強度',
+  'mother.reasoning.default': '既定',
+  'mother.reasoning.low': '低',
+  'mother.reasoning.medium': '中',
+  'mother.reasoning.high': '高',
+  'mother.reasoning.xhigh': '非常に高い',
+  'mother.reasoning.max': '最大',
   'mother.hintInstall': '{agent} をインストール',
   'mother.enterMessage': 'メッセージを入力...',
   'mother.servers': 'サーバー',

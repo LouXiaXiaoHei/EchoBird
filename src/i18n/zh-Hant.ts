@@ -390,6 +390,13 @@ const zhHant: Partial<Translations> = {
   'hint.myProjects':
     '給你 Vibe Coding 的應用或遊戲切換模型，參考黑白棋和 AI 翻譯的 models.json 或複製它到你的專案。',
   'mother.selectModel': '選擇模型',
+  'mother.reasoning.title': '推理強度',
+  'mother.reasoning.default': '預設',
+  'mother.reasoning.low': '低',
+  'mother.reasoning.medium': '中',
+  'mother.reasoning.high': '高',
+  'mother.reasoning.xhigh': '超高',
+  'mother.reasoning.max': '極致',
   'mother.hintInstall': '安裝 {agent}',
   'mother.enterMessage': '輸入訊息...',
   'mother.servers': '伺服器',

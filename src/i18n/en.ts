@@ -405,6 +405,13 @@ const en: Translations = {
     "Swap the model on your vibe-coded app or game — reference Reversi's and AI Translator's models.json, or just copy it to your project.",
   // Mother Agent
   'mother.selectModel': 'Select model',
+  'mother.reasoning.title': 'Reasoning effort',
+  'mother.reasoning.default': 'Default',
+  'mother.reasoning.low': 'Low',
+  'mother.reasoning.medium': 'Medium',
+  'mother.reasoning.high': 'High',
+  'mother.reasoning.xhigh': 'Very high',
+  'mother.reasoning.max': 'Max',
   'mother.hintInstall': 'Install {agent}',
   'mother.enterMessage': 'Enter message...',
   'mother.servers': 'Servers',
