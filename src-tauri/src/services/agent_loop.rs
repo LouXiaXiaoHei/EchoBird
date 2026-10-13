@@ -247,7 +247,25 @@ pub fn load_session_from_disk(server_key: &str) -> Vec<Message> {
 
 /// Clear a session's persisted file from disk
 pub fn clear_session_from_disk(server_key: &str) -> Result<(), String> {
-    clear_session_file(&session_file(server_key))
+    clear_session_data(
+        &session_file(server_key),
+        server_key,
+        &super::agent_output_store::OutputStore::standard(),
+    )
+}
+
+fn clear_session_data(
+    path: &std::path::Path,
+    scope: &str,
+    outputs: &super::agent_output_store::OutputStore,
+) -> Result<(), String> {
+    clear_session_file(path)?;
+    // A failed history deletion must leave its evidence readable. Once history
+    // deletion succeeds, archive cleanup must not make the UI restore old history.
+    if let Err(error) = outputs.clear_scope(scope) {
+        log::warn!("[AgentSession] Failed to clear saved output: {error}");
+    }
+    Ok(())
 }
 
 fn clear_session_file(path: &std::path::Path) -> Result<(), String> {
@@ -844,12 +862,13 @@ pub async fn run_agent(
                 let args = tc.arguments.clone();
                 let sshp = ssh_pool.clone();
                 let server_ids = request.server_ids.clone();
+                let output_scope = server_key.clone();
                 let pre = precomputed.get(&tc.id).cloned();
                 handles.push(tokio::spawn(async move {
                     if let Some(p) = pre {
                         return p;
                     }
-                    agent_tools::execute_tool(&name, &args, &sshp, &server_ids).await
+                    agent_tools::execute_tool(&name, &args, &sshp, &server_ids, &output_scope).await
                 }));
             }
 
@@ -917,7 +936,7 @@ pub async fn run_agent(
                     (pre, false)
                 } else {
                     tokio::select! {
-                        r = agent_tools::execute_tool(&tc.name, &tc.arguments, &ssh_pool, &request.server_ids) => (r, false),
+                        r = agent_tools::execute_tool(&tc.name, &tc.arguments, &ssh_pool, &request.server_ids, &server_key) => (r, false),
                         _ = cancel_token.cancelled() => {
                             log::info!("[AgentLoop] Tool cancelled by user: {}", tc.name);
                             (agent_tools::ToolResult { output: "Cancelled by user".to_string(), success: false }, true)
@@ -1520,7 +1539,7 @@ fn format_server_down_error(err: &str) -> String {
 fn is_shared_tool(name: &str) -> bool {
     matches!(
         name,
-        "file_read" | "grep" | "glob" | "web_fetch" | "get_sudo_password"
+        "file_read" | "grep" | "glob" | "web_fetch" | "get_sudo_password" | "tool_output_read"
     )
 }
 
@@ -1839,6 +1858,53 @@ fn is_legacy_opencode_install(command: &str) -> bool {
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+
+    #[test]
+    fn resetting_history_preserves_evidence_on_failure_and_cleans_only_its_scope() {
+        use super::super::agent_output_store::{OutputRecord, OutputStore};
+        let directory = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "echobird-agent-output-reset-{}",
+                uuid::Uuid::new_v4()
+            ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.json");
+        let store = OutputStore::new(directory.join("outputs"));
+        let record = OutputRecord {
+            command: String::new(),
+            target: "local".into(),
+            exit_code: Some(0),
+            success: true,
+            stdout: "original evidence".into(),
+            stderr: String::new(),
+        };
+        let id = store.store("conversation-a", &record).unwrap();
+        let other = store.store("conversation-b", &record).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(clear_session_data(&path, "conversation-a", &store).is_err());
+        assert!(store.read("conversation-a", &id, 0, 6000).is_ok());
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, "saved history").unwrap();
+        clear_session_data(&path, "conversation-a", &store).unwrap();
+        assert!(!path.exists());
+        assert!(store.read("conversation-a", &id, 0, 6000).is_err());
+        assert!(store.read("conversation-b", &other, 0, 6000).is_ok());
+
+        // Archive cleanup cannot turn a completed history deletion into UI rollback.
+        let blocked = directory.join("blocked-output-root");
+        std::fs::write(&blocked, "not a directory").unwrap();
+        std::fs::write(&path, "saved history").unwrap();
+        clear_session_data(&path, "conversation-a", &OutputStore::new(blocked)).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn output_recall_is_read_only_while_shell_execution_remains_exclusive() {
+        assert!(is_shared_tool("tool_output_read"));
+        assert!(!is_shared_tool("shell_exec"));
+    }
 
     #[test]
     fn clearing_persisted_history_handles_missing_files_and_reports_deletion_failure() {

@@ -1,4 +1,6 @@
 pub mod agent_loop;
+pub(crate) mod agent_output_store;
+pub(crate) mod agent_output_summary;
 pub mod agent_tools;
 pub mod ai_career;
 pub mod anthropic_proxy;
