@@ -27,6 +27,9 @@ export function MemoryPanel({ active }: { active: boolean }) {
   const [text, setText] = useState('');
   const [scope, setScope] = useState<api.AgentMemoryRecord['scope']>('user');
   const view = useRef(0);
+  const destination = useRef(0);
+  const enabledRef = useRef(enabled);
+  const deferredError = useRef<string | null>(null);
   const mounted = useRef(false);
   const request = useRef(0);
   const actionPending = useRef(false);
@@ -58,37 +61,49 @@ export function MemoryPanel({ active }: { active: boolean }) {
   }, []);
 
   useEffect(() => {
-    const currentView = ++view.current;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoadError('');
-    if (enabled) void refresh(currentView);
-    return () => {
-      view.current += 1;
-    };
-  }, [enabled, target, refresh]);
-
-  useEffect(() => {
     // Navigation and window visibility preserve drafts; only the destination resets them.
+    destination.current += 1;
+    deferredError.current = null;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setEditing(null);
     setText('');
     setScope('user');
   }, [target, parasiteAgent]);
 
+  useEffect(() => {
+    const currentView = ++view.current;
+    enabledRef.current = enabled;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadError('');
+    if (enabled) {
+      if (deferredError.current !== null) {
+        showToast('error', deferredError.current);
+        deferredError.current = null;
+      }
+      void refresh(currentView);
+    }
+    return () => {
+      view.current += 1;
+    };
+  }, [enabled, target, refresh, showToast]);
+
   const runAction = async (action: () => Promise<unknown>, after?: () => void) => {
     if (!enabled || actionPending.current) return;
     actionPending.current = true;
     setPending(true);
-    const currentView = view.current;
+    const currentDestination = destination.current;
     try {
       const result = await action();
       if (result === false) return;
-      if (mounted.current && currentView === view.current) {
+      if (mounted.current && currentDestination === destination.current) {
         after?.();
-        await refresh(currentView);
+        if (enabledRef.current) await refresh(view.current);
       }
     } catch (error) {
-      if (mounted.current && currentView === view.current) showToast('error', String(error));
+      if (mounted.current && currentDestination === destination.current) {
+        if (enabledRef.current) showToast('error', String(error));
+        else deferredError.current = String(error);
+      }
     } finally {
       actionPending.current = false;
       if (mounted.current) setPending(false);
@@ -116,22 +131,32 @@ export function MemoryPanel({ active }: { active: boolean }) {
   };
 
   const remove = (record: api.AgentMemoryRecord) => {
-    const currentView = view.current;
-    void runAction(async () => {
-      const accepted = await confirm({
-        title: t('mother.memory.deleteTitle'),
-        message: t('mother.memory.deleteConfirm'),
-        confirmText: t('btn.delete'),
-        cancelText: t('btn.cancel'),
-        type: 'danger',
-      });
-      if (!accepted || currentView !== view.current || !mounted.current) return false;
-      await api.agentMemoryDelete(record.id);
-      if (editing === record.id) {
-        setEditing(null);
-        setText('');
+    const currentDestination = destination.current;
+    void runAction(
+      async () => {
+        const accepted = await confirm({
+          title: t('mother.memory.deleteTitle'),
+          message: t('mother.memory.deleteConfirm'),
+          confirmText: t('btn.delete'),
+          cancelText: t('btn.cancel'),
+          type: 'danger',
+        });
+        if (
+          !accepted ||
+          currentDestination !== destination.current ||
+          !mounted.current ||
+          !enabledRef.current
+        )
+          return false;
+        await api.agentMemoryDelete(record.id);
+      },
+      () => {
+        if (editing === record.id) {
+          setEditing(null);
+          setText('');
+        }
       }
-    });
+    );
   };
 
   if (!active) return null;

@@ -838,7 +838,16 @@ fn messages_to_openai_json(messages: &[Message], config: &LlmConfig) -> Vec<Valu
                 }
             }
         }
-        out.push(message_to_openai_json(&message));
+        let mut serialized = message_to_openai_json(&message);
+        if message.role == "assistant"
+            && uses_deepseek_history(config)
+            && serialized.get("reasoning_content").is_none()
+        {
+            // DeepSeek requires a reasoning field on every prior assistant reply
+            // when tools are sent, including final replies imported from another model.
+            serialized["reasoning_content"] = json!("");
+        }
+        out.push(serialized);
     }
     out
 }
@@ -1493,6 +1502,15 @@ mod tests {
             let anthropic = body.get("system").is_some();
             tx.send(body.clone()).unwrap();
             let messages = body["messages"].as_array().unwrap();
+            let missing_reasoning = !anthropic
+                && body["model"] == "deepseek-v4-pro"
+                && body["tools"]
+                    .as_array()
+                    .is_some_and(|tools| !tools.is_empty())
+                && messages.iter().any(|message| {
+                    message["role"] == "assistant"
+                        && message["reasoning_content"].as_str().is_none()
+                });
             let valid = messages.iter().all(|message| {
                 if anthropic {
                     matches!(message["role"].as_str(), Some("user" | "assistant"))
@@ -1507,11 +1525,15 @@ mod tests {
                     })
                 }
             });
-            if !valid {
+            if !valid || missing_reasoning {
                 return (
                     axum::http::StatusCode::BAD_REQUEST,
                     Json(json!({
-                        "error":{"message":"invalid history projection"}
+                        "error":{"message":if missing_reasoning {
+                            "The reasoning_content in the thinking mode must be passed back to the API."
+                        } else {
+                            "invalid history projection"
+                        }}
                     })),
                 )
                     .into_response();
@@ -1545,6 +1567,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let tools = [ToolDef {
+            name: "fixture_tool".into(),
+            description: "Verify the saved installation".into(),
+            parameters: json!({"type":"object", "properties":{}}),
+        }];
         for (initial, model) in [
             (LlmProvider::OpenAI, "fixture-model"),
             (LlmProvider::Anthropic, "fixture-model"),
@@ -1600,6 +1627,27 @@ mod tests {
                 role: "assistant".into(),
                 content: MessageContent::Text("Installation verified".into()),
             });
+            messages.push(Message {
+                role: "user".into(),
+                content: MessageContent::Text("Check the verified installation".into()),
+            });
+            messages.push(Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Thinking {
+                        thinking: "final reasoning".into(),
+                        signature: if initial == LlmProvider::Anthropic {
+                            "final signature".into()
+                        } else {
+                            String::new()
+                        },
+                        origin: Some(ThinkingOrigin::from_config(&config)),
+                    },
+                    ContentBlock::Text {
+                        text: "Verification complete".into(),
+                    },
+                ]),
+            });
             let opposite = if initial == LlmProvider::OpenAI {
                 LlmProvider::Anthropic
             } else {
@@ -1617,7 +1665,7 @@ mod tests {
                 config.provider = provider;
                 let client = LlmClient::new(config.clone()).unwrap();
                 let mut stream = client
-                    .chat_stream(&messages, &[], "fixture system")
+                    .chat_stream(&messages, &tools, "fixture system")
                     .await
                     .unwrap();
                 let mut text = String::new();
@@ -1638,11 +1686,13 @@ mod tests {
                 assert!(!call_id.is_empty());
                 assert_eq!(serde_json::to_value(&messages).unwrap(), before);
                 let body = captured.recv().await.unwrap();
+                assert_eq!(body["tools"].as_array().unwrap().len(), 1);
                 let serialized = body.to_string();
                 for retained in [
                     "Install on the saved server",
                     "Checking installation",
                     "Installation verified",
+                    "Verification complete",
                     "result for a",
                     "result for b",
                     "Continue with previous results",
@@ -1652,6 +1702,7 @@ mod tests {
                     assert!(serialized.contains(retained), "missing {retained}");
                 }
                 assert!(!serialized.contains("endpoint"));
+                assert_eq!(serialized.contains("final reasoning"), provider == initial);
                 let wire = body["messages"].as_array().unwrap();
                 if provider == LlmProvider::Anthropic {
                     let results = wire
@@ -1678,6 +1729,26 @@ mod tests {
                 } else {
                     assert!(wire.iter().any(|message| message["tool_call_id"] == "a"));
                     assert!(wire.iter().any(|message| message["tool_call_id"] == "b"));
+                    let plain_final = wire
+                        .iter()
+                        .find(|message| message["content"] == "Installation verified")
+                        .unwrap();
+                    if model == "deepseek-v4-pro" {
+                        assert_eq!(plain_final["reasoning_content"], "");
+                    } else {
+                        assert!(plain_final.get("reasoning_content").is_none());
+                    }
+                    let thinking_final = wire
+                        .iter()
+                        .find(|message| message["content"] == "Verification complete")
+                        .unwrap();
+                    if provider == initial {
+                        assert_eq!(thinking_final["reasoning_content"], "final reasoning");
+                    } else if model == "deepseek-v4-pro" {
+                        assert_eq!(thinking_final["reasoning_content"], "");
+                    } else {
+                        assert!(thinking_final.get("reasoning_content").is_none());
+                    }
                     let first = wire
                         .iter()
                         .find(|message| message["role"] == "assistant")

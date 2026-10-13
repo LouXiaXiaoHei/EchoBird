@@ -78,6 +78,17 @@ function changeText(value: string) {
   act(() => renderer!.root.findByType('textarea').props.onChange({ currentTarget: { value } }));
 }
 
+async function navigateAway(kind: 'window' | 'tab' | 'page', away: boolean) {
+  if (kind === 'window') {
+    visible = !away;
+    await update();
+  } else if (kind === 'tab') {
+    await update(!away);
+  } else {
+    await act(async () => useNavigationStore.setState({ activePage: away ? 'apps' : 'mother' }));
+  }
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -307,6 +318,267 @@ describe('Mother memory navigation', () => {
 });
 
 describe('Mother memory explicit actions', () => {
+  it.each(['window', 'tab', 'page'] as const)(
+    'settles pending saves, edits, and deletes after leaving and returning through the %s',
+    async (navigation) => {
+      await mount();
+      await click('mother.memory.add');
+      changeText('Saved after returning');
+      const writing = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemorySave).mockReturnValueOnce(writing.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      const addition = record('new-memory', 'Saved after returning', null);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([...saved, addition]);
+      await act(async () => writing.resolve(addition));
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).toContain('Saved after returning');
+      expect(api.agentMemorySave).toHaveBeenCalledOnce();
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(3);
+
+      await act(async () => action(`${t('btn.edit')} Use Chinese`).props.onClick());
+      changeText('Edited after returning');
+      const updating = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemoryUpdate).mockReturnValueOnce(updating.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      const edited = record('preference', 'Edited after returning', null);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([edited, addition]);
+      await act(async () => updating.resolve(edited));
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).toContain('Edited after returning');
+      expect(api.agentMemoryUpdate).toHaveBeenCalledExactlyOnceWith(
+        'preference',
+        'Edited after returning'
+      );
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(5);
+
+      await act(async () => action(`${t('btn.edit')} Edited after returning`).props.onClick());
+      const deleting = deferred<void>();
+      vi.mocked(api.agentMemoryDelete).mockReturnValueOnce(deleting.promise);
+      await act(async () => action(`${t('btn.delete')} Edited after returning`).props.onClick());
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([edited, addition]);
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([addition]);
+      await act(async () => deleting.resolve());
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).not.toContain('Edited after returning');
+      expect(api.agentMemoryDelete).toHaveBeenCalledExactlyOnceWith('preference');
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(7);
+      expect(showToast).not.toHaveBeenCalled();
+      expectNoAgentActions();
+    }
+  );
+
+  it.each(['window', 'tab', 'page'] as const)(
+    'settles saves, edits, and deletes while hidden through the %s and reloads only on return',
+    async (navigation) => {
+      await mount();
+      await click('mother.memory.add');
+      changeText('Saved while hidden');
+      const writing = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemorySave).mockReturnValueOnce(writing.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      const addition = record('new-memory', 'Saved while hidden', null);
+      await act(async () => writing.resolve(addition));
+      expect(api.agentMemoryList).toHaveBeenCalledOnce();
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([...saved, addition]);
+      await navigateAway(navigation, false);
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).toContain('Saved while hidden');
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(2);
+      expect(api.agentMemorySave).toHaveBeenCalledOnce();
+
+      await act(async () => action(`${t('btn.edit')} Use Chinese`).props.onClick());
+      changeText('Edited while hidden');
+      const updating = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemoryUpdate).mockReturnValueOnce(updating.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      const edited = record('preference', 'Edited while hidden', null);
+      await act(async () => updating.resolve(edited));
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(2);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([edited, addition]);
+      await navigateAway(navigation, false);
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).toContain('Edited while hidden');
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(3);
+      expect(api.agentMemoryUpdate).toHaveBeenCalledOnce();
+
+      await act(async () => action(`${t('btn.edit')} Edited while hidden`).props.onClick());
+      const deleting = deferred<void>();
+      vi.mocked(api.agentMemoryDelete).mockReturnValueOnce(deleting.promise);
+      await act(async () => action(`${t('btn.delete')} Edited while hidden`).props.onClick());
+      await navigateAway(navigation, true);
+      await act(async () => deleting.resolve());
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(3);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce([addition]);
+      await navigateAway(navigation, false);
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(rendered()).not.toContain('Edited while hidden');
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(4);
+      expect(api.agentMemoryDelete).toHaveBeenCalledOnce();
+      expect(showToast).not.toHaveBeenCalled();
+      expectNoAgentActions();
+    }
+  );
+
+  it.each(['window', 'tab', 'page'] as const)(
+    'reports a pending edit failure after returning through the %s and keeps the draft',
+    async (navigation) => {
+      await mount();
+      await act(async () => action(`${t('btn.edit')} Use Chinese`).props.onClick());
+      changeText('Keep the failed draft');
+      const writing = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemoryUpdate).mockReturnValueOnce(writing.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      await act(async () => writing.reject('Returned edit failure'));
+      expect(showToast).toHaveBeenCalledExactlyOnceWith('error', 'Returned edit failure');
+      expect(renderer!.root.findByType('textarea').props.value).toBe('Keep the failed draft');
+      expect(button('btn.save').props.disabled).toBe(false);
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(2);
+      expect(api.agentMemoryUpdate).toHaveBeenCalledOnce();
+      expectNoAgentActions();
+    }
+  );
+
+  it.each(['window', 'tab', 'page'] as const)(
+    'retains a hidden edit failure through the %s until the panel is visible again',
+    async (navigation) => {
+      await mount();
+      await act(async () => action(`${t('btn.edit')} Use Chinese`).props.onClick());
+      changeText('Keep the hidden failed draft');
+      const writing = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemoryUpdate).mockReturnValueOnce(writing.promise);
+      act(() => button('btn.save').props.onClick());
+      await navigateAway(navigation, true);
+      await act(async () => writing.reject('Hidden edit failure'));
+      expect(showToast).not.toHaveBeenCalled();
+      expect(api.agentMemoryList).toHaveBeenCalledOnce();
+      await navigateAway(navigation, false);
+      expect(showToast).toHaveBeenCalledExactlyOnceWith('error', 'Hidden edit failure');
+      expect(renderer!.root.findByType('textarea').props.value).toBe(
+        'Keep the hidden failed draft'
+      );
+      expect(button('btn.save').props.disabled).toBe(false);
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      expect(showToast).toHaveBeenCalledOnce();
+      expect(api.agentMemoryUpdate).toHaveBeenCalledOnce();
+      expectNoAgentActions();
+    }
+  );
+
+  it.each(['target', 'engine'] as const)(
+    'ignores old save settlement after changing %s away and back',
+    async (destination) => {
+      await mount();
+      await click('mother.memory.add');
+      changeText('Old pending draft');
+      const writing = deferred<api.AgentMemoryRecord>();
+      vi.mocked(api.agentMemorySave).mockReturnValueOnce(writing.promise);
+      act(() => button('btn.save').props.onClick());
+      state = {
+        ...state,
+        ...(destination === 'target'
+          ? { selectedServerId: 'remote' }
+          : { parasiteAgent: 'claudecode' }),
+      };
+      await update();
+      state = { ...state, selectedServerId: 'local', parasiteAgent: null };
+      await update();
+      const reads = vi.mocked(api.agentMemoryList).mock.calls.length;
+      await act(async () => writing.resolve(record('old', 'Old pending draft', null)));
+      expect(api.agentMemoryList).toHaveBeenCalledTimes(reads);
+      expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+      expect(button('mother.memory.add').props.disabled).toBe(false);
+      expect(showToast).not.toHaveBeenCalled();
+      expectNoAgentActions();
+    }
+  );
+
+  it('discards a deferred failure when the destination changes before return', async () => {
+    await mount();
+    await click('mother.memory.add');
+    changeText('Old hidden draft');
+    const writing = deferred<api.AgentMemoryRecord>();
+    vi.mocked(api.agentMemorySave).mockReturnValueOnce(writing.promise);
+    act(() => button('btn.save').props.onClick());
+    await navigateAway('window', true);
+    await act(async () => writing.reject('Old hidden failure'));
+    state = { ...state, selectedServerId: 'remote' };
+    await update();
+    state = { ...state, selectedServerId: 'local' };
+    await update();
+    await navigateAway('window', false);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+    expectNoAgentActions();
+  });
+
+  it.each(['window', 'tab', 'page'] as const)(
+    'keeps deletion confirmation valid after returning through the %s',
+    async (navigation) => {
+      await mount();
+      const decision = deferred<boolean>();
+      confirm.mockReturnValueOnce(decision.promise);
+      act(() => action(`${t('btn.delete')} Local fact`).props.onClick());
+      await navigateAway(navigation, true);
+      await navigateAway(navigation, false);
+      vi.mocked(api.agentMemoryList).mockResolvedValueOnce(
+        saved.filter((item) => item.id !== 'local-fact')
+      );
+      await act(async () => decision.resolve(true));
+      expect(api.agentMemoryDelete).toHaveBeenCalledExactlyOnceWith('local-fact');
+      expect(rendered()).not.toContain('Local fact');
+      expectNoAgentActions();
+    }
+  );
+
+  it('does not start deletion when its confirmation finishes while hidden', async () => {
+    await mount();
+    const decision = deferred<boolean>();
+    confirm.mockReturnValueOnce(decision.promise);
+    act(() => action(`${t('btn.delete')} Local fact`).props.onClick());
+    await navigateAway('window', true);
+    await act(async () => decision.resolve(true));
+    expect(api.agentMemoryDelete).not.toHaveBeenCalled();
+    expect(api.agentMemoryList).toHaveBeenCalledOnce();
+    await navigateAway('window', false);
+    expect(rendered()).toContain('Local fact');
+    expect(button('mother.memory.add').props.disabled).toBe(false);
+    expectNoAgentActions();
+  });
+
+  it.each(['target', 'engine'] as const)(
+    'invalidates deletion confirmation after changing %s away and back',
+    async (destination) => {
+      await mount();
+      const decision = deferred<boolean>();
+      confirm.mockReturnValueOnce(decision.promise);
+      act(() => action(`${t('btn.delete')} Local fact`).props.onClick());
+      state = {
+        ...state,
+        ...(destination === 'target'
+          ? { selectedServerId: 'remote' }
+          : { parasiteAgent: 'claudecode' }),
+      };
+      await update();
+      state = { ...state, selectedServerId: 'local', parasiteAgent: null };
+      await update();
+      await act(async () => decision.resolve(true));
+      expect(api.agentMemoryDelete).not.toHaveBeenCalled();
+      expect(rendered()).toContain('Local fact');
+      expectNoAgentActions();
+    }
+  );
+
   it('saves a global preference during a running turn without interrupting or resending', async () => {
     state = { ...state, isProcessing: true };
     await mount();
