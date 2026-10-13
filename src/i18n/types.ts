@@ -218,6 +218,7 @@ export type TKey =
   | 'accountProxy.account'
   | 'accountProxy.accountCountOne'
   | 'accountProxy.accountCountOther'
+  | 'accountProxy.highRisk'
   | 'accountProxy.selectRequired'
   | 'accountProxy.riskReadPrefix'
   | 'accountProxy.riskNotice'

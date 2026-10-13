@@ -107,6 +107,7 @@ const ja: Partial<Translations> = {
   'accountProxy.account': 'アカウント',
   'accountProxy.accountCountOne': '{count} アカウント',
   'accountProxy.accountCountOther': '{count} アカウント',
+  'accountProxy.highRisk': '高リスク',
   'accountProxy.selectRequired': 'アカウントとモデルを選択してください。',
   'accountProxy.riskReadPrefix': '「',
   'accountProxy.riskNotice': 'リスクに関する注意事項',

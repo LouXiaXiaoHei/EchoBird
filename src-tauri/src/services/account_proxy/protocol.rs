@@ -167,7 +167,13 @@ fn responses_content(content: &Value, assistant: bool) -> Vec<Value> {
         .flatten()
         .filter_map(|part| match part["type"].as_str()? {
             "text" | "input_text" | "output_text" => Some(json!({"type":kind,"text":part["text"]})),
-            "image_url" => Some(json!({"type":"input_image","image_url":part["image_url"]["url"]})),
+            "image_url" => {
+                let mut image = json!({"type":"input_image","image_url":part["image_url"]["url"]});
+                if let Some(detail) = part["image_url"].get("detail") {
+                    image["detail"] = detail.clone();
+                }
+                Some(image)
+            }
             "input_image" | "input_file" => Some(part.clone()),
             _ => None,
         })

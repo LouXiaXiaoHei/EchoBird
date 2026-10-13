@@ -28,6 +28,13 @@ fn access_token(credentials: &Value) -> Result<&str, ProxyError> {
 }
 
 fn base(provider: AccountProvider, credentials: &Value) -> &str {
+    if provider == AccountProvider::Cline {
+        #[cfg(test)]
+        if let Some(base) = credentials["baseUrl"].as_str() {
+            return base.trim_end_matches('/');
+        }
+        return "https://api.cline.bot/api/v1";
+    }
     credentials["baseUrl"]
         .as_str()
         .unwrap_or(match provider {
@@ -41,7 +48,11 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             AccountProvider::Trae | AccountProvider::Traecn => {
                 unreachable!("Trae uses its own gateway")
             }
-            AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+            AccountProvider::Grok
+            | AccountProvider::Cline
+            | AccountProvider::Minimax
+            | AccountProvider::Qoder
+            | AccountProvider::QoderCn => {
                 unreachable!("Provider uses its account gateway")
             }
         })
@@ -123,11 +134,23 @@ fn signed(
                 .header("HTTP-Referer", "https://kilo.ai")
                 .header("X-Title", "EchoBird");
         }
+        AccountProvider::Cline => {
+            request = request
+                .header("HTTP-Referer", "https://cline.bot")
+                .header("X-Title", "EchoBird")
+                .header(
+                    "user-agent",
+                    concat!("EchoBird/", env!("CARGO_PKG_VERSION")),
+                );
+        }
         AccountProvider::ClaudeCode => unreachable!("Claude uses its CLI"),
         AccountProvider::Trae | AccountProvider::Traecn => {
             unreachable!("Trae uses its own gateway")
         }
-        AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+        AccountProvider::Grok
+        | AccountProvider::Minimax
+        | AccountProvider::Qoder
+        | AccountProvider::QoderCn => {
             unreachable!("Provider uses its account gateway")
         }
     }
@@ -434,7 +457,11 @@ pub(super) async fn list_models(
         AccountProvider::Trae | AccountProvider::Traecn => {
             unreachable!("Trae uses its own gateway")
         }
-        AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+        AccountProvider::Grok
+        | AccountProvider::Cline
+        | AccountProvider::Minimax
+        | AccountProvider::Qoder
+        | AccountProvider::QoderCn => {
             unreachable!("Provider uses its account gateway")
         }
     };

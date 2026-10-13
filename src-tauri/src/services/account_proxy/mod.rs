@@ -1,6 +1,8 @@
 //! Account credentials stay in the backend. These adapters never switch native clients.
 
 mod bridge;
+mod cline;
+mod grok;
 mod minimax;
 mod protocol;
 mod providers;
@@ -125,7 +127,9 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if provider == AccountProvider::Minimax {
+    if provider == AccountProvider::Grok {
+        grok::route(credentials, model, body, client).await
+    } else if provider == AccountProvider::Minimax {
         minimax::route(credentials, model, body, client).await
     } else if matches!(provider, AccountProvider::Qoder | AccountProvider::QoderCn) {
         qoder::route(provider, credentials, model, body, client).await
@@ -145,6 +149,11 @@ pub async fn route_responses(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Option<Response>, ProxyError> {
+    if provider == AccountProvider::Grok {
+        return grok::route_responses(credentials, model, body, client)
+            .await
+            .map(Some);
+    }
     providers::route_responses(provider, credentials, model, body, client).await
 }
 
@@ -153,7 +162,11 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if provider == AccountProvider::Minimax {
+    if provider == AccountProvider::Grok {
+        grok::list_models(credentials, client).await
+    } else if provider == AccountProvider::Cline {
+        cline::list_models(credentials, client).await
+    } else if provider == AccountProvider::Minimax {
         minimax::list_models(credentials, client).await
     } else if matches!(provider, AccountProvider::Qoder | AccountProvider::QoderCn) {
         qoder::list_models(provider, credentials, client).await

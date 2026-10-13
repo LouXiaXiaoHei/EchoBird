@@ -100,6 +100,7 @@ const zhHant: Partial<Translations> = {
   'accountProxy.account': '帳號',
   'accountProxy.accountCountOne': '{count} 個帳號',
   'accountProxy.accountCountOther': '{count} 個帳號',
+  'accountProxy.highRisk': '高風險',
   'accountProxy.selectRequired': '請選擇帳號和模型。',
   'accountProxy.riskReadPrefix': '我已閱讀',
   'accountProxy.riskNotice': '風險須知',

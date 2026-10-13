@@ -783,6 +783,7 @@ function RouteModelCard({
   const displayName = model.accountSource
     ? (account && accountProxyIdentityLabel(account, t)) || accountProvider?.name || model.provider
     : model.provider;
+  const displayPlan = account ? accountProxyPlanLabel(account, t).trim() : '';
   const iconSrc = accountProvider
     ? `/icons/tools/${accountProvider.icon}`
     : providerIconSrc !== undefined
@@ -846,9 +847,9 @@ function RouteModelCard({
               {compact ? displayName : model.provider}
             </span>
             {compact && keyless && <KeylessModelLabel card />}
-            {compact && model.accountSource && (
+            {compact && model.accountSource && displayPlan && (
               <span className="shrink-0 whitespace-nowrap text-xs text-cyber-text-secondary">
-                {account ? accountProxyPlanLabel(account, t) || '—' : '—'}
+                {displayPlan}
               </span>
             )}
           </div>
@@ -1452,6 +1453,13 @@ function SmartRouterMain() {
               key={activeRoutePath.id}
               d={activeRoutePath.d}
               pathLength="1"
+              ref={(path) => {
+                if (path)
+                  path.style.setProperty(
+                    '--free-model-route-glow-span',
+                    String(Math.min(1, Math.max(0.07, 20 / path.getTotalLength())))
+                  );
+              }}
               className="free-model-route-glow"
             />
           )}

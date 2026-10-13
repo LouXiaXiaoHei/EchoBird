@@ -48,6 +48,13 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 vi.mock('../../api/tauri', () => {
   const names = [
+    'listClineAccounts',
+    'startClineLogin',
+    'pollClineLogin',
+    'cancelClineLogin',
+    'switchClineAccount',
+    'refreshClineAccount',
+    'deleteClineAccount',
     'listZCodeAccounts',
     'listKiloAccounts',
     'startKiloLogin',
@@ -268,6 +275,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   for (const name of listNames) vi.mocked(api[name]).mockResolvedValue([]);
+  vi.mocked(api.listClineAccounts).mockResolvedValue([]);
   vi.mocked(api.listKiloAccounts).mockResolvedValue([]);
   vi.mocked(api.listCopilotAccounts).mockResolvedValue([]);
   for (const [name, action] of Object.entries(api))

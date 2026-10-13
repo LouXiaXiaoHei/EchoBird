@@ -45,7 +45,9 @@ export type AccountProvider =
   | 'traecn'
   | 'minimax'
   | 'qoder'
-  | 'qoderCn';
+  | 'qoderCn'
+  | 'grok'
+  | 'cline';
 
 export interface AccountSource {
   provider: AccountProvider;

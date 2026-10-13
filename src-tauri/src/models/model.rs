@@ -41,6 +41,8 @@ pub enum AccountProvider {
     Minimax,
     Qoder,
     QoderCn,
+    Grok,
+    Cline,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

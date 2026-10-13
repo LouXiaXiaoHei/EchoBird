@@ -94,6 +94,24 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
                 saved
             })
             .collect(),
+        Grok => super::grok_accounts::list_saved_accounts()?
+            .into_iter()
+            .map(|a| option(provider, a.id, a.email, a.plan))
+            .collect(),
+        Cline => super::cline_accounts::list_saved_accounts()
+            .await?
+            .into_iter()
+            .map(|a| {
+                let label = if a.email.trim().is_empty() {
+                    a.name
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| a.id.clone())
+                } else {
+                    a.email
+                };
+                option(provider, a.id, label, a.plan)
+            })
+            .collect(),
     })
 }
 
@@ -179,6 +197,8 @@ pub(crate) async fn credentials(
             )
             .await
         }
+        Grok => super::grok_accounts::proxy::credentials(&source.account_id, force_refresh).await,
+        Cline => super::cline_accounts::proxy_credentials(&source.account_id, force_refresh).await,
     }
 }
 
@@ -218,6 +238,17 @@ pub(crate) async fn credentials_after_rejection(
             .await
         }
         Kilo | Copilot => credentials(source, true).await,
+        Grok => {
+            super::grok_accounts::proxy::after_rejection(&source.account_id, rejected_credentials)
+                .await
+        }
+        Cline => {
+            super::cline_accounts::proxy_credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
         Minimax => {
             minimax_accounts::credentials_after_rejection(&source.account_id, rejected_credentials)
                 .await
@@ -300,6 +331,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
     let secret = credentials(source, false).await?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|_| "accountError.network")?;
     let result = super::account_proxy::list_models(source.provider, secret.clone(), &client).await;
@@ -312,6 +344,8 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
                     | AccountProvider::Minimax
                     | AccountProvider::Qoder
                     | AccountProvider::QoderCn
+                    | AccountProvider::Grok
+                    | AccountProvider::Cline
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
             let refreshed = credentials_after_rejection(source, &secret).await?;

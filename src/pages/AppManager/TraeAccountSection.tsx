@@ -36,7 +36,7 @@ export const TraeAccountSection: React.FC = () => {
   );
   const credits = (value?: number | null, currency?: string | null) =>
     value == null
-      ? '—'
+      ? t('model.noUsageData')
       : `${currency === 'USD' ? '$' : ''}${value.toLocaleString(undefined, { maximumFractionDigits: 2, useGrouping: false })}`;
   return (
     <section>
@@ -111,88 +111,101 @@ export const TraeAccountSection: React.FC = () => {
                   ) : undefined
                 }
                 secondary={
-                  <span
-                    className={`flex h-[16px] min-w-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap ${!grouped ? 'overflow-hidden' : ''} ${selectedTool === 'traecn' && subscriptionEndAt ? '-mr-10 w-[calc(100%+40px)] flex-shrink-0' : grouped ? 'w-full' : ''}`}
-                  >
-                    {grouped ? (
-                      <>
-                        {hasBase && (
-                          <span
-                            className={`flex items-center gap-1 ${baseDate != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
-                            aria-label={t('agent.baseCredits')}
-                          >
-                            <span className="flex-shrink-0">{credits(account.baseRemaining)}</span>
-                            {baseDate != null && (
-                              <span
-                                className={`min-w-0 w-0 flex-1 truncate [&>span]:block [&>span]:truncate [&>span]:text-left ${separateDates ? '[&>span]:!text-[10px]' : ''}`}
-                              >
-                                <QuotaCountdown
-                                  resetAt={baseDate}
-                                  compact
-                                  label={t('agent.baseCreditsReset')}
-                                />
+                  !grouped &&
+                  account.remaining == null &&
+                  !(
+                    selectedTool === 'traecn' &&
+                    !dailyClaimed &&
+                    account.rewardEnabled === true
+                  ) ? undefined : (
+                    <span
+                      className={`flex h-[16px] min-w-0 items-center gap-1 text-[11px] font-semibold whitespace-nowrap ${!grouped ? 'overflow-hidden' : ''} ${selectedTool === 'traecn' && subscriptionEndAt ? '-mr-10 w-[calc(100%+40px)] flex-shrink-0' : grouped ? 'w-full' : ''}`}
+                    >
+                      {grouped ? (
+                        <>
+                          {hasBase && (
+                            <span
+                              className={`flex items-center gap-1 ${baseDate != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
+                              aria-label={t('agent.baseCredits')}
+                            >
+                              <span className="flex-shrink-0">
+                                {credits(account.baseRemaining)}
                               </span>
-                            )}
-                          </span>
-                        )}
-                        {hasAddon && (
-                          <span className="flex-shrink-0" aria-label={t('agent.purchasedCredits')}>
-                            {credits(account.addonRemaining)}
-                          </span>
-                        )}
-                        {hasReward && (
-                          <span
-                            className={`flex items-center gap-1 ${rewardNextExpiryAt != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
-                            aria-label={t('agent.rewardCredits')}
-                          >
-                            <span className="flex-shrink-0">
-                              {credits(account.rewardRemaining)}
+                              {baseDate != null && (
+                                <span
+                                  className={`min-w-0 w-0 flex-1 truncate [&>span]:block [&>span]:truncate [&>span]:text-left ${separateDates ? '[&>span]:!text-[10px]' : ''}`}
+                                >
+                                  <QuotaCountdown
+                                    resetAt={baseDate}
+                                    compact
+                                    label={t('agent.baseCreditsReset')}
+                                  />
+                                </span>
+                              )}
                             </span>
-                            {rewardNextExpiryAt != null && (
-                              <span
-                                className={`min-w-0 w-0 flex-1 truncate [&>span]:block [&>span]:truncate [&>span]:text-left ${separateDates ? '[&>span]:!text-[10px]' : ''}`}
-                              >
-                                <QuotaCountdown
-                                  resetAt={rewardNextExpiryAt}
-                                  compact
-                                  label={t('agent.rewardCreditsNextExpiry')}
-                                />
+                          )}
+                          {hasAddon && (
+                            <span
+                              className="flex-shrink-0"
+                              aria-label={t('agent.purchasedCredits')}
+                            >
+                              {credits(account.addonRemaining)}
+                            </span>
+                          )}
+                          {hasReward && (
+                            <span
+                              className={`flex items-center gap-1 ${rewardNextExpiryAt != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
+                              aria-label={t('agent.rewardCredits')}
+                            >
+                              <span className="flex-shrink-0">
+                                {credits(account.rewardRemaining)}
                               </span>
-                            )}
-                          </span>
-                        )}
-                      </>
-                    ) : (
-                      <span
-                        className="flex flex-shrink-0 items-center gap-1"
-                        aria-label={t(
-                          selectedTool === 'trae' ? 'accountCenter.quota' : 'agent.credits'
-                        )}
-                      >
-                        {credits(
-                          account.remaining,
-                          selectedTool === 'trae' ? account.currency : undefined
-                        )}
-                        {account.remaining != null && (account.total ?? 0) > 0 && (
-                          <QuotaCountdown
-                            resetAt={account.expiresAt}
-                            compact
-                            label={t('accountCenter.reset')}
-                          />
-                        )}
-                      </span>
-                    )}
-                    {selectedTool === 'traecn' &&
-                      !dailyClaimed &&
-                      account.rewardEnabled === true && (
+                              {rewardNextExpiryAt != null && (
+                                <span
+                                  className={`min-w-0 w-0 flex-1 truncate [&>span]:block [&>span]:truncate [&>span]:text-left ${separateDates ? '[&>span]:!text-[10px]' : ''}`}
+                                >
+                                  <QuotaCountdown
+                                    resetAt={rewardNextExpiryAt}
+                                    compact
+                                    label={t('agent.rewardCreditsNextExpiry')}
+                                  />
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </>
+                      ) : (
                         <span
-                          className="flex-shrink-0"
-                          aria-label={t('agent.dailyCreditsUnclaimed')}
+                          className="flex flex-shrink-0 items-center gap-1"
+                          aria-label={t(
+                            selectedTool === 'trae' ? 'accountCenter.quota' : 'agent.credits'
+                          )}
                         >
-                          {t('agent.dailyCreditsUnclaimed')}
+                          {credits(
+                            account.remaining,
+                            selectedTool === 'trae' ? account.currency : undefined
+                          )}
+                          {account.remaining != null && (account.total ?? 0) > 0 && (
+                            <QuotaCountdown
+                              resetAt={account.expiresAt}
+                              compact
+                              label={t('accountCenter.reset')}
+                            />
+                          )}
                         </span>
                       )}
-                  </span>
+                      {selectedTool === 'traecn' &&
+                        !dailyClaimed &&
+                        account.rewardEnabled === true && (
+                          <span
+                            className="flex-shrink-0"
+                            aria-label={t('agent.dailyCreditsUnclaimed')}
+                          >
+                            {t('agent.dailyCreditsUnclaimed')}
+                          </span>
+                        )}
+                    </span>
+                  )
                 }
               />
             );

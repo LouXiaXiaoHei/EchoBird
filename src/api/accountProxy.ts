@@ -12,6 +12,8 @@ export const accountProxyProviders: { id: AccountProvider; name: string; icon: s
   { id: 'minimax', name: 'MiniMax', icon: 'minimaxdesktop.svg' },
   { id: 'qoder', name: 'Qoder', icon: 'qoder.svg' },
   { id: 'qoderCn', name: 'Qoder CN', icon: 'qoder.svg' },
+  { id: 'grok', name: 'Grok Build', icon: 'grok.svg' },
+  { id: 'cline', name: 'Cline', icon: 'clinedesktop.png' },
   { id: 'kilo', name: 'Kilo', icon: 'kilodesktop.png' },
   { id: 'copilot', name: 'GitHub Copilot', icon: 'copilotdesktop.png' },
 ];

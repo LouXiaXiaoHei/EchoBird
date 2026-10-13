@@ -34,15 +34,15 @@ export const ClientAccountSection: React.FC<{
                   onRefresh={() => void kiloAccounts.refresh(account)}
                   onDelete={() => void kiloAccounts.remove(account)}
                   secondary={
-                    <span className="text-[12px] font-semibold leading-[16px]">
-                      {account.balance == null
-                        ? '—'
-                        : new Intl.NumberFormat(undefined, {
-                            style: 'currency',
-                            currency: 'USD',
-                            maximumFractionDigits: 2,
-                          }).format(account.balance)}
-                    </span>
+                    account.balance == null ? undefined : (
+                      <span className="text-[12px] font-semibold leading-[16px]">
+                        {new Intl.NumberFormat(undefined, {
+                          style: 'currency',
+                          currency: 'USD',
+                          maximumFractionDigits: 2,
+                        }).format(account.balance)}
+                      </span>
+                    )
                   }
                 />
               ))
@@ -58,11 +58,11 @@ export const ClientAccountSection: React.FC<{
                   onRefresh={() => void copilotAccounts.refresh(account)}
                   onDelete={() => void copilotAccounts.remove(account)}
                   secondary={
-                    <span className="text-[12px] font-semibold leading-[16px]">
-                      {account.remaining == null
-                        ? '—'
-                        : new Intl.NumberFormat().format(account.remaining)}
-                    </span>
+                    account.remaining == null ? undefined : (
+                      <span className="text-[12px] font-semibold leading-[16px]">
+                        {new Intl.NumberFormat().format(account.remaining)}
+                      </span>
+                    )
                   }
                 />
               ))}

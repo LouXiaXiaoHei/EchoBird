@@ -4,11 +4,11 @@ import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimiti
 import { DeepSeekAccountSection } from './DeepSeekAccountSection';
 import { GrokAccountSection } from './GrokAccountSection';
 import { ClientAccountSection } from './ClientAccountSection';
+import { ClineAccountSection } from './ClineAccountSection';
 import { ManusAccountSection } from './ManusAccountSection';
 import { ModelSwitchDivider } from './ModelSwitchDivider';
 import { QuotaCountdown } from './QuotaCountdown';
 import { codexPlanLabel } from './codexPlanLabel';
-import { isFreePlan } from './accountPlanLabel';
 import { WorkBuddyAccountSection } from './WorkBuddyAccountSection';
 import { TraeAccountSection } from './TraeAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
@@ -742,6 +742,8 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
     selectedTool === 'chatgptdesktop' ||
     selectedTool === 'claudecode' ||
     selectedTool === 'grok' ||
+    selectedTool === 'cline' ||
+    selectedTool === 'clinedesktop' ||
     selectedTool === 'kilo' ||
     selectedTool === 'kilodesktop' ||
     selectedTool === 'copilot' ||
@@ -906,10 +908,8 @@ export const CodexAccountSection: React.FC<{ showDivider?: boolean }> = ({
                 onRefresh={() => void refreshCodexAccountQuota(account)}
                 onDelete={() => void deleteCodexAccount(account)}
                 secondary={
-                  isFreePlan(planLabel) &&
-                  !account.quotaWindows?.length &&
-                  quotaPercent == null &&
-                  quotaResetAt == null ? undefined : account.quotaWindows &&
+                  !account.quotaWindows?.some((window) => window.remainingPercent != null) &&
+                  quotaPercent == null ? undefined : account.quotaWindows &&
                     account.quotaWindows.length > 1 ? (
                     <span className="flex h-[16px] min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap text-[11px] font-semibold leading-[16px] text-cyber-text">
                       {account.quotaWindows.map((window, index) => (
@@ -1105,6 +1105,9 @@ export const AppManagerPanel: React.FC = () => {
               )}
               {selectedTool === 'dsh' && <DeepSeekAccountSection showDivider={hasVisibleModels} />}
               {selectedTool === 'grok' && <GrokAccountSection showDivider={hasVisibleModels} />}
+              {(selectedTool === 'cline' || selectedTool === 'clinedesktop') && (
+                <ClineAccountSection showDivider={hasVisibleModels} />
+              )}
               {(selectedTool === 'kilo' || selectedTool === 'kilodesktop') && (
                 <ClientAccountSection provider="kilo" showDivider={hasVisibleModels} />
               )}
@@ -1194,6 +1197,7 @@ export const AppManagerBottom: React.FC = () => {
     qoderAccounts,
     deepSeekAccounts,
     grokAccounts,
+    clineAccounts,
     kiloAccounts,
     copilotAccounts,
     manusAccounts,
@@ -1229,6 +1233,7 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'claudedesktop' && !!claudeDesktopAccounts.selectedId) ||
     (selectedTool === 'dsh' && !!deepSeekAccounts.selectedId) ||
     (selectedTool === 'grok' && !!grokAccounts.selectedId) ||
+    (['cline', 'clinedesktop'].includes(selectedTool ?? '') && !!clineAccounts.selectedId) ||
     ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && !!kiloAccounts.selectedId) ||
     ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') &&
       !!copilotAccounts.selectedId) ||
@@ -1256,6 +1261,7 @@ export const AppManagerBottom: React.FC = () => {
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||
+    (['cline', 'clinedesktop'].includes(selectedTool ?? '') && clineAccounts.busy) ||
     ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && kiloAccounts.busy) ||
     ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') && copilotAccounts.busy) ||
     (selectedTool === 'manus' && manusAccounts.busy) ||

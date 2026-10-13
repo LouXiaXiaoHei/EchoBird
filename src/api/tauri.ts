@@ -14,6 +14,7 @@ import type { DetectedTool, ApplyModelInput, AppSettings } from './types';
 export * from './models';
 export * from './accountProxy';
 export * from './clientAccounts';
+export * from './cline';
 export * from './minimax';
 export * from './qoder';
 export * from './localServer';

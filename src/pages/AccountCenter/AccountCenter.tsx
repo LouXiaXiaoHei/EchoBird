@@ -64,6 +64,9 @@ export function AccountCard({
     account.claimStatusExpiresAt == null || account.claimStatusExpiresAt * 1000 > now;
   const claimed = currentClaimStatus && (account.dailyClaimed ?? dailyClaimed);
   const name = [provider.name, account.detail].filter(Boolean).join(' · ');
+  const missingUsage = account.metrics.every(
+    (metric) => metric.value === '—' && metric.percent == null && metric.resetAt == null
+  );
   const singleMetric = account.metrics.length === 1;
   const balanceOnly =
     singleMetric &&
@@ -145,8 +148,11 @@ export function AccountCard({
             <span role="status" className="text-sm font-semibold text-cyber-error">
               {t('accountCenter.authFailed')}
             </span>
-          ) : account.metrics.length === 0 ? (
-            <span role="status" className="text-center text-sm text-cyber-text-secondary">
+          ) : missingUsage ? (
+            <span
+              role="status"
+              className={`${evenlySpaced ? 'row-span-2 flex h-full items-center justify-center ' : ''}text-center text-sm text-cyber-text-secondary`}
+            >
               {t('model.noUsageData')}
             </span>
           ) : (
@@ -201,10 +207,10 @@ export function AccountCard({
                     </span>
                     <span
                       aria-label={hideLabel ? `${metric.label} ${metric.value}` : undefined}
-                      className={`block flex-shrink-0 ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null ? colors.text : ''}`}
+                      className={`block ${metric.value === '—' ? 'min-w-0 truncate' : 'flex-shrink-0'} ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null ? colors.text : ''}`}
                     >
                       {loneBalance && <span className="mr-2">{metric.label}</span>}
-                      {metric.value}
+                      {metric.value === '—' ? t('model.noUsageData') : metric.value}
                     </span>
                   </div>
                   {metric.percent != null ? (
@@ -221,7 +227,7 @@ export function AccountCard({
                         style={{ width: `${Math.max(0, Math.min(100, metric.percent))}%` }}
                       />
                     </div>
-                  ) : metric.showProgress && !balanceOnly ? (
+                  ) : metric.showProgress && metric.value !== '—' && !balanceOnly ? (
                     <div
                       aria-hidden="true"
                       className="-my-px h-0 flex-shrink-0 rounded-full border-t-[6px] border-cyber-border"

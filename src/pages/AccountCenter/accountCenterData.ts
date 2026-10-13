@@ -16,6 +16,7 @@ import {
   qoderSubscriptionExpiry,
 } from '../AppManager/qoderAccountDisplay';
 import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
+import { clineBalanceLabel } from '../AppManager/clineAccountDisplay';
 
 export interface AccountMetric {
   label: string;
@@ -584,6 +585,27 @@ export function accountCenterProviders(
         ],
       })
     ),
+    {
+      ...provider(
+        'cline',
+        'Cline',
+        '/icons/tools/clinedesktop.png',
+        ['cline', 'clinedesktop'],
+        context.clineAccounts,
+        (account) => ({
+          identity: account.email || account.name || account.id,
+          plan: account.plan,
+          subscriptionEndAt: account.subscriptionEndAt ?? undefined,
+          metrics: [
+            { label: t('model.balance'), value: clineBalanceLabel(account.balanceMicros, locale) },
+          ],
+        })
+      ),
+      waitingLabel:
+        context.clineAccounts.busy && context.clineAccounts.login?.userCode
+          ? `${context.clineAccounts.login.userCode} · ${t('agent.waitingForBrowser')}`
+          : undefined,
+    },
     provider(
       'copilot',
       'GitHub Copilot',

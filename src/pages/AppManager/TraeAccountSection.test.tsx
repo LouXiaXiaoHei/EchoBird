@@ -74,8 +74,10 @@ describe('TRAE account rows', () => {
     const workOnly = fixture([{ ...saved, remaining: null, workRemaining: 0 }]).html();
     expect(workOnly).not.toContain('agent.rewardCredits');
     expect(workOnly).not.toContain('agent.generalCredits');
-    expect(workOnly).toContain('>—</span>');
-    expect(fixture([{ ...saved, plan: 'Free', remaining: null }]).html()).toContain('>—</span>');
+    expect(workOnly).toContain('model.noUsageData');
+    expect(fixture([{ ...saved, plan: 'Free', remaining: null }]).html()).toContain(
+      'model.noUsageData'
+    );
   });
 
   it('uses the shared credit row for confirmed base, purchased and daily reward balances', () => {
@@ -146,7 +148,7 @@ describe('TRAE account rows', () => {
     expect(html).not.toContain('agent.credits');
     expect(
       fixture([{ ...saved, edition: 'trae', remaining: null, currency: 'USD' }]).html()
-    ).toContain('>—</span>');
+    ).toContain('model.noUsageData');
   });
 
   it('keeps subscription expiry beside the plan and each balance deadline with its own amount', async () => {

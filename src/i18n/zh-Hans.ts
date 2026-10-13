@@ -98,6 +98,7 @@ const zhHans: Partial<Translations> = {
   'accountProxy.account': '账号',
   'accountProxy.accountCountOne': '{count} 个账号',
   'accountProxy.accountCountOther': '{count} 个账号',
+  'accountProxy.highRisk': '高风险',
   'accountProxy.selectRequired': '请选择账号和模型。',
   'accountProxy.riskReadPrefix': '我已阅读',
   'accountProxy.riskNotice': '风险须知',

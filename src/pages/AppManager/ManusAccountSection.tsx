@@ -35,11 +35,7 @@ export const ManusAccountSection: React.FC<{ tool?: 'manus' | 'cue' }> = ({ tool
               !isFreePlan(account.plan) && 'subscriptionEndAt' in account
                 ? account.subscriptionEndAt
                 : null;
-            const missingWeekly =
-              weekly &&
-              isFreePlan(account.plan) &&
-              weekly.remainingPercent == null &&
-              weekly.resetAt == null;
+            const missingWeekly = weekly && weekly.remainingPercent == null;
             return (
               <AccountSectionRow
                 key={account.id}

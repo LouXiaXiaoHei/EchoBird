@@ -53,7 +53,10 @@ function row(provider: AccountProvider) {
     .find((button) => button.props['aria-label']?.endsWith(`: ${name}`))!;
 }
 function count(provider: AccountProvider) {
-  return row(provider).findAllByType('span')[1].children.join('');
+  return row(provider)
+    .findAllByType('span')
+    .find((span) => String(span.props.className).includes('tabular-nums'))!
+    .children.join('');
 }
 beforeEach(async () => {
   locale = 'zh-Hans';
@@ -88,6 +91,14 @@ it('updates zero, singular, plural and unknown account counts across all languag
       ...expected,
       '—',
     ]);
+    for (const provider of api.accountProxyProviders) {
+      const labels = row(provider.id)
+        .findAllByType('span')
+        .filter((span) => span.children.includes(translate('accountProxy.highRisk', language)));
+      expect(labels).toHaveLength(
+        ['antigravity', 'qoder', 'qoderCn'].includes(provider.id) ? 1 : 0
+      );
+    }
   }
   expect(api.listProxyAccounts).toHaveBeenCalledTimes(reads);
   expect(api.getAccountProxyModels).not.toHaveBeenCalled();

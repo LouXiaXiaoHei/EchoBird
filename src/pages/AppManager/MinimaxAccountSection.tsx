@@ -81,40 +81,44 @@ export function MinimaxAccountSection({ showDivider = true }: { showDivider?: bo
               />
             }
             secondary={
-              <span className="flex h-4 min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] font-semibold">
-                {account.quota?.windows.length ? (
-                  account.quota.windows.map((window, index) => (
-                    <span key={index} className="flex flex-shrink-0 items-center gap-1">
-                      <span>{window.name}</span>
-                      <span>
-                        {Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)))}%
+              !account.quota?.windows.length &&
+              account.quota?.credits == null &&
+              !minimaxCreditBuckets(account.quota).length ? undefined : (
+                <span className="flex h-4 min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] font-semibold">
+                  {account.quota?.windows.length ? (
+                    account.quota.windows.map((window, index) => (
+                      <span key={index} className="flex flex-shrink-0 items-center gap-1">
+                        <span>{window.name}</span>
+                        <span>
+                          {Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)))}%
+                        </span>
+                        <QuotaCountdown resetAt={window.resetsAt} compact small />
                       </span>
-                      <QuotaCountdown resetAt={window.resetsAt} compact small />
-                    </span>
-                  ))
-                ) : minimaxCreditBuckets(account.quota).length ? (
-                  minimaxCreditBuckets(account.quota).map((bucket) => (
-                    <span key={bucket.label} className="flex flex-shrink-0 items-center gap-1">
-                      <span aria-label={t(bucket.label)}>
-                        {bucket.remaining == null
-                          ? '—'
-                          : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
-                              bucket.remaining
-                            )}
+                    ))
+                  ) : minimaxCreditBuckets(account.quota).length ? (
+                    minimaxCreditBuckets(account.quota).map((bucket) => (
+                      <span key={bucket.label} className="flex flex-shrink-0 items-center gap-1">
+                        <span aria-label={t(bucket.label)}>
+                          {bucket.remaining == null
+                            ? t('model.noUsageData')
+                            : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
+                                bucket.remaining
+                              )}
+                        </span>
+                        <QuotaCountdown resetAt={bucket.expiresAt} compact small />
                       </span>
-                      <QuotaCountdown resetAt={bucket.expiresAt} compact small />
+                    ))
+                  ) : (
+                    <span>
+                      {account.quota?.credits == null
+                        ? t('model.noUsageData')
+                        : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
+                            account.quota.credits
+                          )}
                     </span>
-                  ))
-                ) : (
-                  <span>
-                    {account.quota?.credits == null
-                      ? '—'
-                      : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
-                          account.quota.credits
-                        )}
-                  </span>
-                )}
-              </span>
+                  )}
+                </span>
+              )
             }
           />
         ))}

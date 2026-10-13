@@ -323,6 +323,24 @@ describe('Direct route card model selection', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([undefined, '', '   ', 'Pro'])('shows only an actual Cline plan: %s', async (plan) => {
+    savedModels = [{ ...account, accountSource: { provider: 'cline', accountId: 'account-one' } }];
+    savedOrder = [account.internalId];
+    vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+      {
+        source: { provider: 'cline', accountId: 'account-one' },
+        label: 'cline@example.com',
+        plan,
+      },
+    ]);
+    await open();
+    const content = textOf(card('account-old'));
+    expect(content).toContain('cline@example.com');
+    expect(content).not.toContain('—');
+    expect(content.includes('Pro')).toBe(Boolean(plan?.trim()));
+    expectNoPassiveChanges();
+  });
+
   it('renders readable Qoder labels while keeping native selections and region caches unchanged', async () => {
     savedModels = [
       { ...account, modelId: 'cmodel', accountSource: { provider: 'qoder', accountId: 'shared' } },
@@ -629,9 +647,10 @@ describe('Direct route card model selection', () => {
     expect(titles()).toContain('ChatGPT / Codex');
     expect(titles()).not.toContain('Account provider');
     expect(titles().join(' ')).not.toContain('account-one');
+    expect(textOf(card('account-old'))).not.toContain('—');
     await act(async () => pending.resolve([]));
     expect(titles()).toContain('ChatGPT / Codex');
-    expect(textOf(card('account-old'))).toContain('—');
+    expect(textOf(card('account-old'))).not.toContain('—');
     expect(titles().join(' ')).not.toContain('account-one');
     expectNoPassiveChanges();
   });

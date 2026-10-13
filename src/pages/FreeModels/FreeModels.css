@@ -94,12 +94,14 @@
 }
 
 .free-model-route-glow {
+  --free-model-route-glow-span: 0.07;
   fill: none;
   stroke: rgb(var(--free-model-route-rgb));
   stroke-width: 3.8;
   stroke-linecap: round;
   stroke-linejoin: round;
-  stroke-dasharray: 0.07 0.93;
+  stroke-dasharray: calc(var(--free-model-route-glow-span) * 1px)
+    calc(1px - var(--free-model-route-glow-span) * 1px);
   stroke-dashoffset: 0;
   opacity: 0;
   filter: drop-shadow(0 0 3px rgb(var(--free-model-route-rgb)))
@@ -253,12 +255,12 @@
     opacity: 0.95;
   }
   60% {
-    stroke-dashoffset: -0.93;
+    stroke-dashoffset: calc(var(--free-model-route-glow-span) * 1px - 1px);
     opacity: 0.95;
   }
   68%,
   100% {
-    stroke-dashoffset: -0.93;
+    stroke-dashoffset: calc(var(--free-model-route-glow-span) * 1px - 1px);
     opacity: 0;
   }
 }

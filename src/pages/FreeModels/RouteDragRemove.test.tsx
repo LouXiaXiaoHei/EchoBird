@@ -329,7 +329,7 @@ describe('Remove router candidates by dragging', () => {
     expectNoRemoval();
   });
 
-  async function openGeometry(count: number, width = 800) {
+  async function openGeometry(count: number, width = 800, measuredLength = 354) {
     savedModels = Array.from({ length: count }, (_, index) => ({
       internalId: `geometry-${index}`,
       name: `Provider ${index}`,
@@ -340,6 +340,8 @@ describe('Remove router candidates by dragging', () => {
     }));
     savedOrder = savedModels.map((model) => model.internalId);
     let stageWidth = width;
+    const getTotalLength = vi.fn().mockReturnValue(measuredLength);
+    const glowStyle = new Map<string, string>();
     const frames = new Map<number, FrameRequestCallback>();
     const observers = new Set<() => void>();
     let frameId = 0;
@@ -386,6 +388,11 @@ describe('Remove router candidates by dragging', () => {
     await act(async () => {
       renderer = create(app(), {
         createNodeMock: (element) => {
+          if (element.type === 'path' && element.props.className === 'free-model-route-glow')
+            return {
+              getTotalLength,
+              style: { setProperty: (key: string, value: string) => glowStyle.set(key, value) },
+            };
           if (element.type !== 'div') return null;
           const className = String(element.props.className);
           if (className.includes('relative overflow-hidden')) {
@@ -412,6 +419,8 @@ describe('Remove router candidates by dragging', () => {
     await flushFrames();
     return {
       flushFrames,
+      getTotalLength,
+      glowStyle,
       resize: async (nextWidth: number) => {
         stageWidth = nextWidth;
         await act(async () => [...observers].forEach((callback) => callback()));
@@ -426,6 +435,56 @@ describe('Remove router candidates by dragging', () => {
       .filter((node) => node.props.className === 'free-model-route-path')
       .map((node) => node.props.d as string);
   }
+
+  it('keeps the short activity beam 20px long and remeasures after resizing without account or model changes', async () => {
+    enabled = true;
+    vi.mocked(api.getSmartRouterActivity).mockResolvedValue({
+      candidateId: 'geometry-1',
+      active: true,
+      sequence: 1,
+      updatedAtMs: Date.now(),
+    });
+    const geometry = await openGeometry(3, 800, 43);
+    const span = () => Number(geometry.glowStyle.get('--free-model-route-glow-span'));
+    const glow = () => renderer.root.findByProps({ className: 'free-model-route-glow' });
+    expect(glow().props.d).toBe('M 400 201 V 172 V 158');
+    expect(glow().props.pathLength).toBe('1');
+    expect(geometry.getTotalLength).toHaveBeenCalled();
+    expect(span() * 43).toBeCloseTo(20);
+    const measurements = geometry.getTotalLength.mock.calls.length;
+    const reads = [
+      api.getSmartRouterConfig,
+      api.getSmartRouterCandidates,
+      api.getSmartRouterActivity,
+      api.getFreeModelDirectory,
+      api.getCachedFreeModelDirectory,
+    ].map((read) => [read, vi.mocked(read).mock.calls.length] as const);
+    geometry.getTotalLength.mockReturnValue(159);
+    await geometry.resize(240);
+    expect(glow().props.d).toBe('M 120 317 V 287 V 201 V 158');
+    expect(geometry.getTotalLength.mock.calls.length).toBeGreaterThan(measurements);
+    expect(span() * 159).toBeCloseTo(20);
+    for (const [read, calls] of reads) expect(read).toHaveBeenCalledTimes(calls);
+    expect(api.queryModelUsage).not.toHaveBeenCalled();
+    expect(nexus.updateUserModel).not.toHaveBeenCalled();
+    expectNoRemoval();
+  });
+
+  it('retains the original seven-percent activity beam on a longer route', async () => {
+    enabled = true;
+    vi.mocked(api.getSmartRouterActivity).mockResolvedValue({
+      candidateId: 'geometry-3',
+      active: true,
+      sequence: 1,
+      updatedAtMs: Date.now(),
+    });
+    const geometry = await openGeometry(6);
+    expect(geometry.getTotalLength).toHaveBeenCalled();
+    expect(Number(geometry.glowStyle.get('--free-model-route-glow-span'))).toBe(0.07);
+    expect(api.queryModelUsage).not.toHaveBeenCalled();
+    expect(nexus.updateUserModel).not.toHaveBeenCalled();
+    expectNoRemoval();
+  });
 
   it('draws each bus half once for three columns while preserving a complete lower-row activity path', async () => {
     enabled = true;

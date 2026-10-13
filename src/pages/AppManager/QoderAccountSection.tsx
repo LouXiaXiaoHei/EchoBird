@@ -58,21 +58,21 @@ export function QoderAccountSection() {
               />
             }
             secondary={
-              <span className="flex h-4 items-center gap-1 text-[12px] font-semibold leading-4">
-                <span>
-                  {account.remaining == null
-                    ? '—'
-                    : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
-                        account.remaining
-                      )}
+              account.remaining == null ? undefined : (
+                <span className="flex h-4 items-center gap-1 text-[12px] font-semibold leading-4">
+                  <span>
+                    {new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
+                      account.remaining
+                    )}
+                  </span>
+                  {account.quotaWindows.length === 1 && (
+                    <QuotaCountdown
+                      resetAt={qoderExpiry(account.quotaWindows[0].expiresAt)}
+                      compact
+                    />
+                  )}
                 </span>
-                {account.quotaWindows.length === 1 && (
-                  <QuotaCountdown
-                    resetAt={qoderExpiry(account.quotaWindows[0].expiresAt)}
-                    compact
-                  />
-                )}
-              </span>
+              )
             }
           />
         ))}
