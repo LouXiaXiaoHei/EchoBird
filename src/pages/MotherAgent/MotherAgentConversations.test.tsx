@@ -198,16 +198,69 @@ describe('Mother Agent reasoning workflow', () => {
     expect(state.reasoningEffort).toBe('xhigh');
   });
 
-  it('snapshots the choice and blocks changes during a run and reset', async () => {
+  it('saves next-turn effort during pending startup and streaming without interrupting the active run', async () => {
+    const startup = deferred<string>();
+    const unlisten = vi.fn();
+    vi.mocked(api.sendAgentMessage).mockReturnValueOnce(startup.promise);
+    vi.mocked(api.listenAgentEvents).mockImplementation(async (handler) => {
+      agentEvent = handler;
+      return unlisten;
+    });
     await mount();
     act(() => state.setReasoningEffort('max'));
     await send('Complex task');
+    const activeRequest = vi.mocked(api.sendAgentMessage).mock.lastCall![0];
+    const originalRequest = { ...activeRequest };
+    const conversation_id = activeSession();
     act(() => state.setReasoningEffort('low'));
-    expect(state.reasoningEffort).toBe('max');
-    expect(api.sendAgentMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ reasoning_effort: 'max' })
-    );
-    emitAgent({ type: 'done', conversation_id: activeSession() });
+    expect(state.reasoningEffort).toBe('low');
+    expect(state.isProcessing).toBe(true);
+    expect(useNavigationStore.getState().agentRunning).toBe(true);
+    await act(async () => startup.resolve('ok'));
+    emitAgent({ type: 'text_delta', text: 'Still working', conversation_id });
+    emitAgent({ type: 'tool_call_start', id: 'tool', name: 'check', conversation_id });
+    act(() => state.setReasoningEffort(undefined));
+    emitAgent({ type: 'tool_call_args', id: 'tool', args: '{}', conversation_id });
+    emitAgent({
+      type: 'tool_result',
+      id: 'tool',
+      output: 'Checked',
+      success: true,
+      conversation_id,
+    });
+    act(() => state.setReasoningEffort('low'));
+    emitAgent({ type: 'text_delta', text: 'Finished', conversation_id });
+    expect(state.chatOutput).toContainEqual({ type: 'assistant', text: 'Still working' });
+    expect(state.chatOutput).toContainEqual({ type: 'assistant', text: 'Finished' });
+    expect(state.chatOutput).toContainEqual({
+      type: 'tool_call',
+      id: 'tool',
+      name: 'check',
+      args: '{}',
+      status: 'done',
+      output: 'Checked',
+    });
+    expect(state.isProcessing).toBe(true);
+    expect(useNavigationStore.getState().agentRunning).toBe(true);
+    expect(api.sendAgentMessage).toHaveBeenCalledOnce();
+    expect(activeRequest).toEqual(originalRequest);
+    expect(activeRequest.reasoning_effort).toBe('max');
+    expect(api.abortAgent).not.toHaveBeenCalled();
+    expect(api.parasiteAbort).not.toHaveBeenCalled();
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+    expect(api.listenAgentEvents).toHaveBeenCalledOnce();
+    expect(unlisten).not.toHaveBeenCalled();
+    emitAgent({ type: 'done', conversation_id });
+    expect(state.isProcessing).toBe(false);
+    await send('Quick follow up');
+    expect(api.sendAgentMessage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('low');
+  });
+
+  it('still blocks effort changes while conversation context is resetting', async () => {
+    await mount();
+    act(() => state.setReasoningEffort('max'));
     const reset = deferred<string>();
     vi.mocked(api.resetAgent).mockReturnValueOnce(reset.promise);
     act(() => {

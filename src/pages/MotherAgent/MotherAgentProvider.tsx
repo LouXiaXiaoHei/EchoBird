@@ -47,6 +47,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     engine: string;
     conversationId?: string;
     requestId: string;
+    reasoningEffort?: ReasoningEffort;
   } | null>(null);
   const resettingRef = useRef(false);
   const [isResetting, setIsResetting] = useState(false);
@@ -94,8 +95,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const savedEffort = reasoningPreferences[reasoningKey];
   const reasoningEffort = reasoningLevels.includes(savedEffort) ? savedEffort : undefined;
   const setReasoningEffort = (effort: ReasoningEffort | undefined) => {
-    if (runningRef.current || resettingRef.current || isProcessing || !reasoningLevels.length)
-      return;
+    if (resettingRef.current || !reasoningLevels.length) return;
     if (effort && !reasoningLevels.includes(effort)) return;
     const next = { ...reasoningPreferences };
     if (effort) next[reasoningKey] = effort;
@@ -500,12 +500,14 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const handleChatSendInternal = useCallback(
     async (message: string, displayText?: string, chips?: BubbleChip[]) => {
       if (resettingRef.current || runningRef.current || isProcessing || !message.trim()) return;
+      // Snapshot for this user message. Changes during the run apply on the next send.
       const run = {
         sessionKey,
         engine: parasiteAgent || 'mother',
         conversationId:
           parasiteAgent && activeConversation.id.startsWith('legacy-') ? undefined : sessionKey,
         requestId: crypto.randomUUID(),
+        reasoningEffort,
       };
       runningRef.current = run;
       setIsProcessing(true);
@@ -578,7 +580,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
           server_ids: selectedServerId === 'local' ? [] : [selectedServerId],
           skills: [],
           locale: locale || undefined,
-          ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+          ...(run.reasoningEffort ? { reasoning_effort: run.reasoningEffort } : {}),
         });
       } catch (e) {
         if (runningRef.current !== run) return;
@@ -715,6 +717,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         selectConversation,
         deleteConversation,
         isProcessing: isProcessing || isResetting,
+        isResetting,
         agentModelData,
         reasoningLevels,
         reasoningEffort,

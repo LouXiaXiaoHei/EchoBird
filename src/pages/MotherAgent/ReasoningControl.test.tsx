@@ -100,7 +100,7 @@ describe('Mother reasoning control', () => {
     expect(focus).toHaveBeenCalledOnce();
   });
 
-  it('closes on pending, page exit, and model or conversation changes', () => {
+  it('closes when disabled for reset, page exit, and model or conversation changes', () => {
     render();
     open();
     render(undefined, true);
@@ -125,13 +125,40 @@ describe('Mother reasoning control', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('uses localized compact labels', async () => {
-    await loadLocale('zh-Hans');
-    locale = 'zh-Hans';
-    render('max');
-    expect(renderer!.root.findByType('button').props['aria-label']).toBe('推理强度: 极致');
-    expect(renderer!.root.findByType('button').children).toEqual(['极致']);
-    open();
-    expect(renderer!.root.findByType('input').props['aria-valuetext']).toBe('极致');
+  it('keeps all localized size labels stable and exposes only the selected label', async () => {
+    const available: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+    for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja']) {
+      await loadLocale(language);
+      locale = language;
+      const choices = [undefined, ...available];
+      const labels = choices.map((effort) =>
+        translate(effort ? `mother.reasoning.${effort}` : 'mother.reasoning.default', locale)
+      );
+      for (const value of choices) {
+        render(value, false, available);
+        const label = translate(
+          value ? `mother.reasoning.${value}` : 'mother.reasoning.default',
+          locale
+        );
+        const button = renderer!.root.findByType('button');
+        expect(button.props['aria-label']).toBe(
+          `${translate('mother.reasoning.title', locale)}: ${label}`
+        );
+        expect(
+          button.findAllByProps({ 'aria-hidden': 'true' }).map((span) => span.children.join(''))
+        ).toEqual(labels);
+        expect(
+          button
+            .findAllByType('span')
+            .filter((span) => !span.props['aria-hidden'])
+            .map((span) => span.children.join(''))
+        ).toEqual([label]);
+      }
+      open();
+      expect(renderer!.root.findByType('input').props['aria-valuetext']).toBe(
+        labels[labels.length - 1]
+      );
+      open();
+    }
   });
 });

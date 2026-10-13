@@ -6,6 +6,7 @@ import * as api from '../../api/tauri';
 import { ConversationList } from './ConversationList';
 import { MotherAgentMain } from './MotherAgentMain';
 import { QuickCommandChips } from './QuickCommandChips';
+import { ChatBubble } from '../../components/chat';
 import type { MotherAgentCtx } from './types';
 
 let state: Partial<MotherAgentCtx>;
@@ -80,6 +81,7 @@ beforeEach(() => {
     selectConversation: vi.fn(),
     deleteConversation: vi.fn(async () => {}),
     isProcessing: false,
+    isResetting: false,
     setChatInput: vi.fn(),
     selectedServerId: 'local',
     models: [],
@@ -97,7 +99,7 @@ beforeEach(() => {
   };
 });
 
-it('closes the actual composer effort popup on pending requests, model changes, and page exit', () => {
+it('keeps the composer effort popup usable while running and closes it on reset, model changes, and page exit', () => {
   state = {
     ...state,
     parasiteAgent: null,
@@ -116,8 +118,20 @@ it('closes the actual composer effort popup on pending requests, model changes, 
   expect(slider()).toHaveLength(1);
   state = { ...state, isProcessing: true };
   act(() => renderer!.update(<MotherAgentMain />));
-  expect(slider()).toHaveLength(0);
+  expect(slider()).toHaveLength(1);
+  expect(
+    renderer!.root.findByProps({ 'aria-label': 'Reasoning effort: High' }).props.disabled
+  ).toBe(false);
+  act(() => slider()[0].props.onChange({ currentTarget: { value: '1' } }));
+  expect(state.setReasoningEffort).toHaveBeenCalledExactlyOnceWith('low');
+  state.setReasoningEffort = vi.fn();
   state = { ...state, isProcessing: false };
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(1);
+  state = { ...state, isResetting: true };
+  act(() => renderer!.update(<MotherAgentMain />));
+  expect(slider()).toHaveLength(0);
+  state = { ...state, isResetting: false };
   act(() => renderer!.update(<MotherAgentMain />));
   expect(slider()).toHaveLength(0);
   open();
@@ -265,12 +279,9 @@ describe('Mother Agent welcome screen', () => {
     act(() => {
       vi.advanceTimersByTime(300);
     });
-    expect(
-      renderer!.root
-        .findAllByType('span')
-        .map((span) => span.children)
-        .flat()
-    ).toHaveLength(30);
+    expect(renderer!.root.findAllByType(ChatBubble).map((bubble) => bubble.props.content)).toEqual(
+      messages.slice(30).map((message) => message.text)
+    );
     expect(api.getMotherHints).not.toHaveBeenCalled();
   });
 });

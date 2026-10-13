@@ -39,7 +39,7 @@ export function ReasoningControl({ levels, value, disabled, onChange }: Props) {
   }, [isOpen]);
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative shrink-0">
       <button
         ref={triggerRef}
         type="button"
@@ -48,9 +48,18 @@ export function ReasoningControl({ levels, value, disabled, onChange }: Props) {
         aria-expanded={isOpen && !unavailable}
         aria-haspopup="dialog"
         onClick={() => !unavailable && setIsOpen((open) => !open)}
-        className={`px-2 py-1 text-xs font-mono rounded-button border border-cyber-border transition-colors hover:bg-cyber-surface disabled:opacity-50 ${value === 'max' ? 'text-cyber-accent' : 'text-cyber-text-secondary'}`}
+        className={`inline-grid whitespace-nowrap px-2 py-1 text-xs font-mono rounded-button border border-cyber-border transition-colors hover:bg-cyber-surface disabled:opacity-50 ${value === 'max' ? 'text-cyber-accent' : 'text-cyber-text-secondary'}`}
       >
-        {label}
+        {choices.map((effort) => (
+          <span
+            key={effort || 'default'}
+            aria-hidden="true"
+            className="invisible col-start-1 row-start-1"
+          >
+            {t(effort ? `mother.reasoning.${effort}` : 'mother.reasoning.default')}
+          </span>
+        ))}
+        <span className="col-start-1 row-start-1">{label}</span>
       </button>
       {isOpen && !unavailable && (
         <div

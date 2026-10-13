@@ -44,6 +44,7 @@ export interface MotherAgentCtx {
   deleteConversation: (id: string) => Promise<void>;
   agentState: string;
   isProcessing: boolean;
+  isResetting: boolean;
   agentModelData: ModelConfig | undefined;
   reasoningLevels: ReasoningEffort[];
   reasoningEffort: ReasoningEffort | undefined;

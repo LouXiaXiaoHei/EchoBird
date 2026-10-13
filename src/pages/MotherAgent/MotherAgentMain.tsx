@@ -27,6 +27,7 @@ export function MotherAgentMain() {
     setChatInput,
     chatOutput,
     isProcessing,
+    isResetting,
     agentModelData: _agentModelData,
     reasoningLevels,
     reasoningEffort,
@@ -475,12 +476,12 @@ export function MotherAgentMain() {
                 _agentModelData?.anthropicUrl,
                 _agentModelData?.scope,
                 activeConversationId,
-                isProcessing,
+                isResetting,
                 isMotherActive,
               ])}
               levels={reasoningLevels || []}
               value={reasoningEffort}
-              disabled={isProcessing || !isMotherActive}
+              disabled={isResetting || !isMotherActive}
               onChange={setReasoningEffort}
             />
             {isProcessing ? (
