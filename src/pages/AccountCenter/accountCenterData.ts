@@ -3,7 +3,18 @@ import type { ManagedAccount } from '../AppManager/useManagedAccounts';
 import type { AntigravityQuota, TraeAccount, WorkBuddyAccount } from '../../api/tauri';
 import type { TKey } from '../../i18n';
 import { codexPlanLabel } from '../AppManager/codexPlanLabel';
-import { isFreePlan } from '../AppManager/accountPlanLabel';
+import { isFreePlan, minimaxPlanLabel, qoderPlanLabel } from '../AppManager/accountPlanLabel';
+import {
+  MINIMAX_REWARD_CACHE_SECONDS,
+  minimaxCreditBuckets,
+  minimaxRewardStatus,
+} from '../AppManager/minimaxAccountDisplay';
+import {
+  qoderExpiry,
+  qoderQuotaLabel,
+  qoderRewardStatus,
+  qoderSubscriptionExpiry,
+} from '../AppManager/qoderAccountDisplay';
 import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
 
 export interface AccountMetric {
@@ -28,6 +39,8 @@ export interface AccountCardData {
   claim?: () => Promise<unknown>;
   claimDisabled?: boolean;
   dailyClaimedAt?: number | null;
+  dailyClaimed?: boolean;
+  claimStatusExpiresAt?: number;
   showUnclaimed?: boolean;
   remove: () => void;
 }
@@ -141,6 +154,8 @@ export function accountCenterProviders(
       | 'claim'
       | 'claimDisabled'
       | 'dailyClaimedAt'
+      | 'dailyClaimed'
+      | 'claimStatusExpiresAt'
       | 'showUnclaimed'
     >
   ): AccountProvider => ({
@@ -390,6 +405,80 @@ export function accountCenterProviders(
         plan: account.usage?.plan,
         metrics: [quota(account.usage?.remainingPercent, account.usage?.resetAt)],
       })
+    ),
+    provider(
+      'minimax',
+      'MiniMax',
+      '/icons/tools/minimaxdesktop.svg',
+      ['minimaxcode', 'minimaxdesktop'],
+      context.minimaxAccounts,
+      (account) => ({
+        identity: account.email,
+        detail: t(account.region === 'cn' ? 'agent.minimaxRegionCn' : 'agent.minimaxRegionGlobal'),
+        plan: minimaxPlanLabel(account.plan),
+        subscriptionEndAt: isFreePlan(minimaxPlanLabel(account.plan))
+          ? undefined
+          : account.plan
+            ? (account.subscriptionEndAt ?? null)
+            : undefined,
+        claim: () => context.minimaxAccounts.claimDaily(account),
+        dailyClaimed: minimaxRewardStatus(account) === 'claimed',
+        claimDisabled: minimaxRewardStatus(account) === 'unavailable',
+        claimStatusExpiresAt: account.dailyReward
+          ? account.dailyReward.checkedAt + MINIMAX_REWARD_CACHE_SECONDS
+          : undefined,
+        metrics: [
+          ...(account.quota?.windows ?? []).map((window) =>
+            quota(
+              Math.max(0, Math.min(100, 100 - window.usedPercent)),
+              window.resetsAt,
+              window.name
+            )
+          ),
+          ...(minimaxCreditBuckets(account.quota).length
+            ? minimaxCreditBuckets(account.quota).map((bucket) => ({
+                ...credits(t(bucket.label), bucket.remaining, bucket.total, bucket.expiresAt),
+                showProgress: true,
+              }))
+            : account.quota?.credits != null || !account.quota?.windows.length
+              ? [credits(t('agent.credits'), account.quota?.credits)]
+              : []),
+        ],
+      })
+    ),
+    ...(['qoder', 'qodercn'] as const).map((edition) =>
+      provider(
+        edition,
+        edition === 'qoder' ? 'Qoder' : 'Qoder CN',
+        '/icons/tools/qoder.svg',
+        [edition],
+        context.qoderAccountGroups[edition],
+        (account) => ({
+          identity: account.name || account.email || account.id,
+          plan: qoderPlanLabel(account.plan, account.edition, t),
+          subscriptionEndAt: qoderSubscriptionExpiry(account),
+          claim: () => context.qoderAccountGroups[edition].claimDaily(account),
+          dailyClaimed: qoderRewardStatus(account) === 'claimed',
+          claimDisabled: qoderRewardStatus(account) === 'unavailable',
+          claimStatusExpiresAt: account.dailyReward?.resetAt,
+          metrics: account.quotaWindows.length
+            ? account.quotaWindows.map((window) => ({
+                ...credits(
+                  qoderQuotaLabel(window.name, t),
+                  window.remaining,
+                  window.total,
+                  qoderExpiry(window.expiresAt)
+                ),
+                showProgress: true,
+              }))
+            : [
+                {
+                  ...credits(t('accountCenter.quota'), account.remaining, account.total),
+                  showProgress: true,
+                },
+              ],
+        })
+      )
     ),
     {
       ...provider(

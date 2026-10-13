@@ -75,6 +75,8 @@ pbkdf2 = "0.12"
 sha1 = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
+md-5 = "0.10"
+rsa = { version = "0.9", features = ["pem"] }
 hex = "0.4"
 ring = "0.17"
 

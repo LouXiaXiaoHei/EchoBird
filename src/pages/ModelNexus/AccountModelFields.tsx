@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   accountProxyProviders,
+  accountModelPickerOptions,
   cacheAccountProxyModels,
   getAccountProxyModels,
   getCachedAccountProxyModels,
@@ -11,7 +12,7 @@ import type { AccountProvider, AccountSource } from '../../api/types';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { useI18n } from '../../hooks/useI18n';
 import { useToast } from '../../components/Toast';
-import { accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
+import { accountProxyIdentityLabel, accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
 import type { NewModelForm } from './context';
 
 export function AccountModelFields({
@@ -31,8 +32,10 @@ export function AccountModelFields({
   const { showToast } = useToast();
   const { provider, accountId } = source;
   const [accounts, setAccounts] = useState<ProxyAccount[]>([]);
+  const accountsRef = useRef<ProxyAccount[]>([]);
   const [loadedProvider, setLoadedProvider] = useState<AccountProvider | null>(null);
   const loading = loadedProvider !== provider;
+  const waitingForLabels = (provider === 'qoder' || provider === 'qoderCn') && loading;
   const [fetching, setFetching] = useState(false);
   const fetchingRef = useRef(false);
   const revision = useRef(0);
@@ -42,7 +45,10 @@ export function AccountModelFields({
     let ignore = false;
     listProxyAccounts(provider)
       .then((rows) => {
-        if (!ignore) setAccounts(rows);
+        if (!ignore) {
+          accountsRef.current = rows;
+          setAccounts(rows);
+        }
       })
       .catch((error) => console.error('Load proxy accounts failed:', error))
       .finally(() => {
@@ -66,25 +72,30 @@ export function AccountModelFields({
       if (!accountId) {
         return {
           ...form,
-          name: account.label,
+          name: accountProxyIdentityLabel(account, t),
           accountSource: account.source,
           modelId: '',
           modelIdOptions: [],
         };
       }
-      return form.name !== account.label ? { ...form, name: account.label } : form;
+      const label = accountProxyIdentityLabel(account, t);
+      return form.name !== label ? { ...form, name: label } : form;
     });
-  }, [accounts, loadedProvider, provider, accountId, active, setForm]);
+  }, [accounts, loadedProvider, provider, accountId, active, setForm, t]);
 
   const applyModels = useCallback(
     (models: string[]) => {
       setForm((form) => {
         if (form.accountSource?.provider !== provider || form.accountSource.accountId !== accountId)
           return form;
+        const labels = accountsRef.current.find(
+          (row) => row.source.provider === provider && row.source.accountId === accountId
+        )?.modelLabels;
+        const options = accountModelPickerOptions(models, form.modelId, labels);
         return {
           ...form,
-          modelIdOptions: models,
-          modelId: models.includes(form.modelId) ? form.modelId : (models[0] ?? ''),
+          modelIdOptions: options,
+          modelId: options.includes(form.modelId) ? form.modelId : (options[0] ?? ''),
         };
       });
     },
@@ -98,6 +109,18 @@ export function AccountModelFields({
     try {
       const models = await getAccountProxyModels({ provider, accountId });
       if (attempt !== revision.current) return;
+      if (provider === 'qoder' || provider === 'qoderCn') {
+        try {
+          const rows = await listProxyAccounts(provider);
+          if (attempt !== revision.current) return;
+          accountsRef.current = rows;
+          setAccounts(rows);
+        } catch (error) {
+          console.error('Load proxy model labels failed:', error);
+          return;
+        }
+        if (attempt !== revision.current) return;
+      }
       cacheAccountProxyModels({ provider, accountId }, models);
       applyModels(models);
     } catch (error) {
@@ -116,7 +139,7 @@ export function AccountModelFields({
     void Promise.resolve().then(() => {
       if (attempt !== revision.current) return;
       setFetching(false);
-      if (active && accountId) {
+      if (active && accountId && !waitingForLabels) {
         const cached = getCachedAccountProxyModels({ provider, accountId });
         if (cached !== undefined) applyModels(cached);
         else void fetchModels();
@@ -126,7 +149,7 @@ export function AccountModelFields({
       revision.current += 1;
       fetchingRef.current = false;
     };
-  }, [provider, accountId, active, applyModels, fetchModels]);
+  }, [provider, accountId, active, waitingForLabels, applyModels, fetchModels]);
 
   const selectSource = (next: AccountSource) => {
     if (!active) return;
@@ -134,13 +157,13 @@ export function AccountModelFields({
     revision.current += 1;
     fetchingRef.current = false;
     setFetching(false);
+    const account = accounts.find(
+      (row) => row.source.provider === next.provider && row.source.accountId === next.accountId
+    );
     setForm((form) => ({
       ...form,
       name:
-        accounts.find(
-          (account) =>
-            account.source.provider === next.provider && account.source.accountId === next.accountId
-        )?.label ??
+        (account ? accountProxyIdentityLabel(account, t) : undefined) ??
         accountProxyProviders.find((entry) => entry.id === next.provider)?.name ??
         '',
       accountSource: next,
@@ -149,6 +172,9 @@ export function AccountModelFields({
     }));
   };
   const savedAccounts = accounts.filter((account) => account.source.provider === provider);
+  const modelLabels = savedAccounts.find(
+    (account) => account.source.accountId === accountId
+  )?.modelLabels;
   return (
     <>
       <div>
@@ -182,8 +208,11 @@ export function AccountModelFields({
           options={savedAccounts.map((account) => account.source.accountId)}
           optionLabels={Object.fromEntries(
             savedAccounts.map((account) => {
-              const plan = accountProxyPlanLabel(account);
-              return [account.source.accountId, `${account.label}${plan ? ` · ${plan}` : ''}`];
+              const plan = accountProxyPlanLabel(account, t);
+              return [
+                account.source.accountId,
+                `${accountProxyIdentityLabel(account, t)}${plan ? ` · ${plan}` : ''}`,
+              ];
             })
           )}
           onChange={(value) => selectSource({ provider, accountId: value })}
@@ -195,10 +224,19 @@ export function AccountModelFields({
           selectOnly
           ariaLabel={t('model.modelId')}
           value={modelId}
-          options={modelIdOptions}
+          options={accountModelPickerOptions(modelIdOptions ?? [], modelId, modelLabels)}
+          optionLabels={modelLabels}
           placeholder="—"
-          disabled={!active || !accountId || fetching}
-          onChange={(value) => setForm((form) => ({ ...form, modelId: value }))}
+          disabled={!active || !accountId || waitingForLabels || fetching}
+          onChange={(value) => {
+            if (!active) return;
+            setForm((form) =>
+              form.accountSource?.provider === provider &&
+              form.accountSource.accountId === accountId
+                ? { ...form, modelId: value }
+                : form
+            );
+          }}
           onRefresh={() => void fetchModels()}
           refreshLabel={t('btn.refresh')}
           refreshing={fetching}

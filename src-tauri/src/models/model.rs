@@ -38,6 +38,9 @@ pub enum AccountProvider {
     Kilo,
     Trae,
     Traecn,
+    Minimax,
+    Qoder,
+    QoderCn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

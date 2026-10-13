@@ -52,6 +52,7 @@ import {
 import * as api from '../../api/tauri';
 import {
   accountProxyProviders,
+  accountModelPickerOptions,
   getCachedAccountProxyModels,
   listProxyAccounts,
   type ProxyAccount,
@@ -69,7 +70,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
 import { copyText } from '../../utils/copyText';
 import { useModelNexus } from '../ModelNexus/context';
-import { accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
+import { accountProxyIdentityLabel, accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
 import './FreeModels.css';
 
 const NODE_COLUMN_GAP = 24;
@@ -780,7 +781,7 @@ function RouteModelCard({
     dragHandleProps?.onPointerDown;
   const accountProvider = accountProxyProviders.find((p) => p.id === model.accountSource?.provider);
   const displayName = model.accountSource
-    ? account?.label || accountProvider?.name || model.provider
+    ? (account && accountProxyIdentityLabel(account, t)) || accountProvider?.name || model.provider
     : model.provider;
   const iconSrc = accountProvider
     ? `/icons/tools/${accountProvider.icon}`
@@ -847,7 +848,7 @@ function RouteModelCard({
             {compact && keyless && <KeylessModelLabel card />}
             {compact && model.accountSource && (
               <span className="shrink-0 whitespace-nowrap text-xs text-cyber-text-secondary">
-                {account ? accountProxyPlanLabel(account) || '—' : '—'}
+                {account ? accountProxyPlanLabel(account, t) || '—' : '—'}
               </span>
             )}
           </div>
@@ -866,6 +867,7 @@ function RouteModelCard({
                 selectOnly
                 value={model.modelId}
                 options={modelIdOptions}
+                optionLabels={account?.modelLabels}
                 disabled={saving || dragging}
                 open={pickerOpen}
                 onOpenChange={setPickerOpen}
@@ -876,7 +878,7 @@ function RouteModelCard({
             </div>
           ) : (
             <span className="block min-w-0 text-xs text-cyber-text-secondary truncate">
-              {model.modelId}
+              {account?.modelLabels?.[model.modelId] ?? model.modelId}
             </span>
           )}
         </div>
@@ -1159,7 +1161,12 @@ function SmartRouterMain() {
   };
   const modelIdOptionsFor = (model: RouteModelNode) => {
     if (model.id === 'local-server') return [];
-    if (model.accountSource) return getCachedAccountProxyModels(model.accountSource) ?? [];
+    if (model.accountSource)
+      return accountModelPickerOptions(
+        getCachedAccountProxyModels(model.accountSource) ?? [],
+        model.modelId,
+        accountFor(model)?.modelLabels
+      );
     return freeModels
       .filter((entry) => entry.baseUrl === model.baseUrl)
       .map((entry) => entry.modelId);

@@ -41,6 +41,9 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             AccountProvider::Trae | AccountProvider::Traecn => {
                 unreachable!("Trae uses its own gateway")
             }
+            AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+                unreachable!("Provider uses its account gateway")
+            }
         })
         .trim_end_matches('/')
 }
@@ -124,6 +127,9 @@ fn signed(
         AccountProvider::Trae | AccountProvider::Traecn => {
             unreachable!("Trae uses its own gateway")
         }
+        AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+            unreachable!("Provider uses its account gateway")
+        }
     }
     if let Some(headers) = credentials["headers"].as_object() {
         let mut overrides = reqwest::header::HeaderMap::new();
@@ -159,7 +165,7 @@ async fn json_upstream(request: reqwest::RequestBuilder) -> Result<Value, ProxyE
     value.map_err(ProxyError::upstream)
 }
 
-fn upstream_error(status: StatusCode, headers: &HeaderMap, value: &Value) -> ProxyError {
+pub(super) fn upstream_error(status: StatusCode, headers: &HeaderMap, value: &Value) -> ProxyError {
     let mut error = ProxyError::new(status, safe_error(value));
     let detail = value
         .get("error")
@@ -428,6 +434,9 @@ pub(super) async fn list_models(
         AccountProvider::Trae | AccountProvider::Traecn => {
             unreachable!("Trae uses its own gateway")
         }
+        AccountProvider::Minimax | AccountProvider::Qoder | AccountProvider::QoderCn => {
+            unreachable!("Provider uses its account gateway")
+        }
     };
     let ids = if provider == AccountProvider::Antigravity {
         value["models"]
@@ -561,7 +570,7 @@ async fn wire(
     })
 }
 
-fn anthropic_request(body: &Value, model: &str) -> Value {
+pub(super) fn anthropic_request(body: &Value, model: &str) -> Value {
     let mut messages = Vec::new();
     let mut system = Vec::new();
     for message in body["messages"].as_array().into_iter().flatten() {

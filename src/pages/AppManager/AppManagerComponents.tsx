@@ -12,6 +12,8 @@ import { isFreePlan } from './accountPlanLabel';
 import { WorkBuddyAccountSection } from './WorkBuddyAccountSection';
 import { TraeAccountSection } from './TraeAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
+import { MinimaxAccountSection } from './MinimaxAccountSection';
+import { QoderAccountSection } from './QoderAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { RoutingToggle } from '../../components/RoutingToggle';
@@ -1087,6 +1089,8 @@ export const AppManagerPanel: React.FC = () => {
             <CursorAccountSection tool={selectedTool} />
           ) : selectedTool === 'trae' || selectedTool === 'traecn' ? (
             <TraeAccountSection />
+          ) : ['qoder', 'qodercn'].includes(selectedTool ?? '') ? (
+            <QoderAccountSection />
           ) : selectedToolData.noModelConfig ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
               <BoxIcon size={28} className="text-cyber-text opacity-25" />
@@ -1108,6 +1112,9 @@ export const AppManagerPanel: React.FC = () => {
                 <ClientAccountSection provider="copilot" showDivider={hasVisibleModels} />
               )}
               {selectedTool === 'zcode' && <ZCodeAccountSection showDivider={hasVisibleModels} />}
+              {(selectedTool === 'minimaxcode' || selectedTool === 'minimaxdesktop') && (
+                <MinimaxAccountSection showDivider={hasVisibleModels} />
+              )}
               {(selectedTool === 'workbuddy' || selectedTool === 'workbuddyai') && (
                 <WorkBuddyAccountSection showDivider={hasVisibleModels} />
               )}
@@ -1183,6 +1190,8 @@ export const AppManagerBottom: React.FC = () => {
     workBuddyAccounts,
     traeAccounts,
     zcodeAccounts,
+    minimaxAccounts,
+    qoderAccounts,
     deepSeekAccounts,
     grokAccounts,
     kiloAccounts,
@@ -1211,6 +1220,9 @@ export const AppManagerBottom: React.FC = () => {
   const isBuiltInApp = selectedTool === 'reversi' || selectedTool === 'translator';
   const hasModelSelected = !!(selectedTool && toolModelConfig[selectedTool]);
   const hasAccountSelected =
+    (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') &&
+      !!minimaxAccounts.selectedId) ||
+    (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
     ((selectedTool === 'codex' || selectedTool === 'chatgptdesktop') && !!selectedCodexAccountId) ||
     (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
@@ -1241,6 +1253,8 @@ export const AppManagerBottom: React.FC = () => {
     !selectedToolData ||
     isLaunching ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
+    (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
+    (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||
     ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && kiloAccounts.busy) ||
     ((selectedTool === 'copilot' || selectedTool === 'copilotdesktop') && copilotAccounts.busy) ||

@@ -1,8 +1,10 @@
 //! Account credentials stay in the backend. These adapters never switch native clients.
 
 mod bridge;
+mod minimax;
 mod protocol;
 mod providers;
+mod qoder;
 mod responses;
 mod tools;
 mod trae;
@@ -20,6 +22,13 @@ pub(crate) use protocol::SseParser;
 pub use providers::responses_response;
 pub(crate) use providers::stream_error;
 pub use responses::{chat_to_responses, chat_to_responses_with_tools, responses_to_chat};
+
+pub(crate) fn cached_qoder_model_labels(
+    provider: AccountProvider,
+    account_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    qoder::cached_model_labels(provider, account_id)
+}
 
 /// Internal Responses state belongs only on a Responses-capable account hop.
 pub fn strip_response_metadata(body: &mut Value) {
@@ -116,7 +125,11 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
+    if provider == AccountProvider::Minimax {
+        minimax::route(credentials, model, body, client).await
+    } else if matches!(provider, AccountProvider::Qoder | AccountProvider::QoderCn) {
+        qoder::route(provider, credentials, model, body, client).await
+    } else if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
         trae::route(provider, credentials, model, body, client).await
     } else if provider == AccountProvider::ClaudeCode {
         bridge::route(credentials, model, body).await
@@ -140,7 +153,11 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
+    if provider == AccountProvider::Minimax {
+        minimax::list_models(credentials, client).await
+    } else if matches!(provider, AccountProvider::Qoder | AccountProvider::QoderCn) {
+        qoder::list_models(provider, credentials, client).await
+    } else if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
         trae::list_models(provider, credentials, client).await
     } else if provider == AccountProvider::ClaudeCode {
         bridge::list_models(credentials).await

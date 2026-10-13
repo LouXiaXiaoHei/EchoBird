@@ -591,6 +591,12 @@ fn registry_display_name_matches(
         return true;
     }
     prefixes_lower.iter().any(|p| {
+        if matches!(p.as_str(), "qoder" | "qoder cn") {
+            return dn_lower == p
+                || dn_lower
+                    .strip_prefix(&format!("{p} "))
+                    .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()));
+        }
         if p == "workbuddy" && (dn_lower == "workbuddy ai" || dn_lower.starts_with("workbuddy ai "))
         {
             return false;
@@ -1147,18 +1153,30 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
     path.is_file()
         && (pc.name != "MiniMax Desktop"
             || super::tool_config_manager::minimaxcode::desktop_region(path).is_some())
+        && match pc.name.as_str() {
+            "Qoder" => {
+                super::qoder_native::desktop_edition(path)
+                    == Some(super::qoder_accounts::Edition::Qoder)
+            }
+            "Qoder CN" => {
+                super::qoder_native::desktop_edition(path)
+                    == Some(super::qoder_accounts::Edition::QoderCn)
+            }
+            _ => true,
+        }
 }
 
-fn copilot_env_executable(pc: &PathsConfig) -> Option<String> {
-    if pc.env_var.as_deref() != Some("COPILOT_CLI_PATH") {
+fn environment_executable(pc: &PathsConfig) -> Option<String> {
+    let key = pc.env_var.as_deref()?;
+    if !matches!(key, "COPILOT_CLI_PATH" | "MCODE_PATH") {
         return None;
     }
-    let path = expand_path(&std::env::var("COPILOT_CLI_PATH").ok()?);
+    let path = expand_path(&std::env::var(key).ok()?);
     valid_executable(pc, &path).then(|| path.to_string_lossy().into_owned())
 }
 
 fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String> {
-    if let Some(path) = copilot_env_executable(pc) {
+    if let Some(path) = environment_executable(pc) {
         return Some(path);
     }
     let paths = get_platform_paths(&pc.paths);
@@ -1495,7 +1513,7 @@ async fn detect_tool(pc: &PathsConfig) -> Option<String> {
     if let Some(ref env_var) = pc.env_var {
         if let Ok(custom_path) = std::env::var(env_var) {
             let expanded = expand_path(&custom_path);
-            if if env_var == "COPILOT_CLI_PATH" {
+            if if matches!(env_var.as_str(), "COPILOT_CLI_PATH" | "MCODE_PATH") {
                 valid_executable(pc, &expanded)
             } else {
                 expanded.exists()
@@ -1962,6 +1980,82 @@ pub fn get_tool_exe_path(tool_id: &str) -> Option<String> {
     let defs = get_definitions();
     let def = defs.iter().find(|d| d.id == tool_id)?;
     find_tool_executable(&def.paths_config, true)
+}
+
+pub(crate) struct QoderCampaignRuntime {
+    pub path: PathBuf,
+    pub version: Option<String>,
+}
+
+fn qoder_resources(platform: &str, executable: &Path) -> Option<PathBuf> {
+    if platform == "macos" {
+        Some(executable.parent()?.parent()?.join("Resources"))
+    } else {
+        Some(executable.parent()?.join("resources"))
+    }
+}
+
+fn qoder_package_version(resources: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(resources.join("app.asar")).ok()?;
+    let mut prefix = [0u8; 8];
+    file.read_exact(&mut prefix).ok()?;
+    let header_size = u32::from_le_bytes(prefix[4..8].try_into().ok()?) as usize;
+    if !(8..=16_777_216).contains(&header_size) {
+        return None;
+    }
+    let mut header = vec![0u8; header_size];
+    file.read_exact(&mut header).ok()?;
+    let json_size = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+    let tree: serde_json::Value = serde_json::from_slice(header.get(8..8 + json_size)?).ok()?;
+    let package = &tree["files"]["package.json"];
+    let offset = package["offset"].as_str()?.parse::<u64>().ok()?;
+    let size = package["size"].as_u64()?;
+    if size > 65_536 || package["unpacked"] == true {
+        return None;
+    }
+    file.seek(SeekFrom::Start(
+        (header_size as u64 + 8).checked_add(offset)?,
+    ))
+    .ok()?;
+    let mut bytes = vec![0u8; size as usize];
+    file.read_exact(&mut bytes).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let version = value["version"].as_str()?.trim();
+    (!version.is_empty() && version.len() <= 96 && version.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| version.to_string())
+}
+
+pub(crate) fn get_qoder_campaign_runtime_path(
+    tool_id: &str,
+) -> Result<QoderCampaignRuntime, String> {
+    use super::qoder_accounts::Edition;
+    let edition = match tool_id {
+        "qoder" => Edition::Qoder,
+        "qodercn" => Edition::QoderCn,
+        _ => return Err("accountError.invalidAccount".into()),
+    };
+    let executable = get_tool_exe_path(tool_id).ok_or("accountError.unavailable")?;
+    let executable = fs::canonicalize(executable).map_err(|_| "accountError.unavailable")?;
+    if super::qoder_native::desktop::identity(&executable)
+        != Some((edition, super::qoder_native::desktop::ProductKind::App))
+    {
+        return Err("accountError.invalidAccount".into());
+    }
+    let resources =
+        qoder_resources(std::env::consts::OS, &executable).ok_or("accountError.unavailable")?;
+    let path = resources.join("umid").join(if cfg!(windows) {
+        "runtime-info.exe"
+    } else {
+        "runtime-info"
+    });
+    if !path.is_file() {
+        return Err("accountError.initializeClient|Qoder device identity helper is missing".into());
+    }
+    Ok(QoderCampaignRuntime {
+        path,
+        version: qoder_package_version(&resources),
+    })
 }
 
 /// The official desktop SDK downloads a CLI runtime, but that cache is not a standalone installation.
@@ -2469,6 +2563,226 @@ pub async fn scan_tools() -> Vec<DetectedTool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn qoder_campaign_resources_follow_each_desktop_package_layout() {
+        for (platform, executable, resources) in [
+            (
+                "windows",
+                "Program Dir/Qoder/qoder.exe",
+                "Program Dir/Qoder/resources",
+            ),
+            ("linux", "/opt/Qoder/qoder", "/opt/Qoder/resources"),
+            (
+                "macos",
+                "/Applications/Qoder.app/Contents/MacOS/Qoder",
+                "/Applications/Qoder.app/Contents/Resources",
+            ),
+        ] {
+            assert_eq!(
+                super::qoder_resources(platform, std::path::Path::new(executable)),
+                Some(std::path::PathBuf::from(resources))
+            );
+        }
+    }
+
+    #[test]
+    fn qoder_campaign_version_reads_bounded_packaged_metadata_without_launching() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-qoder-version-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let package = br#"{"version":"0.4.4"}"#;
+        let tree =
+            serde_json::json!({"files":{"package.json":{"offset":"0","size":package.len()}}})
+                .to_string();
+        let mut header = vec![0u8; 8];
+        header[4..8].copy_from_slice(&(tree.len() as u32).to_le_bytes());
+        header.extend_from_slice(tree.as_bytes());
+        let mut archive = vec![0u8; 8];
+        archive[4..8].copy_from_slice(&(header.len() as u32).to_le_bytes());
+        archive.extend(header);
+        archive.extend(package);
+        std::fs::write(root.join("app.asar"), &archive).unwrap();
+        assert_eq!(
+            super::qoder_package_version(&root).as_deref(),
+            Some("0.4.4")
+        );
+        archive[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(root.join("app.asar"), archive).unwrap();
+        assert!(super::qoder_package_version(&root).is_none());
+        let resolved = root.canonicalize().unwrap();
+        assert!(resolved.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+        std::fs::remove_dir_all(resolved).unwrap();
+    }
+    use std::fs;
+    #[test]
+    fn qoder_app_detection_uses_standalone_metadata_and_versioned_registry_names() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-qoder-app-{}", uuid::Uuid::new_v4()));
+        let exe = if cfg!(target_os = "macos") {
+            root.join("Contents/MacOS/Qoder CN")
+        } else {
+            root.join("Qoder CN.exe")
+        };
+        let resources = if cfg!(target_os = "macos") {
+            root.join("Contents/Resources")
+        } else {
+            root.join("resources")
+        };
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(&exe, []).unwrap();
+        let global: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qoder/paths.json")).unwrap();
+        let cn: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qodercn/paths.json")).unwrap();
+        for (id, app, data, protocol, expect_global, expect_cn) in [
+            (
+                "qoder",
+                "com.qoder.app",
+                "com.qoder.app.stable",
+                "qoder",
+                true,
+                false,
+            ),
+            (
+                "qoder-cn",
+                "com.qodercn.app",
+                "com.qodercn.app.stable",
+                "qoder-cn",
+                false,
+                true,
+            ),
+            (
+                "qoder-cn",
+                "com.qoder.app",
+                "com.qodercn.app.stable",
+                "qoder-cn",
+                false,
+                false,
+            ),
+            (
+                "qoderwork-cn",
+                "com.qodercn.app",
+                "com.qodercn.app.stable",
+                "qoder-cn",
+                false,
+                false,
+            ),
+        ] {
+            fs::write(
+                resources.join("product.json"),
+                serde_json::json!({
+                    "productId":id,"appId":app,"dataDirectoryName":data,"protocolScheme":protocol
+                })
+                .to_string(),
+            )
+            .unwrap();
+            assert_eq!(super::valid_executable(&global, &exe), expect_global);
+            assert_eq!(super::valid_executable(&cn, &exe), expect_cn);
+        }
+        for (prefix, own, other) in [
+            ("qoder", "qoder 0.4.4", "qoder cn 0.4.4"),
+            ("qoder cn", "qoder cn 0.4.4", "qoder cn cli"),
+        ] {
+            let prefixes = [prefix.to_owned()];
+            assert!(registry_display_name_matches(own, &[], &prefixes));
+            assert!(!registry_display_name_matches(other, &[], &prefixes));
+            assert!(!registry_display_name_matches(
+                "qoderwork 0.4.4",
+                &[],
+                &prefixes
+            ));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "Requires an explicitly supplied installed Qoder CN desktop executable"]
+    async fn installed_qoder_cn_desktop_detection_probe() {
+        let expected = std::env::var("ECHOBIRD_TEST_QODER_CN_EXE").unwrap();
+        let cn: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qodercn/paths.json")).unwrap();
+        let detected = super::detect_tool(&cn).await.unwrap();
+        let launch = super::find_tool_executable(&cn, true).unwrap();
+        assert_eq!(
+            fs::canonicalize(detected).unwrap(),
+            fs::canonicalize(&expected).unwrap()
+        );
+        assert_eq!(
+            fs::canonicalize(launch).unwrap(),
+            fs::canonicalize(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn qoder_desktop_detection_validates_product_region_and_ignores_other_products() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-qoder-products-{}", uuid::Uuid::new_v4()));
+        let exe = if cfg!(target_os = "macos") {
+            root.join("Qoder.app/Contents/MacOS/Native")
+        } else {
+            root.join("Qoder.exe")
+        };
+        let resources = if cfg!(target_os = "macos") {
+            root.join("Qoder.app/Contents/Resources/app")
+        } else {
+            root.join("resources/app")
+        };
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(&exe, []).unwrap();
+        let global: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qoder/paths.json")).unwrap();
+        let cn: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qodercn/paths.json")).unwrap();
+        for (name, data, protocol, expect_global, expect_cn) in [
+            ("Qoder", ".qoder", "qoder", true, false),
+            ("QoderCN", ".qoder-cn", "qoder-cn", false, true),
+            ("QoderWork", ".qoder", "qoder", false, false),
+        ] {
+            fs::write(
+                resources.join("product.json"),
+                serde_json::json!({"nameShort":name,"dataFolderName":data,"urlProtocol":protocol})
+                    .to_string(),
+            )
+            .unwrap();
+            assert_eq!(super::valid_executable(&global, &exe), expect_global);
+            assert_eq!(super::valid_executable(&cn, &exe), expect_cn);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn qoder_catalog_has_independent_account_only_desktop_entries() {
+        for (id, name, contents) in [
+            (
+                "qoder",
+                "Qoder",
+                include_str!("../../../tools/qoder/paths.json"),
+            ),
+            (
+                "qodercn",
+                "Qoder CN",
+                include_str!("../../../tools/qodercn/paths.json"),
+            ),
+        ] {
+            let config: PathsConfig = serde_json::from_str(contents).unwrap();
+            assert_eq!(config.name, name);
+            assert!(config.api_protocol.is_empty());
+            assert!(config.no_model_config);
+            assert!(super::has_authoritative_detector(&config));
+            assert!(!config.detect_by_config_dir);
+            for paths in [
+                &config.paths.win32,
+                &config.paths.darwin,
+                &config.paths.linux,
+            ] {
+                assert!(!paths.as_ref().unwrap().is_empty());
+            }
+            assert!(crate::services::bundled_assets::INSTALLABLE_TOOL_IDS.contains(&id));
+            assert_eq!(config.category, "Desktop");
+        }
+    }
     use super::{
         exe_stem_matches_hints, has_authoritative_detector, is_uninstaller_stem,
         merge_override_seed, parse_uninstall_exe_path, registry_display_name_matches,

@@ -1,4 +1,4 @@
-import { useLayoutEffect, type ReactNode } from 'react';
+import { useLayoutEffect, type ComponentProps, type ReactNode } from 'react';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DndContext, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
@@ -35,14 +35,17 @@ vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }))
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('../ModelNexus/context', () => ({ useModelNexus: () => nexus }));
 vi.mock('react-dom', () => ({ createPortal: (children: ReactNode) => children }));
-vi.mock('../../components/ModelIdCombobox', () => ({
-  ModelIdCombobox: (props: {
-    value: string;
-    disabled?: boolean;
-    open?: boolean;
-    onOpenChange?: (open: boolean) => void;
-  }) => <input value={props.value} disabled={props.disabled} readOnly />,
-}));
+vi.mock('../../components/ModelIdCombobox', async (original) => {
+  const actual = await original<typeof import('../../components/ModelIdCombobox')>();
+  return {
+    ModelIdCombobox: (props: ComponentProps<typeof actual.ModelIdCombobox>) =>
+      props.optionLabels ? (
+        <actual.ModelIdCombobox {...props} />
+      ) : (
+        <input value={props.value} disabled={props.disabled} readOnly />
+      ),
+  };
+});
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({ children }: { children: ReactNode }) => children,
   DragOverlay: ({ children }: { children: ReactNode }) => children,
@@ -174,7 +177,18 @@ describe('Direct route card model selection', () => {
       renderer = create(
         <FreeModelsProvider>
           <Harness />
-        </FreeModelsProvider>
+        </FreeModelsProvider>,
+        {
+          createNodeMock: (element) =>
+            String(element.props['aria-label']).startsWith('model.modelId')
+              ? {
+                  focus: vi.fn(),
+                  blur: vi.fn(),
+                  contains: () => false,
+                  getBoundingClientRect: () => ({ left: 12, width: 160, top: 100, bottom: 130 }),
+                }
+              : null,
+        }
       );
     });
   }
@@ -248,8 +262,20 @@ describe('Direct route card model selection', () => {
     getModelIcon.mockImplementation((name: string, modelId: string) =>
       modelId ? `/models/${modelId}.svg` : name === 'Free provider' ? '/providers/free.svg' : null
     );
-    vi.stubGlobal('window', { setInterval, clearInterval, setTimeout });
-    vi.stubGlobal('document', { body: {} });
+    vi.stubGlobal('window', {
+      setInterval,
+      clearInterval,
+      setTimeout,
+      innerHeight: 800,
+      innerWidth: 1000,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal('document', {
+      body: {},
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
     vi.stubGlobal('requestAnimationFrame', () => 1);
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -295,6 +321,104 @@ describe('Direct route card model selection', () => {
     vi.resetAllMocks();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('renders readable Qoder labels while keeping native selections and region caches unchanged', async () => {
+    savedModels = [
+      { ...account, modelId: 'cmodel', accountSource: { provider: 'qoder', accountId: 'shared' } },
+      {
+        ...account,
+        internalId: 'cn-model',
+        modelId: 'qmodel_38max',
+        accountSource: { provider: 'qoderCn', accountId: 'shared' },
+      },
+    ];
+    savedOrder = savedModels.map((model) => model.internalId);
+    const original = structuredClone(savedModels);
+    const writeCache = vi.spyOn(accountApi, 'cacheAccountProxyModels');
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockImplementation((source) =>
+      source.provider === 'qoder' ? ['Cantus', 'Qwen3.8-Max'] : ['qmodel_38max', 'cn-other']
+    );
+    vi.mocked(accountApi.listProxyAccounts).mockImplementation(async (provider) => [
+      {
+        source: { provider: provider === 'qoder' ? 'qoderCn' : 'qoder', accountId: 'shared' },
+        label: 'Other region',
+        modelLabels: { cmodel: 'Wrong Region', qmodel_38max: 'Wrong Region' },
+      },
+      {
+        source: { provider, accountId: 'shared' },
+        label: `${provider} identity`,
+        plan: 'free',
+        modelLabels: {
+          [provider === 'qoder' ? 'cmodel' : 'qmodel_38max']:
+            provider === 'qoder' ? 'Cantus' : 'Qwen3.8-Max',
+        },
+      },
+    ]);
+    await open();
+    expect(picker('cmodel').props.options).toEqual(['cmodel', 'Qwen3.8-Max']);
+    expect(picker('qmodel_38max').props.options).toEqual(['qmodel_38max', 'cn-other']);
+    expect(textOf(card('cmodel'))).toContain('Cantus');
+    expect(textOf(card('cmodel'))).toContain('Free');
+    expect(textOf(card('qmodel_38max'))).toContain('Qwen3.8-Max');
+    expect(textOf(card('qmodel_38max'))).toContain('agent.qoderTrial');
+    expect(textOf(card('cmodel'))).not.toContain('Wrong Region');
+    clickCard('cmodel');
+    const selected = renderer.root.find(
+      (node) => node.type === 'div' && node.children[0] === 'Cantus' && node.props.onMouseDown
+    );
+    expect(selected.props.className).toContain('bg-cyber-text/15');
+    await act(async () => selected.props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+    expect(savedModels).toEqual(original);
+    expect(writeCache).not.toHaveBeenCalled();
+    expectNoPassiveChanges();
+
+    const stopPropagation = vi.fn();
+    act(() =>
+      card('cmodel')
+        .find((node) => String(node.props.className).includes('free-model-route-picker'))
+        .props.onPointerDown({
+          stopPropagation,
+          target: {},
+          currentTarget: { contains: () => true },
+        })
+    );
+    expect(stopPropagation).toHaveBeenCalledOnce();
+    expect(startDrag).toHaveBeenCalledOnce();
+    await act(async () =>
+      renderer.root.findByType(DndContext).props.onDragStart({ active: { id: account.internalId } })
+    );
+    const overlay = renderer.root.find(
+      (node) =>
+        node.type === 'div' && String(node.props.className).includes('is-dragging shadow-2xl')
+    );
+    expect(textOf(overlay)).toContain('Cantus');
+    await act(async () => renderer.root.findByType(DndContext).props.onDragCancel());
+    expectNoPassiveChanges();
+    await select('cmodel', 'Qwen3.8-Max');
+    expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(account.internalId, {
+      modelId: 'Qwen3.8-Max',
+    });
+  });
+
+  it('keeps unknown native IDs readable as IDs without borrowing another account label', async () => {
+    savedModels = [
+      { ...account, modelId: 'cmodel', accountSource: { provider: 'qoder', accountId: 'missing' } },
+    ];
+    savedOrder = [account.internalId];
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue(['cmodel', 'unknown-model']);
+    vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+      {
+        source: { provider: 'qoder', accountId: 'other' },
+        label: 'Other account',
+        modelLabels: { cmodel: 'Other Account Model' },
+      },
+    ]);
+    await open();
+    expect(picker('cmodel').props.options).toEqual(['cmodel', 'unknown-model']);
+    expect(picker('cmodel').props.optionLabels).toBeUndefined();
+    expect(textOf(card('cmodel'))).not.toContain('Other Account Model');
+    expectNoPassiveChanges();
   });
 
   it('uses each account cache and the exact free endpoint without fetching, applying or opening an editor', async () => {

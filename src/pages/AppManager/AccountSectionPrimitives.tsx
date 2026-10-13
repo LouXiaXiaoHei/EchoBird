@@ -220,7 +220,7 @@ export const AccountSectionRow: React.FC<{
         className={`grid min-w-0 ${singleLine ? 'grid-cols-[minmax(0,1fr)_auto] gap-2' : 'grid-cols-[minmax(0,1fr)] auto-rows-[16px]'} items-center`}
       >
         <span className="block truncate text-[13px] font-semibold text-cyber-text">{email}</span>
-        <span className="flex h-[16px] items-center gap-2 text-[12px] text-cyber-text">
+        <span className="flex h-[16px] items-center gap-2 text-[12px] leading-[16px] text-cyber-text">
           {authorizationFailed ? (
             <span role="status" className="truncate font-semibold">
               {t('accountCenter.authFailed')}

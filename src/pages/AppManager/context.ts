@@ -5,6 +5,8 @@ import type { useGrokAccounts } from './useGrokAccounts';
 import type { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
 import type { useTraeAccounts } from './useTraeAccounts';
 import type { useZCodeAccounts } from './useZCodeAccounts';
+import type { useMinimaxAccounts } from './useMinimaxAccounts';
+import type { useQoderAccounts } from './useQoderAccounts';
 import type { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import type { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
 import type { useCodexAccounts } from './useCodexAccounts';
@@ -41,6 +43,9 @@ export interface AppManagerContextType {
     ReturnType<typeof useWorkBuddyAccounts>
   >;
   zcodeAccounts: ReturnType<typeof useZCodeAccounts>;
+  minimaxAccounts: ReturnType<typeof useMinimaxAccounts>;
+  qoderAccounts: ReturnType<typeof useQoderAccounts>;
+  qoderAccountGroups: Record<'qoder' | 'qodercn', ReturnType<typeof useQoderAccounts>>;
   deepSeekAccounts: ReturnType<typeof useDeepSeekAccounts>;
   grokAccounts: ReturnType<typeof useGrokAccounts>;
   kiloAccounts: ReturnType<typeof useKiloAccounts>;

@@ -146,6 +146,8 @@ pub const INSTALLABLE_TOOL_IDS: &[&str] = &[
     "mimocode",
     "minimaxcode",
     "minimaxdesktop",
+    "qoder",
+    "qodercn",
     "kilo",
     "kilodesktop",
     "copilot",

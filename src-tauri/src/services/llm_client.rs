@@ -121,6 +121,12 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<ThinkingOrigin>,
     },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking {
+        data: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<ThinkingOrigin>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
@@ -138,10 +144,14 @@ pub enum ContentBlock {
 #[derive(Debug, Clone)]
 pub enum LlmEvent {
     TextDelta(String),
+    ThinkingBlockStart {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking(String),
     Thinking(String),
-    /// Anthropic streams the thinking block's signature as a separate
-    /// `signature_delta`. We accumulate it alongside `Thinking` text and
-    /// pin it to the saved assistant message so the next turn validates.
+    /// Anthropic's `signature_delta` carries the current block's full signature.
+    /// Replace that block's signature rather than concatenate snapshots.
     ThinkingSignature(String),
     ToolCallStart {
         id: String,
@@ -612,7 +622,27 @@ impl LlmClient {
                                                     .await;
                                             }
                                             Some("thinking") => {
-                                                // Anthropic extended thinking block start
+                                                let _ = tx
+                                                    .send(LlmEvent::ThinkingBlockStart {
+                                                        thinking: block["thinking"]
+                                                            .as_str()
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                        signature: block["signature"]
+                                                            .as_str()
+                                                            .unwrap_or("")
+                                                            .to_string(),
+                                                    })
+                                                    .await;
+                                            }
+                                            Some("redacted_thinking") => {
+                                                if let Some(data) = block["data"].as_str() {
+                                                    let _ = tx
+                                                        .send(LlmEvent::RedactedThinking(
+                                                            data.to_string(),
+                                                        ))
+                                                        .await;
+                                                }
                                             }
                                             _ => {}
                                         }
@@ -777,6 +807,11 @@ fn compatible_history(messages: &[Message], config: &LlmConfig) -> Vec<Message> 
                                 }
                             },
                         },
+                        ContentBlock::RedactedThinking { origin, .. } => {
+                            config.provider == LlmProvider::Anthropic
+                                && !uses_deepseek_history(config)
+                                && origin.as_ref().map_or(true, |origin| origin == &target)
+                        }
                         _ => true,
                     });
                     if uses_deepseek_history(config)
@@ -1213,6 +1248,9 @@ fn message_to_anthropic_json(m: &Message) -> Value {
                         // /anthropic) require both fields on round-trip or 400.
                         json!({"type": "thinking", "thinking": thinking, "signature": signature})
                     }
+                    ContentBlock::RedactedThinking { data, .. } => {
+                        json!({"type": "redacted_thinking", "data": data})
+                    }
                     ContentBlock::ToolUse { id, name, input } => json!({
                         "type": "tool_use", "id": id, "name": name, "input": input
                     }),
@@ -1272,7 +1310,7 @@ mod tests {
             } else {
                 ""
             };
-            let input = vec![Message {
+            let mut input = vec![Message {
                 role: "assistant".into(),
                 content: MessageContent::Blocks(vec![
                     ContentBlock::Thinking {
@@ -1285,6 +1323,17 @@ mod tests {
                     },
                 ]),
             }];
+            if provider == LlmProvider::Anthropic {
+                if let MessageContent::Blocks(blocks) = &mut input[0].content {
+                    blocks.insert(
+                        1,
+                        ContentBlock::RedactedThinking {
+                            data: "opaque-fixture".into(),
+                            origin: Some(ThinkingOrigin::from_config(&config)),
+                        },
+                    );
+                }
+            }
             let before = serde_json::to_value(&input).unwrap();
             let replayed = compatible_history(&input, &config);
             assert_eq!(serde_json::to_value(&replayed).unwrap(), before);
@@ -1335,6 +1384,31 @@ mod tests {
         compatible.model = "deepseek-v4-pro".into();
         let projected = messages_to_anthropic_json(&input, &compatible);
         assert_eq!(projected[0]["content"][0]["signature"], "");
+    }
+
+    #[test]
+    fn legacy_redacted_reasoning_survives_native_replay_without_entering_other_protocols() {
+        let input: Vec<Message> = serde_json::from_value(json!([{
+            "role":"assistant", "content":[
+                {"type":"redacted_thinking", "data":"opaque-legacy-fixture"},
+                {"type":"text", "text":"visible answer"}
+            ]
+        }]))
+        .unwrap();
+        let before = serde_json::to_value(&input).unwrap();
+        let config = protocol_config(LlmProvider::Anthropic);
+        let replay = compatible_history(&input, &config);
+        assert_eq!(message_to_anthropic_json(&replay[0]), before[0]);
+        let mut deepseek = config.clone();
+        deepseek.model = "deepseek-v4-pro".into();
+        for config in [protocol_config(LlmProvider::OpenAI), deepseek] {
+            let projected = compatible_history(&input, &config);
+            assert_eq!(
+                serde_json::to_value(&projected).unwrap()[0]["content"],
+                json!([{"type":"text", "text":"visible answer"}])
+            );
+        }
+        assert_eq!(serde_json::to_value(&input).unwrap(), before);
     }
 
     #[test]

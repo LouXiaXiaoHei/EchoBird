@@ -2,7 +2,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    antigravity_accounts, claude_code_accounts, codex_accounts, trae_accounts, workbuddy_accounts,
+    antigravity_accounts, claude_code_accounts, codex_accounts, minimax_accounts, qoder_accounts,
+    trae_accounts, workbuddy_accounts,
 };
 use crate::models::model::{AccountProvider, AccountSource};
 
@@ -12,6 +13,10 @@ pub struct SavedAccountOption {
     pub source: AccountSource,
     pub label: String,
     pub plan: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<minimax_accounts::Region>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_labels: std::collections::BTreeMap<String, String>,
 }
 
 fn option(
@@ -27,6 +32,8 @@ fn option(
         },
         label,
         plan,
+        region: None,
+        model_labels: Default::default(),
     }
 }
 
@@ -68,6 +75,25 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
             .into_iter()
             .map(|a| option(provider, a.id, a.name, a.plan))
             .collect(),
+        Minimax => minimax_accounts::list_saved_accounts()
+            .await?
+            .into_iter()
+            .map(|a| {
+                let mut saved = option(provider, a.id, a.email, a.plan);
+                saved.region = Some(a.region);
+                saved
+            })
+            .collect(),
+        Qoder | QoderCn => qoder_accounts::list_saved_accounts(qoder_edition(provider))
+            .await?
+            .into_iter()
+            .map(|a| {
+                let labels = super::account_proxy::cached_qoder_model_labels(provider, &a.id);
+                let mut saved = option(provider, a.id, a.name, a.plan);
+                saved.model_labels = labels;
+                saved
+            })
+            .collect(),
     })
 }
 
@@ -84,6 +110,14 @@ fn trae_edition(provider: AccountProvider) -> trae_accounts::Edition {
         trae_accounts::Edition::Traecn
     } else {
         trae_accounts::Edition::Trae
+    }
+}
+
+fn qoder_edition(provider: AccountProvider) -> qoder_accounts::Edition {
+    if provider == AccountProvider::QoderCn {
+        qoder_accounts::Edition::QoderCn
+    } else {
+        qoder_accounts::Edition::Qoder
     }
 }
 
@@ -136,6 +170,15 @@ pub(crate) async fn credentials(
             )
             .await
         }
+        Minimax => minimax_accounts::proxy_credentials(&source.account_id, force_refresh).await,
+        Qoder | QoderCn => {
+            qoder_accounts::proxy_credentials(
+                qoder_edition(source.provider),
+                &source.account_id,
+                force_refresh,
+            )
+            .await
+        }
     }
 }
 
@@ -175,6 +218,18 @@ pub(crate) async fn credentials_after_rejection(
             .await
         }
         Kilo | Copilot => credentials(source, true).await,
+        Minimax => {
+            minimax_accounts::credentials_after_rejection(&source.account_id, rejected_credentials)
+                .await
+        }
+        Qoder | QoderCn => {
+            qoder_accounts::proxy_credentials_after_rejection(
+                qoder_edition(source.provider),
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
         Trae | Traecn => {
             trae_accounts::proxy_credentials_after_rejection(
                 trae_edition(source.provider),
@@ -252,7 +307,11 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
         Err(error)
             if matches!(
                 source.provider,
-                AccountProvider::Trae | AccountProvider::Traecn
+                AccountProvider::Trae
+                    | AccountProvider::Traecn
+                    | AccountProvider::Minimax
+                    | AccountProvider::Qoder
+                    | AccountProvider::QoderCn
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
             let refreshed = credentials_after_rejection(source, &secret).await?;
@@ -268,6 +327,42 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::json;
+
+    #[test]
+    fn account_sources_keep_new_provider_regions_and_wire_names_distinct() {
+        assert_eq!(
+            qoder_edition(AccountProvider::Qoder),
+            qoder_accounts::Edition::Qoder
+        );
+        assert_eq!(
+            qoder_edition(AccountProvider::QoderCn),
+            qoder_accounts::Edition::QoderCn
+        );
+        assert_eq!(
+            serde_json::to_value(AccountProvider::QoderCn).unwrap(),
+            "qoderCn"
+        );
+        let mut saved = option(
+            AccountProvider::Minimax,
+            "global-account".into(),
+            "fixture@example.test".into(),
+            None,
+        );
+        saved.region = Some(minimax_accounts::Region::Global);
+        let value = serde_json::to_value(&saved).unwrap();
+        assert_eq!(value["region"], "global");
+        assert_eq!(value["source"]["provider"], "minimax");
+        assert!(value.get("accessToken").is_none());
+        assert!(serde_json::to_value(option(
+            AccountProvider::Qoder,
+            "id".into(),
+            "Fixture".into(),
+            None
+        ))
+        .unwrap()
+        .get("region")
+        .is_none());
+    }
 
     #[test]
     fn credential_failures_preserve_known_categories_and_http_statuses() {

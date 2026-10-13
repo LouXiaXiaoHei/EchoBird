@@ -6,6 +6,113 @@ use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub(crate) struct QoderCampaignIdentity {
+    pub machine_token: String,
+    pub machine_type: String,
+    pub machine_code: String,
+    pub version: Option<String>,
+}
+
+fn qoder_identity_value(value: &serde_json::Value, key: &str) -> Result<String, String> {
+    let value = value[key]
+        .as_str()
+        .map(str::trim)
+        .ok_or("accountError.format|Qoder device identity is invalid")?;
+    if value.is_empty() || value.len() > 4096 || !value.bytes().all(|b| (32..=126).contains(&b)) {
+        return Err("accountError.format|Qoder device identity is invalid".into());
+    }
+    Ok(value.into())
+}
+
+fn parse_qoder_identity(bytes: &[u8]) -> Result<QoderCampaignIdentity, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| "accountError.format|Qoder device identity output is invalid")?;
+    Ok(QoderCampaignIdentity {
+        machine_token: qoder_identity_value(&value, "machineToken")?,
+        machine_type: qoder_identity_value(&value, "machineType")?,
+        machine_code: qoder_identity_value(&value, "machineCode")?,
+        version: None,
+    })
+}
+
+fn qoder_identity_arguments(platform: &str, tool_id: &str) -> Result<Vec<String>, String> {
+    let environment = match tool_id {
+        "qoder" => "3",
+        "qodercn" => "0",
+        _ => return Err("accountError.invalidAccount".into()),
+    };
+    let mut args = vec![environment.into()];
+    if matches!(platform, "windows" | "macos") {
+        args.push("--account-stdin".into());
+    }
+    Ok(args)
+}
+
+async fn read_qoder_identity(
+    mut command: tokio::process::Command,
+    account: Option<&str>,
+) -> Result<QoderCampaignIdentity, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    command
+        .kill_on_drop(true)
+        .stdin(if account.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command
+        .spawn()
+        .map_err(|_| "accountError.failed|Qoder device identity helper could not start")?;
+    let operation = async {
+        if let Some(account) = account {
+            let body = format!("{}\n", serde_json::json!({"account":account}));
+            let mut stdin = child.stdin.take().ok_or("accountError.failed")?;
+            stdin
+                .write_all(body.as_bytes())
+                .await
+                .map_err(|_| "accountError.failed")?;
+            stdin.shutdown().await.map_err(|_| "accountError.failed")?;
+        }
+        let stdout = child.stdout.take().ok_or("accountError.failed")?;
+        let mut stdout = BufReader::new(stdout).take(1_048_577);
+        let mut line = Vec::new();
+        stdout
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(|_| "accountError.failed")?;
+        if line.len() > 1_048_576 {
+            return Err("accountError.format|Qoder device identity output is too large".into());
+        }
+        parse_qoder_identity(&line)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(25), operation)
+        .await
+        .map_err(|_| "accountError.network|Qoder device identity helper timed out".to_string())?
+}
+
+pub(crate) async fn qoder_campaign_identity(
+    tool_id: &str,
+    account_uid: &str,
+) -> Result<QoderCampaignIdentity, String> {
+    if account_uid.trim().is_empty() || account_uid.len() > 512 {
+        return Err("accountError.invalidAccount".into());
+    }
+    let runtime = super::tool_manager::get_qoder_campaign_runtime_path(tool_id)?;
+    let platform = std::env::consts::OS;
+    let mut command = crate::utils::process::async_command(&runtime.path);
+    command.args(qoder_identity_arguments(platform, tool_id)?);
+    let mut identity = read_qoder_identity(
+        command,
+        matches!(platform, "windows" | "macos").then_some(account_uid),
+    )
+    .await?;
+    identity.version = runtime.version;
+    Ok(identity)
+}
+
 #[cfg(any(not(windows), test))]
 fn executable_process_pattern(path: &str) -> String {
     let escaped: String = path
@@ -366,17 +473,26 @@ impl ProcessManager {
         }
 
         // Build the final command with tool-specific args
-        let copilot_executable = (tool_id == "copilot")
+        let literal_executable = (tool_id == "copilot")
             .then(|| {
                 copilot_literal_launch_path(
                     command,
                     crate::services::tool_manager::get_tool_exe_path(tool_id),
                 )
             })
-            .flatten();
+            .flatten()
+            .or_else(|| {
+                if tool_id != "minimaxcode" {
+                    return None;
+                }
+                minimax_literal_launch_path(
+                    command,
+                    crate::services::tool_manager::get_tool_exe_path(tool_id),
+                )
+            });
         let mut full_command = command.to_string();
         #[cfg(not(windows))]
-        if let Some(executable) = &copilot_executable {
+        if let Some(executable) = &literal_executable {
             full_command = shell_single_quote(executable);
         }
 
@@ -414,7 +530,7 @@ impl ProcessManager {
             // relying on PATH — some users have System32 stripped from PATH.
             let mut cmd = if tool_id == "musecode" {
                 musecode_windows_terminal(&full_command, &work_dir)
-            } else if let Some(executable) = &copilot_executable {
+            } else if let Some(executable) = &literal_executable {
                 copilot_native_command(executable)
             } else if tool_id == "kilo" {
                 let runtime = crate::services::tool_manager::get_kilo_runtime_path()
@@ -1001,6 +1117,17 @@ impl ProcessManager {
         // kill below terminates that process anyway.
         self.processes.remove(tool_id);
 
+        if matches!(tool_id, "qoder" | "qodercn") {
+            let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
+                return false;
+            };
+            return qoder_process_snapshot()
+                .and_then(|processes| {
+                    qoder_account_instances(tool_id, std::path::Path::new(&path), processes)
+                })
+                .is_ok_and(|processes| stop_qoder_account_instances(&processes));
+        }
+
         #[cfg(not(windows))]
         if matches!(tool_id, "copilotdesktop" | "kilodesktop") {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
@@ -1286,6 +1413,10 @@ fn musecode_unix_command(
 
 fn copilot_literal_launch_path(command: &str, executable: Option<String>) -> Option<String> {
     executable.filter(|path| command == "copilot" || command == path)
+}
+
+fn minimax_literal_launch_path(command: &str, executable: Option<String>) -> Option<String> {
+    executable.filter(|path| command == "mcode" || command == path)
 }
 
 #[cfg(windows)]
@@ -1598,9 +1729,137 @@ pub(crate) fn start_desktop_for_config(tool_id: &str) -> Result<OwnedDesktopConf
     })
 }
 
+#[derive(serde::Deserialize)]
+struct QoderAccountProcess {
+    pid: u32,
+    path: std::path::PathBuf,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn qoder_process_path(pid: u32) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let mut buffer = [0u8; 4096];
+        if unsafe { libc::proc_pidpath(pid as i32, buffer.as_mut_ptr().cast(), 4096) } <= 0 {
+            return None;
+        }
+        let path = std::ffi::CStr::from_bytes_until_nul(&buffer).ok()?;
+        Some(std::ffi::OsString::from_vec(path.to_bytes().to_vec()).into())
+    }
+}
+
+fn qoder_process_snapshot() -> Result<Vec<QoderAccountProcess>, String> {
+    #[cfg(windows)]
+    {
+        let output = crate::utils::process::command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $rows=@(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.ExecutablePath } | ForEach-Object { @{pid=$_.ProcessId;path=$_.ExecutablePath} }); ConvertTo-Json -InputObject $rows -Compress"])
+            .output().map_err(|_| "accountError.closeClient")?;
+        if !output.status.success() {
+            return Err("accountError.closeClient".into());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|_| "accountError.closeClient".into())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = crate::utils::process::command("/bin/ps")
+            .args(["-A", "-o", "pid="])
+            .output()
+            .map_err(|_| "accountError.closeClient")?;
+        if !output.status.success() {
+            return Err("accountError.closeClient".into());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .filter_map(|pid| qoder_process_path(pid).map(|path| QoderAccountProcess { pid, path }))
+            .collect())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Ok(std::fs::read_dir("/proc")
+            .map_err(|_| "accountError.closeClient")?
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+            .filter_map(|pid| qoder_process_path(pid).map(|path| QoderAccountProcess { pid, path }))
+            .collect())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        Err("accountError.unavailable".into())
+    }
+}
+
+fn qoder_account_instances(
+    tool_id: &str,
+    selected: &std::path::Path,
+    processes: Vec<QoderAccountProcess>,
+) -> Result<Vec<QoderAccountProcess>, String> {
+    use crate::services::qoder_accounts::Edition;
+    let edition = match tool_id {
+        "qoder" => Edition::Qoder,
+        "qodercn" => Edition::QoderCn,
+        _ => return Err("accountError.invalidAccount".into()),
+    };
+    let identity = crate::services::qoder_native::desktop::identity(selected)
+        .filter(|(selected_edition, _)| *selected_edition == edition)
+        .ok_or("accountError.invalidAccount")?;
+    let mut names = crate::services::tool_manager::get_tool_process_names(tool_id);
+    if let Some(name) = selected.file_name().and_then(|name| name.to_str()) {
+        names.push(name.into());
+    }
+    // Each verified edition/product tuple has one fixed native account directory,
+    // shared by user/system installations. App and IDE tuples use different directories.
+    Ok(processes
+        .into_iter()
+        .filter(|process| {
+            process.path.file_name().is_some_and(|name| {
+                names
+                    .iter()
+                    .any(|candidate| name.eq_ignore_ascii_case(candidate))
+            }) && crate::services::qoder_native::desktop::identity(&process.path) == Some(identity)
+        })
+        .collect())
+}
+
+fn stop_qoder_account_instances(processes: &[QoderAccountProcess]) -> bool {
+    let mut stopped = false;
+    for process in processes {
+        #[cfg(windows)]
+        {
+            stopped |= crate::utils::process::command("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; $entry=Get-CimInstance Win32_Process -Filter ('ProcessId = '+$env:ECHOBIRD_ACCOUNT_PID) -ErrorAction Stop; if($entry -and $entry.ExecutablePath -eq $env:ECHOBIRD_ACCOUNT_EXE){ & taskkill.exe /PID $entry.ProcessId /T /F >$null 2>&1; exit $LASTEXITCODE }; exit 1"])
+                .env("ECHOBIRD_ACCOUNT_PID", process.pid.to_string())
+                .env("ECHOBIRD_ACCOUNT_EXE", &process.path)
+                .status().is_ok_and(|status| status.success());
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            if qoder_process_path(process.pid).as_ref() == Some(&process.path) {
+                stopped |= unsafe { libc::kill(process.pid as i32, libc::SIGTERM) == 0 };
+            }
+        }
+    }
+    stopped
+}
+
 /// Account storage must not be replaced while its owning desktop app is alive.
 pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     let path = super::tool_manager::get_tool_exe_path(tool_id).unwrap_or_default();
+    if matches!(tool_id, "qoder" | "qodercn") {
+        let tool_id = tool_id.to_owned();
+        return tokio::task::spawn_blocking(move || {
+            let processes = qoder_process_snapshot()?;
+            qoder_account_instances(&tool_id, std::path::Path::new(&path), processes)
+                .map(|processes| !processes.is_empty())
+        })
+        .await
+        .map_err(|_| "accountError.closeClient")?;
+    }
     #[cfg(not(windows))]
     if path.is_empty() {
         return Err("accountError.unavailable".into());
@@ -1706,6 +1965,199 @@ pub(crate) async fn stop_desktop_for_config(tool_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    fn qoder_process_fixture(
+        root: &std::path::Path,
+        name: &str,
+        edition: &str,
+        app: bool,
+    ) -> std::path::PathBuf {
+        let directory = root.join(name);
+        let executable = if cfg!(target_os = "macos") {
+            directory.join("Qoder.app/Contents/MacOS/Qoder")
+        } else if cfg!(windows) {
+            directory.join("Qoder.exe")
+        } else {
+            directory.join("qoder")
+        };
+        let resources = if cfg!(target_os = "macos") {
+            directory.join("Qoder.app/Contents/Resources")
+        } else {
+            directory.join("resources")
+        };
+        std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        let product = if app {
+            if edition == "qoder" {
+                serde_json::json!({"productId":"qoder","appId":"com.qoder.app","dataDirectoryName":"com.qoder.app.stable","protocolScheme":"qoder"})
+            } else {
+                serde_json::json!({"productId":"qoder-cn","appId":"com.qodercn.app","dataDirectoryName":"com.qodercn.app.stable","protocolScheme":"qoder-cn"})
+            }
+        } else if edition == "qoder" {
+            serde_json::json!({"nameShort":"Qoder","dataFolderName":".qoder","urlProtocol":"qoder"})
+        } else {
+            serde_json::json!({"nameShort":"QoderCN","dataFolderName":".qoder-cn","urlProtocol":"qoder-cn"})
+        };
+        std::fs::write(resources.join("product.json"), product.to_string()).unwrap();
+        #[cfg(windows)]
+        let source = super::resolve_cmd_exe();
+        #[cfg(unix)]
+        let source = which::which("sleep").unwrap();
+        std::fs::copy(source, &executable).unwrap();
+        executable
+    }
+
+    #[test]
+    fn shared_account_processes_include_the_second_install_and_exclude_other_region_and_ide() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-account-process-{}", uuid::Uuid::new_v4()));
+        for (tool_id, opposite) in [("qoder", "qodercn"), ("qodercn", "qoder")] {
+            for app in [true, false] {
+                let selected = qoder_process_fixture(&root, "user", tool_id, app);
+                let other_install = qoder_process_fixture(&root, "system", tool_id, app);
+                let other_region = qoder_process_fixture(&root, "other-region", opposite, app);
+                let other_product = qoder_process_fixture(&root, "other-product", tool_id, !app);
+                let processes = [other_install, other_region, other_product]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, path)| super::QoderAccountProcess {
+                        pid: index as u32 + 1,
+                        path,
+                    })
+                    .collect();
+                let matches =
+                    super::qoder_account_instances(tool_id, &selected, processes).unwrap();
+                assert_eq!(matches.len(), 1);
+                assert_eq!(matches[0].pid, 1);
+                assert!(super::qoder_account_instances(opposite, &selected, vec![]).is_err());
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn two_install_running_fixture_stops_only_the_verified_shared_account_owner() {
+        fn worker(executable: &std::path::Path) -> super::OwnedDesktopConfigProcess {
+            let mut command = crate::utils::process::command(executable);
+            #[cfg(windows)]
+            command.args(["/c", "ping -n 60 127.0.0.1 >nul"]);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.arg("60").process_group(0);
+            }
+            super::OwnedDesktopConfigProcess {
+                child: command.spawn().unwrap(),
+                stopped: false,
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("echobird-account-running-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        #[cfg(unix)]
+        let root = std::fs::canonicalize(root).unwrap();
+        let selected = qoder_process_fixture(&root, "user", "qoder", true);
+        let mut owner = worker(&qoder_process_fixture(&root, "system", "qoder", true));
+        let mut region_control = worker(&qoder_process_fixture(&root, "cn", "qodercn", true));
+        let mut ide_control = worker(&qoder_process_fixture(&root, "ide", "qoder", false));
+        let snapshot = super::qoder_process_snapshot().unwrap();
+        for child in [&owner, &region_control, &ide_control] {
+            assert!(snapshot.iter().any(|process| process.pid == child.id()));
+        }
+        // Restrict fixture input before matching so this test cannot target user clients.
+        let fixture = snapshot
+            .into_iter()
+            .filter(|process| process.path.starts_with(&root))
+            .collect();
+        let matches = super::qoder_account_instances("qoder", &selected, fixture).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].pid, owner.id());
+        assert!(super::stop_qoder_account_instances(&matches));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while owner.child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(region_control.child.try_wait().unwrap().is_none());
+        assert!(ide_control.child.try_wait().unwrap().is_none());
+        owner.stopped = true;
+        region_control.stop().unwrap();
+        ide_control.stop().unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn qoder_device_identity_requires_native_values_and_keeps_regions_separate() {
+        let valid = serde_json::json!({"machineToken":"sdk-token","machineType":"sdk-type","machineCode":"sdk-code","other":"ignored"});
+        let identity = super::parse_qoder_identity(valid.to_string().as_bytes()).unwrap();
+        assert_eq!(identity.machine_token, "sdk-token");
+        assert_eq!(identity.machine_type, "sdk-type");
+        assert_eq!(identity.machine_code, "sdk-code");
+        for field in ["machineToken", "machineType", "machineCode"] {
+            for value in [
+                serde_json::json!(null),
+                serde_json::json!(""),
+                serde_json::json!("token\ninvalid"),
+                serde_json::json!("x".repeat(4097)),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[field] = value;
+                assert!(super::parse_qoder_identity(invalid.to_string().as_bytes()).is_err());
+            }
+        }
+        for platform in ["windows", "macos", "linux"] {
+            for (tool, environment) in [("qoder", "3"), ("qodercn", "0")] {
+                let args = super::qoder_identity_arguments(platform, tool).unwrap();
+                assert_eq!(args[0], environment);
+                assert_eq!(args.len(), if platform == "linux" { 1 } else { 2 });
+                if platform != "linux" {
+                    assert_eq!(args[1], "--account-stdin");
+                }
+            }
+        }
+        assert!(super::qoder_identity_arguments("windows", "unknown").is_err());
+    }
+
+    #[tokio::test]
+    async fn qoder_device_identity_reads_only_the_first_bounded_line_from_an_owned_helper() {
+        #[cfg(windows)]
+        let command = {
+            let mut command = crate::utils::process::async_command("powershell.exe");
+            command.args(["-NoProfile","-NonInteractive","-Command", "$taskInput = [Console]::In.ReadLine() | ConvertFrom-Json; if ($taskInput.account -ne 'fixture-user') { exit 7 }; [Console]::Out.WriteLine('{\"machineToken\":\"fixture-token\",\"machineType\":\"fixture-type\",\"machineCode\":\"fixture-code\"}'); Start-Sleep -Seconds 30"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let command = {
+            let mut command = crate::utils::process::async_command("/bin/sh");
+            command.args(["-c", "read input; case \"$input\" in *fixture-user*) ;; *) exit 7;; esac; printf '%s\\n' '{\"machineToken\":\"fixture-token\",\"machineType\":\"fixture-type\",\"machineCode\":\"fixture-code\"}'; exec sleep 30"]);
+            command
+        };
+        let identity = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            super::read_qoder_identity(command, Some("fixture-user")),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(identity.machine_token, "fixture-token");
+        assert_eq!(identity.machine_type, "fixture-type");
+        assert_eq!(identity.machine_code, "fixture-code");
+    }
+    #[test]
+    fn minimax_launch_uses_verified_cli_and_preserves_custom_commands() {
+        let path = "/Users/alice/Tool Dir/it's/mcode";
+        for command in ["mcode", path] {
+            assert_eq!(
+                super::minimax_literal_launch_path(command, Some(path.into())).as_deref(),
+                Some(path)
+            );
+        }
+        assert!(super::minimax_literal_launch_path("mcode --custom", Some(path.into())).is_none());
+        assert!(super::minimax_literal_launch_path("mcode", None).is_none());
+        assert_eq!(
+            super::shell_single_quote(path),
+            "'/Users/alice/Tool Dir/it'\\''s/mcode'"
+        );
+    }
     #[test]
     fn copilot_literal_launch_changes_only_default_or_exact_native_commands() {
         let executable = "/Users/alice/Tool Dir/it's/copilot";

@@ -63,6 +63,7 @@ beforeEach(() => {
     remove: vi.fn(),
     claimDaily: vi.fn(),
   };
+  const emptyGroup = { ...group, accounts: [] };
   state = {
     detectedTools: [],
     isLaunching: false,
@@ -92,6 +93,9 @@ beforeEach(() => {
     workBuddyAccountGroups: { workbuddy: group, workbuddyai: group },
     traeAccountGroups: { trae: { ...group, accounts: [] }, traecn: { ...group, accounts: [] } },
     zcodeAccounts: { ...group, provider: 'bigmodel', setProvider: vi.fn() },
+    minimaxAccounts: { ...emptyGroup, region: 'cn', setRegion: vi.fn() },
+    qoderAccounts: emptyGroup,
+    qoderAccountGroups: { qoder: emptyGroup, qodercn: emptyGroup },
     deepSeekAccounts: { ...group, accounts: [] },
   } as unknown as AppManagerContextType;
 });

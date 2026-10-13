@@ -28,6 +28,7 @@ import {
 } from '../AppManager/workBuddyDailyCredits';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { ZCodeAccountProviderChoice } from '../AppManager/ZCodeAccountSection';
+import { MinimaxAccountRegionChoice } from '../AppManager/MinimaxAccountSection';
 import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
 import { QuotaCountdown } from '../AppManager/QuotaCountdown';
@@ -55,13 +56,20 @@ export function AccountCard({
   dragHandle?: ReactNode;
 }) {
   const { t } = useI18n();
-  const now = useUsageClock(account.metrics.some((metric) => Boolean(metric.resetLabel)));
+  const now = useUsageClock(
+    account.claimStatusExpiresAt != null ||
+      account.metrics.some((metric) => Boolean(metric.resetLabel))
+  );
+  const currentClaimStatus =
+    account.claimStatusExpiresAt == null || account.claimStatusExpiresAt * 1000 > now;
+  const claimed = currentClaimStatus && (account.dailyClaimed ?? dailyClaimed);
   const name = [provider.name, account.detail].filter(Boolean).join(' · ');
   const singleMetric = account.metrics.length === 1;
   const balanceOnly =
     singleMetric &&
     account.metrics.every((metric) => metric.percent == null && metric.resetAt == null);
   const evenlySpaced = !account.authorizationFailed && account.metrics.length === 2 && !balanceOnly;
+  const compactMetrics = provider.id === 'minimax' && account.metrics.length > 3;
   return (
     <article
       aria-label={`${name} ${account.identity}`}
@@ -77,9 +85,12 @@ export function AccountCard({
           {account.claim && (
             <AccountSectionRewardButton
               email={account.identity}
-              claimed={dailyClaimed}
+              claimed={claimed}
               disabled={
-                !provider.installed || provider.busy || account.refreshing || account.claimDisabled
+                !provider.installed ||
+                provider.busy ||
+                account.refreshing ||
+                (currentClaimStatus && account.claimDisabled)
               }
               onClaim={() => void account.claim!()}
             />
@@ -116,7 +127,9 @@ export function AccountCard({
                 </span>
               )}
               {account.plan && (
-                <span className="min-w-0 truncate leading-3">{accountPlanLabel(account.plan)}</span>
+                <span className="min-w-0 truncate leading-3">
+                  {provider.id === 'minimax' ? account.plan : accountPlanLabel(account.plan)}
+                </span>
               )}
             </span>
           )}
@@ -125,7 +138,7 @@ export function AccountCard({
           className={
             evenlySpaced
               ? 'contents'
-              : `flex min-h-0 flex-1 flex-col justify-center ${account.metrics.length === 2 ? 'gap-4' : 'gap-2'} ${balanceOnly || account.authorizationFailed ? 'items-center text-center' : ''}`
+              : `flex min-h-0 flex-1 flex-col justify-center ${compactMetrics ? 'gap-0' : account.metrics.length === 2 ? 'gap-4' : 'gap-2'} ${balanceOnly || account.authorizationFailed ? 'items-center text-center' : ''}`
           }
         >
           {account.authorizationFailed ? (
@@ -147,7 +160,10 @@ export function AccountCard({
                 (singleMetric &&
                   [t('accountCenter.quota'), t('agent.credits')].includes(metric.label));
               return (
-                <div key={index} className="flex w-full flex-shrink-0 flex-col gap-1">
+                <div
+                  key={index}
+                  className={`flex w-full flex-shrink-0 flex-col ${compactMetrics ? 'gap-0' : 'gap-1'}`}
+                >
                   <div
                     className={
                       balanceOnly
@@ -167,7 +183,7 @@ export function AccountCard({
                       )}
                       {(provider.id === 'workbuddy' ||
                         (provider.id === 'traecn' && account.showUnclaimed)) &&
-                        !dailyClaimed &&
+                        !claimed &&
                         metric.label === t('agent.rewardCredits') && (
                           <span className="flex-shrink-0 text-[10px] font-semibold leading-[16px] text-cyber-text">
                             {t('agent.dailyCreditsUnclaimed')}
@@ -524,18 +540,34 @@ export function AccountCenterPanel() {
                     busy: provider.busy,
                   }}
                   secondary={
-                    provider.busy ? (
+                    provider.busy &&
+                    provider.id === 'minimax' &&
+                    context.minimaxAccounts.login?.userCode ? (
+                      <span className="flex items-center gap-2">
+                        <span>
+                          {(provider.waitingLabel ?? t('agent.waitingForBrowser')).replace(
+                            '{seconds}',
+                            String(provider.remainingSeconds)
+                          )}
+                        </span>
+                        <span className="font-mono">{context.minimaxAccounts.login.userCode}</span>
+                      </span>
+                    ) : provider.busy ? (
                       (provider.waitingLabel ?? t('agent.waitingForBrowser')).replace(
                         '{seconds}',
                         String(provider.remainingSeconds)
                       )
                     ) : !provider.installed ? (
                       `${hostname} · ${t('status.notInstalled')}`
-                    ) : provider.id === 'zcode' ? (
+                    ) : provider.id === 'zcode' || provider.id === 'minimax' ? (
                       <span className="flex items-center gap-2">
                         <span className="min-w-0 truncate">{hostname}</span>
                         <span className="pointer-events-auto relative flex-shrink-0">
-                          <ZCodeAccountProviderChoice disabled={disabled} />
+                          {provider.id === 'minimax' ? (
+                            <MinimaxAccountRegionChoice disabled={disabled} />
+                          ) : (
+                            <ZCodeAccountProviderChoice disabled={disabled} />
+                          )}
                         </span>
                       </span>
                     ) : undefined

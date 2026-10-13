@@ -42,7 +42,10 @@ export type AccountProvider =
   | 'copilot'
   | 'kilo'
   | 'trae'
-  | 'traecn';
+  | 'traecn'
+  | 'minimax'
+  | 'qoder'
+  | 'qoderCn';
 
 export interface AccountSource {
   provider: AccountProvider;

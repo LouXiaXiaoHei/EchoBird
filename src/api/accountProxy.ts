@@ -9,6 +9,9 @@ export const accountProxyProviders: { id: AccountProvider; name: string; icon: s
   { id: 'antigravity', name: 'Antigravity', icon: 'antigravity.png' },
   { id: 'trae', name: 'Trae', icon: 'trae.svg' },
   { id: 'traecn', name: 'Trae CN', icon: 'traecn.svg' },
+  { id: 'minimax', name: 'MiniMax', icon: 'minimaxdesktop.svg' },
+  { id: 'qoder', name: 'Qoder', icon: 'qoder.svg' },
+  { id: 'qoderCn', name: 'Qoder CN', icon: 'qoder.svg' },
   { id: 'kilo', name: 'Kilo', icon: 'kilodesktop.png' },
   { id: 'copilot', name: 'GitHub Copilot', icon: 'copilotdesktop.png' },
 ];
@@ -17,6 +20,19 @@ export interface ProxyAccount {
   source: AccountSource;
   label: string;
   plan?: string;
+  region?: 'cn' | 'global';
+  modelLabels?: Record<string, string>;
+}
+
+export function accountModelPickerOptions(
+  models: string[],
+  currentId: string,
+  labels?: Record<string, string>
+): string[] {
+  const alias = labels?.[currentId];
+  return alias && alias !== currentId
+    ? models.map((id) => (id === alias ? currentId : id))
+    : models;
 }
 
 export function listProxyAccounts(provider: AccountProvider): Promise<ProxyAccount[]> {

@@ -35,7 +35,7 @@ export const QuotaCountdown: React.FC<{
   return (
     <span
       aria-label={label && countdown ? `${label} ${countdown}` : undefined}
-      className={`${compact ? '' : 'w-[64px] '}flex-shrink-0 text-center ${small ? 'text-[10px]' : 'text-[12px]'} font-semibold leading-[16px] text-cyber-text`}
+      className={`${compact ? '' : 'w-[64px] '}inline-flex flex-shrink-0 items-center justify-center align-middle text-center ${small ? 'text-[10px]' : 'text-[12px]'} font-semibold leading-[16px] text-cyber-text`}
     >
       {parenthesized && countdown ? `(${countdown})` : countdown}
     </span>

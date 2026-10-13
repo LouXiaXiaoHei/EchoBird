@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState } from 'react';
+import { useLayoutEffect, useState, type ComponentProps } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AccountModelFields } from './AccountModelFields';
@@ -10,7 +10,16 @@ import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 const { showToast } = vi.hoisted(() => ({ showToast: vi.fn() }));
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
-vi.mock('../../components/ModelIdCombobox', () => ({ ModelIdCombobox: () => null }));
+vi.mock('react-dom', () => ({ createPortal: (children: unknown) => children }));
+vi.mock('../../components/ModelIdCombobox', async (original) => {
+  const actual = await original<typeof import('../../components/ModelIdCombobox')>();
+  return {
+    ModelIdCombobox: (props: ComponentProps<typeof actual.ModelIdCombobox>) =>
+      props.ariaLabel === 'model.modelId' && props.optionLabels ? (
+        <actual.ModelIdCombobox {...props} />
+      ) : null,
+  };
+});
 vi.mock('../../api/accountProxy', async (original) => ({
   ...(await original<typeof import('../../api/accountProxy')>()),
   listProxyAccounts: vi.fn(),
@@ -55,7 +64,15 @@ function Harness({
 }
 async function open(accountId = '', modelId = '', provider: AccountProvider = 'codex') {
   await act(async () => {
-    renderer = create(<Harness accountId={accountId} modelId={modelId} provider={provider} />);
+    renderer = create(<Harness accountId={accountId} modelId={modelId} provider={provider} />, {
+      createNodeMock: (element) =>
+        element.type === 'input'
+          ? {
+              blur: vi.fn(),
+              getBoundingClientRect: () => ({ left: 12, width: 240, top: 100, bottom: 130 }),
+            }
+          : null,
+    });
   });
 }
 function field(label: string) {
@@ -67,6 +84,17 @@ beforeEach(() => {
   stored = new Map();
   setItem = vi.fn((key: string, value: string) => stored.set(key, value));
   vi.stubGlobal('localStorage', { getItem: (key: string) => stored.get(key) ?? null, setItem });
+  vi.stubGlobal('window', {
+    innerHeight: 800,
+    innerWidth: 1000,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  });
+  vi.stubGlobal('document', {
+    body: {},
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  });
   vi.mocked(api.listProxyAccounts)
     .mockReset()
     .mockResolvedValue([
@@ -392,4 +420,155 @@ it('recovers a damaged cache without persisting account credentials', async () =
   await open('first');
   expect(current.modelIdOptions).toEqual(['gpt-fixture', 'gpt-other']);
   expect([...stored.values()]).toEqual([JSON.stringify(['gpt-fixture', 'gpt-other'])]);
+});
+
+it('MiniMax distinguishes regions with the same identity and keeps each account model directory cached', async () => {
+  const cn = {
+    source: { provider: 'minimax' as const, accountId: 'cn' },
+    label: 'same@example.test',
+    region: 'cn' as const,
+  };
+  const global = {
+    ...cn,
+    source: { provider: 'minimax' as const, accountId: 'global' },
+    region: 'global' as const,
+  };
+  vi.mocked(api.listProxyAccounts).mockResolvedValue([cn, global]);
+  api.cacheAccountProxyModels(cn.source, ['cn-model']);
+  api.cacheAccountProxyModels(global.source, ['global-model']);
+  await open('', '', 'minimax');
+  expect(current.accountSource).toEqual(cn.source);
+  expect(current.modelId).toBe('cn-model');
+  expect(field('accountProxy.account').props.optionLabels).toEqual({
+    cn: 'agent.minimaxRegionCn · same@example.test',
+    global: 'agent.minimaxRegionGlobal · same@example.test',
+  });
+  await act(async () => field('accountProxy.account').props.onChange('global'));
+  expect(current.modelId).toBe('global-model');
+  expect(current.name).toBe('agent.minimaxRegionGlobal · same@example.test');
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+});
+
+it('Qoder editions isolate account directories even when saved IDs match', async () => {
+  vi.mocked(api.listProxyAccounts).mockImplementation(async (provider) => [
+    {
+      source: { provider, accountId: 'same' },
+      label: provider,
+      plan: 'free',
+      modelLabels: { [provider === 'qoder' ? 'global-model' : 'cn-model']: `${provider} visible` },
+    },
+  ]);
+  api.cacheAccountProxyModels({ provider: 'qoder', accountId: 'same' }, ['global-model']);
+  api.cacheAccountProxyModels({ provider: 'qoderCn', accountId: 'same' }, ['cn-model']);
+  await open('', '', 'qoder');
+  expect(current.modelId).toBe('global-model');
+  expect(renderer.root.findByType('input').props.value).toBe('qoder visible');
+  expect(field('accountProxy.account').props.optionLabels.same).toBe('qoder · Free');
+  await act(async () => field('accountProxy.provider').props.onChange('qoderCn'));
+  expect(current.accountSource).toEqual({ provider: 'qoderCn', accountId: 'same' });
+  expect(current.modelId).toBe('cn-model');
+  expect(renderer.root.findByType('input').props.value).toBe('qoderCn visible');
+  expect(field('accountProxy.account').props.optionLabels.same).toBe('qoderCn · agent.qoderTrial');
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+});
+
+it('renders an old Qoder native selection through cached labels without fetching or changing stored IDs', async () => {
+  let resolve!: (rows: api.ProxyAccount[]) => void;
+  vi.mocked(api.listProxyAccounts).mockReturnValueOnce(
+    new Promise((done) => {
+      resolve = done;
+    })
+  );
+  const source = { provider: 'qoder' as const, accountId: 'saved' };
+  api.cacheAccountProxyModels(source, ['Cantus', 'Qwen3.8-Max']);
+  setItem.mockClear();
+  await open('saved', 'cmodel', 'qoder');
+  expect(current.modelId).toBe('cmodel');
+  expect(field('model.modelId').props.disabled).toBe(true);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  await act(async () =>
+    resolve([{ source, label: 'Qoder identity', modelLabels: { cmodel: 'Cantus' } }])
+  );
+  expect(current.modelId).toBe('cmodel');
+  expect(current.modelIdOptions).toEqual(['cmodel', 'Qwen3.8-Max']);
+  expect(renderer.root.findByType('input').props.value).toBe('Cantus');
+  act(() => renderer.root.findByType('input').props.onFocus());
+  const selected = renderer.root.find(
+    (node) => node.type === 'div' && node.props.onMouseDown && node.children[0] === 'Cantus'
+  );
+  expect(selected.props.className).toContain('bg-cyber-text/15');
+  await act(async () => selected.props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+  expect(current.modelId).toBe('cmodel');
+  expect(api.getCachedAccountProxyModels(source)).toEqual(['Cantus', 'Qwen3.8-Max']);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(setItem).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+});
+
+it('refreshes Qoder labels from local metadata without rewriting an equivalent native selection', async () => {
+  const source = { provider: 'qoder' as const, accountId: 'saved' };
+  api.cacheAccountProxyModels(source, ['cmodel', 'other']);
+  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+    { source, label: 'Qoder identity', modelLabels: { cmodel: 'Cantus' } },
+  ]);
+  await open('saved', 'cmodel', 'qoder');
+  vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['Updated Cantus', 'Qwen3.8-Max']);
+  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+    { source, label: 'Qoder identity', modelLabels: { cmodel: 'Updated Cantus' } },
+  ]);
+  setItem.mockClear();
+  await act(async () => field('model.modelId').props.onRefresh());
+  expect(current.modelId).toBe('cmodel');
+  expect(current.modelIdOptions).toEqual(['cmodel', 'Qwen3.8-Max']);
+  expect(renderer.root.findByType('input').props.value).toBe('Updated Cantus');
+  expect(api.getCachedAccountProxyModels(source)).toEqual(['Updated Cantus', 'Qwen3.8-Max']);
+  expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+  expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+  expect(setItem).toHaveBeenCalledOnce();
+  expect(showToast).not.toHaveBeenCalled();
+});
+
+it('ignores late Qoder label rereads after switching editions and preserves snapshots on local read failure', async () => {
+  const global = { provider: 'qoder' as const, accountId: 'shared' };
+  const cn = { provider: 'qoderCn' as const, accountId: 'shared' };
+  api.cacheAccountProxyModels(global, ['cmodel', 'global-other']);
+  api.cacheAccountProxyModels(cn, ['cn-native']);
+  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+    { source: global, label: 'Global identity', modelLabels: { cmodel: 'Cantus' } },
+  ]);
+  await open('shared', 'cmodel', 'qoder');
+  let resolve!: (rows: api.ProxyAccount[]) => void;
+  vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['New Global Model']);
+  vi.mocked(api.listProxyAccounts)
+    .mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    )
+    .mockResolvedValueOnce([
+      { source: cn, label: 'CN identity', modelLabels: { 'cn-native': 'CN Model' } },
+    ]);
+  await act(async () => {
+    void field('model.modelId').props.onRefresh();
+  });
+  await act(async () => field('accountProxy.provider').props.onChange('qoderCn'));
+  setItem.mockClear();
+  await act(async () =>
+    resolve([{ source: global, label: 'Old global', modelLabels: { cmodel: 'New Global Model' } }])
+  );
+  expect(current.accountSource).toEqual(cn);
+  expect(current.modelId).toBe('cn-native');
+  expect(renderer.root.findByType('input').props.value).toBe('CN Model');
+  expect(api.getCachedAccountProxyModels(global)).toEqual(['cmodel', 'global-other']);
+  expect(setItem).not.toHaveBeenCalled();
+  vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['Changed CN Model']);
+  vi.mocked(api.listProxyAccounts).mockRejectedValueOnce(new Error('Local metadata unavailable'));
+  const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  await act(async () => field('model.modelId').props.onRefresh());
+  quiet.mockRestore();
+  expect(current.modelIdOptions).toEqual(['cn-native']);
+  expect(renderer.root.findByType('input').props.value).toBe('CN Model');
+  expect(api.getCachedAccountProxyModels(cn)).toEqual(['cn-native']);
+  expect(setItem).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
 });

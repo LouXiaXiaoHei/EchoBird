@@ -12,12 +12,16 @@ pub mod services;
 pub mod utils;
 
 use commands::account_proxy_commands;
+use commands::cline_account_commands;
 use commands::copilot_account_commands;
 use commands::kilo_account_commands;
+use commands::minimax_account_commands;
 use commands::mod_stub;
 use commands::model_commands;
+use commands::native_account_commands;
 use commands::process_commands;
 use commands::pulse_commands;
+use commands::qoder_account_commands;
 use commands::settings_commands;
 use commands::smart_router_commands;
 use commands::tool_commands;
@@ -68,6 +72,14 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "minimaxdesktop",
             include_str!("../../docs/api/tools/install/minimaxdesktop.json"),
+        ),
+        (
+            "qoder",
+            include_str!("../../docs/api/tools/install/qoder.json"),
+        ),
+        (
+            "qodercn",
+            include_str!("../../docs/api/tools/install/qodercn.json"),
         ),
         (
             "claudecode",
@@ -162,6 +174,14 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "clashverge",
             include_str!("../../docs/api/tools/install/clashverge.json"),
+        ),
+        (
+            "kirocrew",
+            include_str!("../../docs/api/tools/install/kirocrew.json"),
+        ),
+        (
+            "kirocli",
+            include_str!("../../docs/api/tools/install/kirocli.json"),
         ),
         (
             "trae",
@@ -1087,6 +1107,13 @@ pub fn run() {
             tool_commands::switch_grok_account,
             tool_commands::delete_grok_account,
             tool_commands::refresh_grok_account,
+            cline_account_commands::list_cline_accounts,
+            cline_account_commands::start_cline_login,
+            cline_account_commands::poll_cline_login,
+            cline_account_commands::cancel_cline_login,
+            cline_account_commands::switch_cline_account,
+            cline_account_commands::delete_cline_account,
+            cline_account_commands::refresh_cline_account,
             tool_commands::list_claude_desktop_accounts,
             tool_commands::start_claude_desktop_login,
             tool_commands::poll_claude_desktop_login,
@@ -1109,6 +1136,13 @@ pub fn run() {
             tool_commands::refresh_cue_account,
             tool_commands::delete_cue_account,
             tool_commands::list_workbuddy_accounts,
+            tool_commands::list_kiro_accounts,
+            tool_commands::start_kiro_login,
+            tool_commands::poll_kiro_login,
+            tool_commands::cancel_kiro_login,
+            tool_commands::switch_kiro_account,
+            tool_commands::refresh_kiro_account_quota,
+            tool_commands::delete_kiro_account,
             tool_commands::list_trae_accounts,
             tool_commands::start_trae_login,
             tool_commands::poll_trae_login,
@@ -1146,8 +1180,26 @@ pub fn run() {
             tool_commands::open_folder,
             tool_commands::open_tool_paths_config,
             model_commands::get_models,
+            model_commands::fetch_upstream_model_catalog,
+            model_commands::get_cached_upstream_model_catalog,
             account_proxy_commands::list_proxy_accounts,
             account_proxy_commands::get_account_proxy_models,
+            minimax_account_commands::list_minimax_accounts,
+            minimax_account_commands::start_minimax_login,
+            minimax_account_commands::poll_minimax_login,
+            minimax_account_commands::cancel_minimax_login,
+            minimax_account_commands::delete_minimax_account,
+            minimax_account_commands::refresh_minimax_account,
+            minimax_account_commands::claim_minimax_daily_credits,
+            native_account_commands::switch_minimax_account,
+            native_account_commands::switch_qoder_account,
+            qoder_account_commands::list_qoder_accounts,
+            qoder_account_commands::start_qoder_login,
+            qoder_account_commands::poll_qoder_login,
+            qoder_account_commands::cancel_qoder_login,
+            qoder_account_commands::refresh_qoder_account_quota,
+            qoder_account_commands::claim_qoder_daily_credits,
+            qoder_account_commands::delete_qoder_account,
             kilo_account_commands::list_kilo_accounts,
             kilo_account_commands::start_kilo_login,
             kilo_account_commands::poll_kilo_login,
@@ -1237,10 +1289,10 @@ pub fn run() {
             ai_career_commands::ai_career_family_history,
             ai_career_commands::ai_career_heatmap,
             ai_career_commands::ai_career_token_bytes,
-            pulse_commands::pulse_save,
-            pulse_commands::pulse_load_all,
             ai_career_commands::ai_career_daily_tokens,
             ai_career_commands::reveal_ai_career_session_file,
+            pulse_commands::pulse_save,
+            pulse_commands::pulse_load_all,
             settings_commands::set_avatar,
             settings_commands::get_avatar,
         ])
