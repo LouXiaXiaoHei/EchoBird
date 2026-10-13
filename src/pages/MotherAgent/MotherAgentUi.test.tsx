@@ -5,9 +5,11 @@ import { loadLocale, translate, type TKey } from '../../i18n';
 import * as api from '../../api/tauri';
 import { ConversationList } from './ConversationList';
 import { MotherAgentMain } from './MotherAgentMain';
+import { MotherAgentPanel } from './MotherAgentPanel';
 import { QuickCommandChips } from './QuickCommandChips';
-import { ChatBubble } from '../../components/chat';
+import { ChatBubble, ToolCallCard } from '../../components/chat';
 import { RemoteModelSelector } from '../../components/RemoteModelSelector';
+import { ViewModeTabs } from '../../components/ViewModeTabs';
 import type { MotherAgentCtx } from './types';
 
 let state: Partial<MotherAgentCtx>;
@@ -26,6 +28,7 @@ vi.mock('../../stores/navigationStore', () => ({
     selector({ activePage }),
 }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
+vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => vi.fn(async () => true) }));
 vi.mock('../../components/RemoteModelSelector', () => ({ RemoteModelSelector: () => null }));
 vi.mock('../../components/chat', () => ({
   ChatBubble: ({ content }: { content: string }) => <span>{content}</span>,
@@ -86,6 +89,7 @@ beforeEach(() => {
     isResetting: false,
     setChatInput: vi.fn(),
     selectedServerId: 'local',
+    sshServers: [],
     models: [],
     chatInput: '',
     chatOutput: [],
@@ -98,6 +102,170 @@ beforeEach(() => {
     reasoningLevels: [],
     setReasoningEffort: vi.fn(),
   };
+});
+
+it('keeps automatic memory operations out of the visible conversation', () => {
+  state = {
+    ...state,
+    chatOutput: [
+      { type: 'user', text: 'Continue the task' },
+      ...Array.from({ length: 35 }, (_, index) => ({
+        type: 'tool_call' as const,
+        id: `memory-${index}`,
+        name: 'memory_update',
+        args: '{}',
+        output: 'internal note',
+        status: 'done' as const,
+      })),
+      {
+        type: 'tool_call',
+        id: 'shell',
+        name: 'shell_exec',
+        args: '{}',
+        output: 'verified',
+        status: 'done',
+      },
+      { type: 'assistant', text: 'Task completed' },
+    ],
+  };
+  act(() => {
+    renderer = create(<MotherAgentMain />);
+  });
+  const cards = renderer!.root.findAllByType(ToolCallCard);
+  expect(cards).toHaveLength(1);
+  expect(cards[0].props.name).toBe('shell_exec');
+  expect(renderer!.root.findAllByType(ChatBubble).map((bubble) => bubble.props.content)).toEqual([
+    'Continue the task',
+    'Task completed',
+  ]);
+  expect(state.chatOutput).toHaveLength(38);
+  expect(JSON.stringify(renderer!.toJSON())).not.toContain('internal note');
+});
+
+describe('Mother Agent visible history pagination', () => {
+  const hidden = (count: number) =>
+    Array.from({ length: count }, (_, index) => ({
+      type: 'tool_call' as const,
+      id: `memory-${index}`,
+      name: 'memory_search',
+      args: '{}',
+      status: 'done' as const,
+    }));
+  const contents = () =>
+    renderer!.root
+      .findAllByType(ChatBubble)
+      .filter((bubble) => bubble.props.role !== 'skeleton')
+      .map((bubble) => bubble.props.content);
+  const mountScrollable = async () => {
+    const container = { scrollTop: 0, scrollHeight: 1000, clientHeight: 300, children: [] };
+    await act(async () => {
+      renderer = create(<MotherAgentMain />, {
+        createNodeMock: (element) => (element.props.onScroll ? container : null),
+      });
+    });
+    container.scrollTop = 0;
+    return renderer!.root.find((node) => typeof node.props.onScroll === 'function');
+  };
+
+  it('windows and expands visible history while preserving the raw message count', async () => {
+    const messages = Array.from({ length: 40 }, (_, index) => ({
+      type: 'user' as const,
+      text: `visible-${index}`,
+    }));
+    state = { ...state, chatOutput: [...messages, ...hidden(35)], maDiskTotal: 75 };
+    const scrollArea = await mountScrollable();
+    expect(contents()).toEqual(messages.slice(-30).map((message) => message.text));
+    act(() => void scrollArea.props.onScroll());
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(contents()).toEqual(messages.map((message) => message.text));
+    expect(state.chatOutput).toHaveLength(75);
+    expect(state.loadOlderChat).not.toHaveBeenCalled();
+    expect(scrollArea.props.className).toBe('absolute inset-0 overflow-y-auto slim-scroll p-4');
+  });
+
+  it('loads through hidden-only older chunks to reach visible history using raw disk progress', async () => {
+    const recent = [
+      { type: 'user' as const, text: 'Recent request' },
+      { type: 'assistant' as const, text: 'Recent answer' },
+    ];
+    const earlier = [
+      { type: 'user' as const, text: 'Earlier request' },
+      { type: 'assistant' as const, text: 'Earlier answer' },
+    ];
+    const chunks = [hidden(35), hidden(20), earlier];
+    const load = vi.fn(async () => {
+      const older = chunks.shift()!;
+      state = { ...state, chatOutput: [...older, ...state.chatOutput!] };
+      renderer!.update(<MotherAgentMain />);
+      return older;
+    });
+    state = { ...state, chatOutput: recent, maDiskTotal: 59, loadOlderChat: load };
+    const scrollArea = await mountScrollable();
+    expect(load).not.toHaveBeenCalled();
+    await act(async () => scrollArea.props.onScroll());
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(contents()).toEqual([
+      'Earlier request',
+      'Earlier answer',
+      'Recent request',
+      'Recent answer',
+    ]);
+    expect(state.chatOutput).toHaveLength(59);
+    await act(async () => scrollArea.props.onScroll());
+    expect(load).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops hidden-only paging at the raw disk length or an empty chunk', async () => {
+    const chunks = [hidden(30), hidden(10)];
+    const load = vi.fn(async () => {
+      const older = chunks.shift()!;
+      state = { ...state, chatOutput: [...older, ...state.chatOutput!] };
+      renderer!.update(<MotherAgentMain />);
+      return older;
+    });
+    state = {
+      ...state,
+      chatOutput: [{ type: 'user', text: 'Keep visible' }],
+      maDiskTotal: 41,
+      loadOlderChat: load,
+    };
+    const scrollArea = await mountScrollable();
+    await act(async () => scrollArea.props.onScroll());
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(contents()).toEqual(['Keep visible']);
+    expect(renderer!.root.findAllByProps({ role: 'skeleton' })).toHaveLength(0);
+    load.mockResolvedValueOnce([]);
+    state = { ...state, maDiskTotal: 80 };
+    await act(async () => renderer!.update(<MotherAgentMain />));
+    await act(async () => scrollArea.props.onScroll());
+    expect(load).toHaveBeenCalledTimes(3);
+    expect(contents()).toEqual(['Keep visible']);
+  });
+
+  it('does not continue old hidden paging after changing conversations', async () => {
+    let resolve!: (older: ReturnType<typeof hidden>) => void;
+    const load = vi.fn(() => new Promise<ReturnType<typeof hidden>>((done) => (resolve = done)));
+    state = {
+      ...state,
+      chatOutput: [{ type: 'user', text: 'Old request' }],
+      maDiskTotal: 100,
+      loadOlderChat: load,
+    };
+    const scrollArea = await mountScrollable();
+    act(() => void scrollArea.props.onScroll());
+    state = {
+      ...state,
+      activeConversationId: 'second',
+      chatOutput: [{ type: 'user', text: 'New request' }],
+    };
+    await act(async () => renderer!.update(<MotherAgentMain />));
+    await act(async () => resolve(hidden(35)));
+    expect(load).toHaveBeenCalledOnce();
+    expect(contents()).toEqual(['New request']);
+    expect(renderer!.root.findAllByProps({ role: 'skeleton' })).toHaveLength(0);
+  });
 });
 
 it('changes model selection without clear advice or a legacy clear-chat listener', () => {
@@ -181,6 +349,49 @@ afterEach(() => {
   renderer = undefined;
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+describe('Mother Agent panel tabs', () => {
+  it.each(['en', 'zh-Hans', 'zh-Hant', 'ja'])(
+    'keeps only the three existing tabs with the shared active effect in %s',
+    async (language) => {
+      locale = language;
+      await loadLocale(locale);
+      state = { ...state, parasiteAgent: null };
+      act(() => {
+        renderer = create(<MotherAgentPanel />);
+      });
+      const tabs = renderer!.root.findByType(ViewModeTabs);
+      expect(tabs.findByType('div').props.className).toContain(
+        'view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden'
+      );
+      expect(tabs.parent?.props.className).toBe(
+        'h-10 px-2 flex items-center justify-between bg-transparent'
+      );
+      const buttons = tabs.findAllByType('button');
+      expect(buttons.map((button) => button.children[0])).toEqual(
+        (['mother.conversations', 'mother.servers', 'mother.sshGuide'] as const).map((key) =>
+          translate(key, locale)
+        )
+      );
+      for (const [index, button] of buttons.entries()) {
+        expect(button.props.className).toContain('view-mode-tab');
+        expect(button.props.className).toContain('text-sm');
+        expect(button.props.className).not.toContain('cursor-');
+        expect(button.props.title).toBeUndefined();
+        act(() => button.props.onClick());
+        expect(buttons.map((tab) => tab.props['aria-pressed'])).toEqual(
+          buttons.map((_, tabIndex) => tabIndex === index)
+        );
+        expect(renderer!.root.findAllByType('textarea')).toHaveLength(0);
+        expect(renderer!.root.findAllByType('select')).toHaveLength(0);
+      }
+      expect(state.createConversation).not.toHaveBeenCalled();
+      expect(state.selectConversation).not.toHaveBeenCalled();
+      expect(state.deleteConversation).not.toHaveBeenCalled();
+      expect(showToast).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe('Mother Agent conversation list', () => {
@@ -301,7 +512,8 @@ describe('Mother Agent welcome screen', () => {
       });
     });
     const scrollArea = renderer!.root.find((node) => typeof node.props.onScroll === 'function');
-    act(() => scrollArea.props.onScroll());
+    scrollContainer.scrollTop = 0;
+    act(() => void scrollArea.props.onScroll());
     state = { ...state, activeConversationId: 'second' };
     await act(async () => renderer!.update(<MotherAgentMain />));
     act(() => {

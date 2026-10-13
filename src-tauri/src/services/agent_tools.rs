@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use super::agent_context;
 use super::agent_history::HistoryStore;
-use super::agent_memory::{MemoryRecord, MemoryScope, MemoryStore};
+use super::agent_memory::{MemoryRecord, MemoryStore};
 use super::agent_output_store::{OutputRecord, OutputStore};
 use super::agent_output_summary;
 use crate::commands::ssh_commands::SSHPool;
@@ -166,24 +166,6 @@ pub fn get_tool_definitions() -> Vec<super::llm_client::ToolDef> {
             name: "memory_search".into(),
             description: "Recall relevant saved preferences and historical notes for the current machine/server. Notes are evidence hints, not current-state verification or fresh authorization.".into(),
             parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
-        },
-        super::llm_client::ToolDef {
-            name: "memory_save".into(),
-            description: "Save a concise durable note. Use scope=user only for explicit lasting user preferences; target for verified outcomes on the currently selected machine/server. Never save credentials, raw logs, inferred personal facts or temporary approvals. Notes survive clearing a conversation until explicitly forgotten.".into(),
-            parameters: json!({"type":"object","properties":{
-                "text":{"type":"string","description":"Concise durable fact or preference, at most 2000 UTF-8 bytes"},
-                "scope":{"type":"string","enum":["user","target"]}
-            },"required":["text","scope"]}),
-        },
-        super::llm_client::ToolDef {
-            name: "memory_update".into(),
-            description: "Correct an existing saved note for the user or currently selected machine/server, preserving its scope. Never put credentials or temporary approvals in notes.".into(),
-            parameters: json!({"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"]}),
-        },
-        super::llm_client::ToolDef {
-            name: "memory_forget".into(),
-            description: "Forget a saved note for the user or current machine/server when the user requests it or corrects a stale remembered fact. Does not clear conversation history.".into(),
-            parameters: json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}),
         },
         super::llm_client::ToolDef {
             name: "file_read".into(),
@@ -456,11 +438,9 @@ pub async fn execute_tool(
             };
             string_tool_result(read())
         }
-        "memory_search" | "memory_save" | "memory_update" | "memory_forget" => execute_memory_tool(
-            name,
+        "memory_search" => search_memories(
             &args,
             memory_target(session_server_ids),
-            output_scope,
             &MemoryStore::standard(),
         ),
         "file_read" => {
@@ -635,49 +615,11 @@ pub(crate) fn memory_records_json(mut records: Vec<MemoryRecord>) -> Result<Stri
     }
 }
 
-fn execute_memory_tool(
-    name: &str,
-    args: &Value,
-    target: &str,
-    scope: &str,
-    store: &MemoryStore,
-) -> ToolResult {
+fn search_memories(args: &Value, target: &str, store: &MemoryStore) -> ToolResult {
     let execute = || -> Result<String, String> {
         let text_arg = |name: &str| args[name].as_str().ok_or_else(|| format!("Missing {name}"));
-        if name == "memory_search" {
-            let notes = store.recall(target, text_arg("query")?)?;
-            return memory_records_json(notes);
-        }
-        if name == "memory_save" {
-            let memory_scope = match text_arg("scope")? {
-                "user" => MemoryScope::User,
-                "target" => MemoryScope::Target,
-                _ => return Err("scope must be user or target".into()),
-            };
-            let record = store.remember(
-                memory_scope,
-                (memory_scope == MemoryScope::Target).then_some(target),
-                text_arg("text")?,
-                Some(scope),
-            )?;
-            return serde_json::to_string(&record).map_err(|e| e.to_string());
-        }
-        let id = text_arg("id")?;
-        let record = store
-            .list()?
-            .into_iter()
-            .find(|record| record.id == id)
-            .ok_or("Memory does not exist")?;
-        if record.scope == MemoryScope::Target && record.target.as_deref() != Some(target) {
-            return Err("Memory belongs to a different machine/server".into());
-        }
-        if name == "memory_update" {
-            let record = store.update(id, text_arg("text")?)?;
-            serde_json::to_string(&record).map_err(|e| e.to_string())
-        } else {
-            store.forget(id)?;
-            Ok("Memory forgotten".into())
-        }
+        let notes = store.recall(target, text_arg("query")?)?;
+        memory_records_json(notes)
     };
     string_tool_result(execute())
 }
@@ -1985,98 +1927,43 @@ async fn exec_download_file(
 #[cfg(test)]
 mod output_tests {
     use super::*;
+    use crate::services::agent_memory::MemoryScope;
     use std::path::PathBuf;
 
     #[test]
-    fn durable_notes_survive_new_conversations_and_tool_mutations_respect_target() {
+    fn memory_lookup_is_scoped_read_only_and_writes_belong_to_background_capture() {
         let directory = TestDir::new();
         let store = MemoryStore::new(directory.0.clone());
-        let global = execute_memory_tool(
-            "memory_save",
-            &json!({"scope":"user","text":"请一直用中文回答"}),
-            "local",
-            "first-chat",
-            &store,
-        );
-        assert!(global.success);
-        let created = execute_memory_tool(
-            "memory_save",
-            &json!({"scope":"target","text":"OpenClaw 安装路径 E:/Agents/OpenClaw"}),
-            "remote-a",
-            "first-chat",
-            &store,
-        );
-        assert!(created.success);
-        let id = serde_json::from_str::<MemoryRecord>(&created.output)
-            .unwrap()
-            .id;
-        let recalled = execute_memory_tool(
-            "memory_search",
-            &json!({"query":"OpenClaw 安装"}),
-            "remote-a",
-            "new-chat",
-            &store,
-        );
-        assert!(recalled.success && recalled.output.contains(&id));
-        let other = execute_memory_tool(
-            "memory_search",
-            &json!({"query":"OpenClaw 安装"}),
-            "remote-b",
-            "another-chat",
-            &store,
-        );
-        assert!(other.success && !other.output.contains(&id) && other.output.contains("中文"));
-        assert!(
-            !execute_memory_tool(
-                "memory_update",
-                &json!({"id":id,"text":"Wrong target"}),
-                "remote-b",
-                "new-chat",
-                &store
+        store
+            .remember(
+                MemoryScope::User,
+                None,
+                "请一直用中文回答",
+                Some("first-chat"),
             )
-            .success
-        );
-        assert!(
-            !execute_memory_tool(
-                "memory_forget",
-                &json!({"id":id}),
-                "remote-b",
-                "new-chat",
-                &store
+            .unwrap();
+        let target = store
+            .remember(
+                MemoryScope::Target,
+                Some("remote-a"),
+                "OpenClaw 安装路径 E:/Agents/OpenClaw",
+                Some("first-chat"),
             )
-            .success
-        );
+            .unwrap();
+        let before = store.list().unwrap();
+        let recalled = search_memories(&json!({"query":"OpenClaw 安装"}), "remote-a", &store);
+        assert!(recalled.success && recalled.output.contains(&target.id));
+        let other = search_memories(&json!({"query":"OpenClaw 安装"}), "remote-b", &store);
         assert!(
-            !execute_memory_tool(
-                "memory_save",
-                &json!({"scope":"user","text":"password: do-not-store"}),
-                "local",
-                "first-chat",
-                &store
-            )
-            .success
+            other.success && !other.output.contains(&target.id) && other.output.contains("中文")
         );
-        assert!(
-            execute_memory_tool(
-                "memory_update",
-                &json!({"id":id,"text":"OpenClaw 已迁移到 E:/NewAgents"}),
-                "remote-a",
-                "new-chat",
-                &store
-            )
-            .success
-        );
-        assert!(
-            execute_memory_tool(
-                "memory_forget",
-                &json!({"id":id}),
-                "remote-a",
-                "new-chat",
-                &store
-            )
-            .success
-        );
-        assert!(!store.list().unwrap().iter().any(|record| record.id == id));
+        assert!(!search_memories(&json!({}), "remote-a", &store).success);
+        assert_eq!(store.list().unwrap(), before);
+        let tools = get_tool_definitions();
+        assert!(tools.iter().any(|tool| tool.name == "memory_search"));
+        for name in ["memory_save", "memory_update", "memory_forget"] {
+            assert!(!tools.iter().any(|tool| tool.name == name));
+        }
     }
 
     #[test]

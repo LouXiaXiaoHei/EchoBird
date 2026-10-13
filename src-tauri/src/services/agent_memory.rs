@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_RECORDS: usize = 200;
+pub(crate) const MAX_RECORDS: usize = 200;
 const MAX_TEXT_BYTES: usize = 2_000;
 const MAX_STORE_BYTES: usize = 1024 * 1024;
 const MAX_RECALL_RECORDS: usize = 8;
 const MAX_RECALL_BYTES: usize = 8_000;
+const MAX_CAPTURE_CHANGES: usize = 8;
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +30,14 @@ pub struct MemoryRecord {
     pub source_conversation_id: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase", deny_unknown_fields)]
+pub(crate) enum MemoryChange {
+    Add { scope: MemoryScope, text: String },
+    Update { id: String, text: String },
+    Forget { id: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +91,7 @@ impl MemoryStore {
         Ok(records)
     }
 
+    #[cfg(test)]
     pub fn remember(
         &self,
         scope: MemoryScope,
@@ -116,6 +126,7 @@ impl MemoryStore {
         })
     }
 
+    #[cfg(test)]
     pub fn update(&self, id: &str, text: &str) -> Result<MemoryRecord, String> {
         validate_id(id)?;
         let text = validate_text(text)?;
@@ -131,6 +142,7 @@ impl MemoryStore {
         })
     }
 
+    #[cfg(test)]
     pub fn forget(&self, id: &str) -> Result<(), String> {
         validate_id(id)?;
         self.mutate(|saved| {
@@ -140,6 +152,151 @@ impl MemoryStore {
                 .position(|record| record.id == id)
                 .ok_or("Memory does not exist")?;
             saved.records.remove(index);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn apply_capture(
+        &self,
+        target: &str,
+        expected: &[MemoryRecord],
+        mut changes: Vec<MemoryChange>,
+        source: &str,
+    ) -> Result<(), String> {
+        validate_scope(MemoryScope::Target, Some(target))?;
+        validate_source(Some(source))?;
+        if changes.len() > MAX_CAPTURE_CHANGES {
+            return Err("Memory capture exceeds its change limit".into());
+        }
+        let mut expected: Vec<_> = expected.iter().collect();
+        for record in &expected {
+            validate_scope(record.scope, record.target.as_deref())?;
+            if record.scope == MemoryScope::Target && record.target.as_deref() != Some(target) {
+                return Err("Memory capture contains a different machine/server".into());
+            }
+        }
+        expected.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut changed_ids = HashSet::new();
+        for change in &mut changes {
+            match change {
+                MemoryChange::Add { text, .. } | MemoryChange::Update { text, .. } => {
+                    *text = validate_text(text)?.to_string();
+                }
+                MemoryChange::Forget { .. } => {}
+            }
+            if let MemoryChange::Update { id, .. } | MemoryChange::Forget { id } = change {
+                validate_id(id)?;
+                if !expected.iter().any(|record| record.id == *id) {
+                    return Err(
+                        "Memory capture can only change notes in its original snapshot".into(),
+                    );
+                }
+                if !changed_ids.insert(id.clone()) {
+                    return Err("Memory capture changes the same note more than once".into());
+                }
+            }
+        }
+        self.mutate(|saved| {
+            let mut current: Vec<_> = saved
+                .records
+                .iter()
+                .filter(|record| {
+                    record.scope == MemoryScope::User || record.target.as_deref() == Some(target)
+                })
+                .collect();
+            current.sort_by(|a, b| a.id.cmp(&b.id));
+            if current != expected {
+                return Err("Saved memories changed while capturing; capture was skipped".into());
+            }
+            let before = saved.records.clone();
+            let now = unix_seconds();
+            let mut protected_ids = changed_ids;
+            for change in changes {
+                match change {
+                    MemoryChange::Add { scope, text } => {
+                        let target = (scope == MemoryScope::Target).then(|| target.to_string());
+                        if let Some(existing) = saved.records.iter().find(|record| {
+                            record.scope == scope && record.target == target && record.text == text
+                        }) {
+                            protected_ids.insert(existing.id.clone());
+                            continue;
+                        }
+                        let id = uuid::Uuid::new_v4().to_string();
+                        protected_ids.insert(id.clone());
+                        saved.records.push(MemoryRecord {
+                            id,
+                            text,
+                            scope,
+                            target,
+                            source_conversation_id: Some(source.to_string()),
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    }
+                    MemoryChange::Update { id, text } => {
+                        let record = saved
+                            .records
+                            .iter_mut()
+                            .find(|record| record.id == id)
+                            .ok_or("Memory does not exist")?;
+                        record.text = text;
+                        record.updated_at = now;
+                    }
+                    MemoryChange::Forget { id } => {
+                        let index = saved
+                            .records
+                            .iter()
+                            .position(|record| record.id == id)
+                            .ok_or("Memory does not exist")?;
+                        saved.records.remove(index);
+                    }
+                }
+            }
+            if before == saved.records {
+                return Ok(());
+            }
+            let next_revision = saved
+                .revision
+                .checked_add(1)
+                .ok_or("Memory revision limit reached")?;
+            let encoded_len = |saved: &SavedMemories| {
+                serde_json::to_vec_pretty(&SavedMemories {
+                    version: saved.version,
+                    revision: next_revision,
+                    records: saved.records.clone(),
+                })
+                .map(|bytes| bytes.len())
+                .map_err(|error| format!("Cannot encode memories: {error}"))
+            };
+            if saved.records.len() > MAX_RECORDS || encoded_len(saved)? > MAX_STORE_BYTES {
+                let mut candidates: Vec<_> = saved
+                    .records
+                    .iter()
+                    .filter(|record| !protected_ids.contains(&record.id))
+                    .cloned()
+                    .collect();
+                candidates.sort_by(|a, b| {
+                    (
+                        a.scope == MemoryScope::User,
+                        a.updated_at,
+                        a.created_at,
+                        &a.id,
+                    )
+                        .cmp(&(
+                            b.scope == MemoryScope::User,
+                            b.updated_at,
+                            b.created_at,
+                            &b.id,
+                        ))
+                });
+                for candidate in candidates {
+                    saved.records.retain(|record| record.id != candidate.id);
+                    if saved.records.len() <= MAX_RECORDS && encoded_len(saved)? <= MAX_STORE_BYTES
+                    {
+                        break;
+                    }
+                }
+            }
             Ok(())
         })
     }
@@ -372,7 +529,7 @@ fn validate_text(text: &str) -> Result<&str, String> {
     }
 }
 
-fn contains_credentials(text: &str) -> bool {
+pub(crate) fn contains_credentials(text: &str) -> bool {
     let normalized = text.to_lowercase();
     if normalized.contains("-----begin") && normalized.contains("private key-----") {
         return true;
@@ -550,6 +707,662 @@ mod tests {
             } else {
                 let _ = fs::remove_file(&self.0);
             }
+        }
+    }
+
+    fn applicable_records(store: &MemoryStore, target: &str) -> Vec<MemoryRecord> {
+        store
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|record| {
+                record.scope == MemoryScope::User || record.target.as_deref() == Some(target)
+            })
+            .collect()
+    }
+
+    fn full_records(scope: MemoryScope, target: Option<&str>) -> Vec<MemoryRecord> {
+        (0..MAX_RECORDS)
+            .map(|index| MemoryRecord {
+                id: uuid::Uuid::from_u128(index as u128 + 1).to_string(),
+                text: format!("Old note {index}"),
+                scope,
+                target: target.map(str::to_string),
+                source_conversation_id: None,
+                created_at: index as u64,
+                updated_at: index as u64,
+            })
+            .collect()
+    }
+
+    fn seed_store(dir: &TestDir, records: &[MemoryRecord]) -> MemoryStore {
+        fs::create_dir(&dir.0).unwrap();
+        let saved = SavedMemories {
+            version: 1,
+            revision: 7,
+            records: records.to_vec(),
+        };
+        let bytes = serde_json::to_vec_pretty(&saved).unwrap();
+        for name in ["memories.json", "memories.backup.json"] {
+            fs::write(dir.0.join(name), &bytes).unwrap();
+        }
+        dir.store()
+    }
+
+    #[test]
+    fn capture_applies_corrections_and_forgetting_in_one_revision() {
+        let dir = TestDir::new();
+        let store = dir.store();
+        let preference = store
+            .remember(
+                MemoryScope::User,
+                None,
+                "Use Chinese",
+                Some("original-chat"),
+            )
+            .unwrap();
+        let local = store
+            .remember(
+                MemoryScope::Target,
+                Some("local"),
+                "Install under D:/Old",
+                None,
+            )
+            .unwrap();
+        let obsolete = store
+            .remember(
+                MemoryScope::Target,
+                Some("local"),
+                "Old executable location",
+                None,
+            )
+            .unwrap();
+        let other = store
+            .remember(
+                MemoryScope::Target,
+                Some("other"),
+                "Keep another server fact",
+                None,
+            )
+            .unwrap();
+        let previous: SavedMemories =
+            serde_json::from_slice(&fs::read(dir.0.join("memories.json")).unwrap()).unwrap();
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                vec![
+                    MemoryChange::Update {
+                        id: preference.id.clone(),
+                        text: "Use English".into(),
+                    },
+                    MemoryChange::Update {
+                        id: local.id.clone(),
+                        text: "Install under E:/New".into(),
+                    },
+                    MemoryChange::Forget {
+                        id: obsolete.id.clone(),
+                    },
+                    MemoryChange::Add {
+                        scope: MemoryScope::Target,
+                        text: "  Verified installation  ".into(),
+                    },
+                    MemoryChange::Add {
+                        scope: MemoryScope::User,
+                        text: "Prefer concise replies".into(),
+                    },
+                ],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        for (original, text) in [(preference, "Use English"), (local, "Install under E:/New")] {
+            let updated = records
+                .iter()
+                .find(|record| record.id == original.id)
+                .unwrap();
+            let mut expected = original;
+            expected.text = text.into();
+            expected.updated_at = updated.updated_at;
+            assert_eq!(updated, &expected);
+        }
+        assert!(records.contains(&other));
+        assert!(!records.iter().any(|record| record.id == obsolete.id));
+        assert!(!records
+            .iter()
+            .any(|record| record.text == "Install under D:/Old"));
+        let added = records
+            .iter()
+            .find(|record| record.text == "Verified installation")
+            .unwrap();
+        assert_eq!(added.scope, MemoryScope::Target);
+        assert_eq!(added.target.as_deref(), Some("local"));
+        assert_eq!(
+            added.source_conversation_id.as_deref(),
+            Some("capture-chat")
+        );
+        let added = records
+            .iter()
+            .find(|record| record.text == "Prefer concise replies")
+            .unwrap();
+        assert_eq!(added.scope, MemoryScope::User);
+        assert!(added.target.is_none());
+        let saved: SavedMemories =
+            serde_json::from_slice(&fs::read(dir.0.join("memories.json")).unwrap()).unwrap();
+        assert_eq!(saved.revision, previous.revision + 1);
+        assert_eq!(
+            fs::read(dir.0.join("memories.json")).unwrap(),
+            fs::read(dir.0.join("memories.backup.json")).unwrap()
+        );
+    }
+
+    #[test]
+    fn capture_ignores_other_targets_but_compares_full_applicable_records() {
+        let dir = TestDir::new();
+        let store = dir.store();
+        store
+            .remember(MemoryScope::User, None, "Use Chinese", None)
+            .unwrap();
+        store
+            .remember(MemoryScope::Target, Some("local"), "Local fact", None)
+            .unwrap();
+        let mut expected = applicable_records(&store, "local");
+        expected.reverse();
+        let other = store
+            .remember(
+                MemoryScope::Target,
+                Some("other"),
+                "New other server fact",
+                None,
+            )
+            .unwrap();
+        store
+            .apply_capture(
+                "local",
+                &expected,
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::Target,
+                    text: "Another local fact".into(),
+                }],
+                "capture-chat",
+            )
+            .unwrap();
+        assert!(store.list().unwrap().contains(&other));
+        let mut expected = applicable_records(&store, "local");
+        expected[0].source_conversation_id = Some("different-chat".into());
+        let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+        assert!(store
+            .apply_capture(
+                "local",
+                &expected,
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::User,
+                    text: "A stale proposal".into(),
+                }],
+                "capture-chat"
+            )
+            .is_err());
+        assert_eq!(fs::read(dir.0.join("memories.json")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn stale_captures_cannot_replace_updates_or_restore_forgotten_notes() {
+        for intervening in ["update", "forget", "new-user", "new-target"] {
+            let dir = TestDir::new();
+            let store = dir.store();
+            let original = store
+                .remember(MemoryScope::Target, Some("local"), "Original fact", None)
+                .unwrap();
+            let expected = applicable_records(&store, "local");
+            match intervening {
+                "update" => {
+                    store.update(&original.id, "Corrected fact").unwrap();
+                }
+                "forget" => store.forget(&original.id).unwrap(),
+                "new-user" => {
+                    store
+                        .remember(MemoryScope::User, None, "New preference", None)
+                        .unwrap();
+                }
+                _ => {
+                    store
+                        .remember(MemoryScope::Target, Some("local"), "New target fact", None)
+                        .unwrap();
+                }
+            }
+            let before = store.list().unwrap();
+            let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+            assert!(
+                store
+                    .apply_capture(
+                        "local",
+                        &expected,
+                        vec![
+                            MemoryChange::Add {
+                                scope: MemoryScope::Target,
+                                text: "Original fact".into()
+                            },
+                            MemoryChange::Update {
+                                id: original.id,
+                                text: "Stale replacement".into()
+                            },
+                        ],
+                        "capture-chat"
+                    )
+                    .is_err(),
+                "{intervening}"
+            );
+            assert_eq!(store.list().unwrap(), before);
+            for name in ["memories.json", "memories.backup.json"] {
+                assert_eq!(fs::read(dir.0.join(name)).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_capture_batches_leave_both_store_copies_unchanged() {
+        let dir = TestDir::new();
+        let store = dir.store();
+        let local = store
+            .remember(MemoryScope::Target, Some("local"), "Local fact", None)
+            .unwrap();
+        let other = store
+            .remember(MemoryScope::Target, Some("other"), "Other fact", None)
+            .unwrap();
+        let expected = applicable_records(&store, "local");
+        let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+        let invalid = vec![
+            vec![
+                MemoryChange::Update {
+                    id: local.id.clone(),
+                    text: "Valid correction".into(),
+                },
+                MemoryChange::Add {
+                    scope: MemoryScope::User,
+                    text: "password=secret".into(),
+                },
+            ],
+            vec![
+                MemoryChange::Update {
+                    id: local.id.clone(),
+                    text: "Valid correction".into(),
+                },
+                MemoryChange::Forget { id: other.id },
+            ],
+            vec![
+                MemoryChange::Update {
+                    id: local.id.clone(),
+                    text: "Valid correction".into(),
+                },
+                MemoryChange::Forget { id: local.id },
+            ],
+            vec![MemoryChange::Add {
+                scope: MemoryScope::Target,
+                text: "中".repeat(667),
+            }],
+            vec![MemoryChange::Forget {
+                id: "../invalid".into(),
+            }],
+            (0..9)
+                .map(|index| MemoryChange::Add {
+                    scope: MemoryScope::User,
+                    text: format!("Preference {index}"),
+                })
+                .collect(),
+        ];
+        for changes in invalid {
+            assert!(store
+                .apply_capture("local", &expected, changes, "capture-chat")
+                .is_err());
+            for name in ["memories.json", "memories.backup.json"] {
+                assert_eq!(fs::read(dir.0.join(name)).unwrap(), bytes);
+            }
+        }
+        assert!(store
+            .apply_capture("local", &store.list().unwrap(), Vec::new(), "capture-chat")
+            .is_err());
+        assert!(store
+            .apply_capture("", &expected, Vec::new(), "capture-chat")
+            .is_err());
+        assert!(store
+            .apply_capture("local", &expected, Vec::new(), "")
+            .is_err());
+    }
+
+    #[test]
+    fn capture_rolls_over_the_oldest_user_note_when_all_notes_are_preferences() {
+        let dir = TestDir::new();
+        let original = full_records(MemoryScope::User, None);
+        let store = seed_store(&dir, &original);
+        let expected = store.list().unwrap();
+        store
+            .apply_capture(
+                "local",
+                &expected,
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::User,
+                    text: "New preference".into(),
+                }],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records.iter().any(|record| record.text == "New preference"));
+        assert!(!records.iter().any(|record| record.id == original[0].id));
+        assert!(original[1..].iter().all(|record| records.contains(record)));
+        assert_eq!(
+            fs::read(dir.0.join("memories.json")).unwrap(),
+            fs::read(dir.0.join("memories.backup.json")).unwrap()
+        );
+    }
+
+    #[test]
+    fn capture_add_and_forget_at_capacity_does_not_evict_another_note() {
+        let dir = TestDir::new();
+        let original = full_records(MemoryScope::User, None);
+        let store = seed_store(&dir, &original);
+        let expected = store.list().unwrap();
+        store
+            .apply_capture(
+                "local",
+                &expected,
+                vec![
+                    MemoryChange::Add {
+                        scope: MemoryScope::User,
+                        text: "New preference".into(),
+                    },
+                    MemoryChange::Forget {
+                        id: expected[0].id.clone(),
+                    },
+                ],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records.iter().any(|record| record.text == "New preference"));
+        assert!(!records.iter().any(|record| record.id == expected[0].id));
+        assert!(original
+            .iter()
+            .filter(|record| record.id != expected[0].id)
+            .all(|record| records.contains(record)));
+    }
+
+    #[test]
+    fn capture_keeps_all_additions_and_updates_when_pruning_multiple_notes() {
+        let dir = TestDir::new();
+        let mut original = full_records(MemoryScope::Target, Some("local"));
+        for record in &mut original {
+            record.updated_at = u64::MAX;
+        }
+        let store = seed_store(&dir, &original);
+        let mut changes = vec![MemoryChange::Update {
+            id: original[0].id.clone(),
+            text: "Corrected current fact".into(),
+        }];
+        changes.extend((0..7).map(|index| MemoryChange::Add {
+            scope: MemoryScope::Target,
+            text: format!("New fact {index}"),
+        }));
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                changes,
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records
+            .iter()
+            .any(|record| record.id == original[0].id && record.text == "Corrected current fact"));
+        for index in 0..7 {
+            assert!(records
+                .iter()
+                .any(|record| record.text == format!("New fact {index}")));
+        }
+        assert!(original[1..8]
+            .iter()
+            .all(|old| !records.iter().any(|record| record.id == old.id)));
+        assert!(original[8..].iter().all(|record| records.contains(record)));
+    }
+
+    #[test]
+    fn capture_prefers_pruning_target_facts_before_older_user_preferences() {
+        let dir = TestDir::new();
+        let mut original = full_records(MemoryScope::User, None);
+        original[MAX_RECORDS - 1].scope = MemoryScope::Target;
+        original[MAX_RECORDS - 1].target = Some("local".into());
+        original[MAX_RECORDS - 1].updated_at = u64::MAX;
+        let store = seed_store(&dir, &original);
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::Target,
+                    text: "New target fact".into(),
+                }],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(!records
+            .iter()
+            .any(|record| record.id == original[MAX_RECORDS - 1].id));
+        assert!(original[..MAX_RECORDS - 1]
+            .iter()
+            .all(|record| records.contains(record)));
+    }
+
+    #[test]
+    fn capture_global_rollover_prunes_the_oldest_foreign_target_fact() {
+        let dir = TestDir::new();
+        let mut original = full_records(MemoryScope::Target, Some("other"));
+        original[1].target = Some("local".into());
+        original[0].updated_at = original[1].updated_at;
+        original[0].created_at = original[1].created_at;
+        let store = seed_store(&dir, &original);
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::Target,
+                    text: "New local fact".into(),
+                }],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(!records.iter().any(|record| record.id == original[0].id));
+        assert!(original[1..].iter().all(|record| records.contains(record)));
+    }
+
+    #[test]
+    fn duplicate_or_empty_capture_at_capacity_does_not_prune_or_write() {
+        let dir = TestDir::new();
+        let original = full_records(MemoryScope::User, None);
+        let store = seed_store(&dir, &original);
+        let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+        for changes in [
+            Vec::new(),
+            vec![MemoryChange::Add {
+                scope: MemoryScope::User,
+                text: original[0].text.clone(),
+            }],
+        ] {
+            store
+                .apply_capture(
+                    "local",
+                    &applicable_records(&store, "local"),
+                    changes,
+                    "capture-chat",
+                )
+                .unwrap();
+            for name in ["memories.json", "memories.backup.json"] {
+                assert_eq!(fs::read(dir.0.join(name)).unwrap(), bytes);
+            }
+        }
+        assert_eq!(store.list().unwrap().len(), MAX_RECORDS);
+    }
+
+    #[test]
+    fn capture_keeps_a_reaffirmed_oldest_note_when_another_addition_rolls_over() {
+        let dir = TestDir::new();
+        let original = full_records(MemoryScope::Target, Some("local"));
+        let store = seed_store(&dir, &original);
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                vec![
+                    MemoryChange::Add {
+                        scope: MemoryScope::Target,
+                        text: original[0].text.clone(),
+                    },
+                    MemoryChange::Add {
+                        scope: MemoryScope::Target,
+                        text: "New current fact".into(),
+                    },
+                ],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), MAX_RECORDS);
+        assert!(records.contains(&original[0]));
+        assert!(!records.iter().any(|record| record.id == original[1].id));
+        assert!(original[2..].iter().all(|record| records.contains(record)));
+        assert!(records
+            .iter()
+            .any(|record| record.text == "New current fact"));
+    }
+
+    #[test]
+    fn capture_rolls_over_at_the_encoded_byte_limit_below_record_capacity() {
+        let dir = TestDir::new();
+        let mut original = Vec::new();
+        for mut record in full_records(MemoryScope::Target, Some("local")) {
+            record
+                .text
+                .push_str(&"\u{0001}".repeat(MAX_TEXT_BYTES - record.text.len()));
+            original.push(record);
+            let preview = SavedMemories {
+                version: 1,
+                revision: 7,
+                records: original.clone(),
+            };
+            if serde_json::to_vec_pretty(&preview).unwrap().len() > MAX_STORE_BYTES {
+                original.pop();
+                break;
+            }
+        }
+        assert!(original.len() < MAX_RECORDS);
+        let store = seed_store(&dir, &original);
+        let new_text = "\u{0001}".repeat(MAX_TEXT_BYTES);
+        let now = unix_seconds();
+        let mut preview = SavedMemories {
+            version: 1,
+            revision: 8,
+            records: original.clone(),
+        };
+        preview.records.push(MemoryRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: new_text.clone(),
+            scope: MemoryScope::Target,
+            target: Some("local".into()),
+            source_conversation_id: Some("capture-chat".into()),
+            created_at: now,
+            updated_at: now,
+        });
+        assert!(preview.records.len() <= MAX_RECORDS);
+        assert!(serde_json::to_vec_pretty(&preview).unwrap().len() > MAX_STORE_BYTES);
+        let mut removed = 0;
+        while serde_json::to_vec_pretty(&preview).unwrap().len() > MAX_STORE_BYTES {
+            preview.records.remove(0);
+            removed += 1;
+        }
+        store
+            .apply_capture(
+                "local",
+                &applicable_records(&store, "local"),
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::Target,
+                    text: new_text.clone(),
+                }],
+                "capture-chat",
+            )
+            .unwrap();
+        let records = store.list().unwrap();
+        assert_eq!(records.len(), original.len() + 1 - removed);
+        assert!(records.iter().any(|record| record.text == new_text));
+        assert!(original[..removed]
+            .iter()
+            .all(|old| !records.iter().any(|record| record.id == old.id)));
+        assert!(original[removed..]
+            .iter()
+            .all(|record| records.contains(record)));
+        let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+        assert!(bytes.len() <= MAX_STORE_BYTES);
+        assert_eq!(bytes, fs::read(dir.0.join("memories.backup.json")).unwrap());
+    }
+
+    #[test]
+    fn invalid_or_stale_capture_at_capacity_does_not_prune() {
+        let dir = TestDir::new();
+        let original = full_records(MemoryScope::Target, Some("local"));
+        let store = seed_store(&dir, &original);
+        let stale = applicable_records(&store, "local");
+        store.update(&original[0].id, "A newer correction").unwrap();
+        let current = applicable_records(&store, "local");
+        let bytes = fs::read(dir.0.join("memories.json")).unwrap();
+        assert!(store
+            .apply_capture(
+                "local",
+                &stale,
+                vec![MemoryChange::Add {
+                    scope: MemoryScope::Target,
+                    text: "Stale new note".into(),
+                }],
+                "capture-chat"
+            )
+            .is_err());
+        assert!(store
+            .apply_capture(
+                "local",
+                &current,
+                vec![
+                    MemoryChange::Add {
+                        scope: MemoryScope::Target,
+                        text: "Valid new note".into()
+                    },
+                    MemoryChange::Add {
+                        scope: MemoryScope::User,
+                        text: "password=secret".into()
+                    },
+                ],
+                "capture-chat"
+            )
+            .is_err());
+        for name in ["memories.json", "memories.backup.json"] {
+            assert_eq!(fs::read(dir.0.join(name)).unwrap(), bytes);
+        }
+        assert_eq!(store.list().unwrap(), current);
+    }
+
+    #[test]
+    fn capture_change_format_cannot_supply_backend_scope_fields() {
+        for value in [
+            serde_json::json!({"action":"add", "scope":"target", "text":"Fact", "target":"other"}),
+            serde_json::json!({"action":"update", "id":uuid::Uuid::new_v4().to_string(), "text":"Fact", "source":"other-chat"}),
+            serde_json::json!({"action":"forget", "id":uuid::Uuid::new_v4().to_string(), "text":"Fact"}),
+        ] {
+            assert!(serde_json::from_value::<MemoryChange>(value).is_err());
         }
     }
 

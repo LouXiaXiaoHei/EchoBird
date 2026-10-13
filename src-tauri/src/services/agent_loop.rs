@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use super::agent_context;
 use super::agent_history::{HistorySnapshot, HistoryStore, HistorySummary};
 use super::agent_memory::MemoryStore;
+use super::agent_memory_capture;
 use super::agent_tools;
 use super::auto_fix;
 use super::datalog::DatalogWriter;
@@ -302,18 +303,19 @@ pub async fn run_agent(
     };
 
     // 3. Add user message to per-server session history
-    let cancel_token = {
+    let (cancel_token, turn_start) = {
         let mut map = session_map.lock().await;
         if !map.contains_key(&server_key) {
             map.insert(server_key.clone(), AgentSession::restore(&server_key)?);
         }
         let sess = map.get_mut(&server_key).unwrap();
+        let turn_start = sess.messages.len();
         sess.messages.push(Message {
             role: "user".into(),
             content: MessageContent::Text(request.message.clone()),
         });
         let _ = save_checkpoint(&server_key, sess);
-        sess.cancel_token.clone()
+        (sess.cancel_token.clone(), turn_start)
     };
 
     // Per-turn datalog — markdown trace under ~/.echobird/datalog/<server>/.
@@ -334,6 +336,8 @@ pub async fn run_agent(
     let mut loop_count = 0;
     let mut sse_retry_count = 0;
     let mut summary_attempted = false;
+    let mut completed_turn = false;
+    let mut memory_evidence = Vec::new();
     const MAX_SSE_RETRIES: u32 = 3;
 
     loop {
@@ -732,6 +736,7 @@ pub async fn run_agent(
                 stop_reason
             );
             datalog.log_text(&text_accumulator);
+            completed_turn = matches!(stop_reason.as_str(), "stop" | "end_turn");
             break;
         }
 
@@ -864,6 +869,13 @@ pub async fn run_agent(
             };
 
             for (tc, result) in tool_calls.iter().zip(results) {
+                memory_evidence.push(agent_memory_capture::tool_evidence(
+                    tc,
+                    result.success,
+                    &result.output,
+                    None,
+                    agent_tools::memory_target(&request.server_ids),
+                ));
                 datalog.log_tool_result(&result.output, result.success);
                 emit_event(
                     &app,
@@ -921,6 +933,7 @@ pub async fn run_agent(
                     }
                 };
 
+                let mut verified_fact = None;
                 // auto_fix: for known install/config-write intents, run a
                 // deterministic verifier. On verify failure we flip success
                 // and append a banner to result.output — the next ReAct
@@ -935,7 +948,13 @@ pub async fn run_agent(
                             server_id
                         );
                         match auto_fix::verify(&intent, &server_id, &ssh_pool).await {
-                            Ok(()) => log::info!("[AgentLoop] auto_fix OK for {}", intent.label()),
+                            Ok(()) => {
+                                verified_fact = Some(format!(
+                                    "Verified {} on the selected target",
+                                    intent.label()
+                                ));
+                                log::info!("[AgentLoop] auto_fix OK for {}", intent.label());
+                            }
                             Err(reason) => {
                                 log::warn!(
                                     "[AgentLoop] auto_fix FAILED for {}: {}",
@@ -950,6 +969,13 @@ pub async fn run_agent(
 
                 datalog.log_tool_result(&result.output, result.success);
                 // Always emit ToolResult to frontend
+                memory_evidence.push(agent_memory_capture::tool_evidence(
+                    tc,
+                    result.success,
+                    &result.output,
+                    verified_fact.as_deref(),
+                    agent_tools::memory_target(&request.server_ids),
+                ));
                 emit_event(
                     &app,
                     request.conversation_id.as_deref(),
@@ -1042,13 +1068,18 @@ pub async fn run_agent(
     }
 
     // 8. Done — save session to disk
-    let save_error = {
+    let (save_error, capture_messages) = {
         let mut map = session_map.lock().await;
         if let Some(sess) = map.get_mut(&server_key) {
+            let captured = if completed_turn && !cancel_token.is_cancelled() {
+                sess.messages.get(turn_start..).unwrap_or_default().to_vec()
+            } else {
+                Vec::new()
+            };
             sess.running = false;
-            save_checkpoint(&server_key, sess).err()
+            (save_checkpoint(&server_key, sess).err(), captured)
         } else {
-            None
+            (None, Vec::new())
         }
     };
     if let Some(error) = save_error {
@@ -1076,6 +1107,16 @@ pub async fn run_agent(
             state: "idle".into(),
         },
     );
+
+    if !capture_messages.is_empty() {
+        agent_memory_capture::enqueue(
+            summary_client,
+            server_key,
+            agent_tools::memory_target(&request.server_ids).to_string(),
+            capture_messages,
+            memory_evidence,
+        );
+    }
 
     Ok(())
 }

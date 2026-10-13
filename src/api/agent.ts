@@ -18,34 +18,3 @@ export async function resetAgent(serverKey: string): Promise<string> {
 export function listenAgentEvents(handler: (event: AgentEvent) => void): Promise<UnlistenFn> {
   return listen<AgentEvent>('agent_event', (e) => handler(e.payload));
 }
-
-export interface AgentMemoryRecord {
-  id: string;
-  text: string;
-  scope: 'user' | 'target';
-  target: string | null;
-  source_conversation_id: string | null;
-  created_at: number;
-  updated_at: number;
-}
-
-export function agentMemoryList(): Promise<AgentMemoryRecord[]> {
-  return invoke('agent_memory_list');
-}
-
-export function agentMemorySave(
-  scope: AgentMemoryRecord['scope'],
-  target: string | null,
-  text: string,
-  sourceConversationId: string | null
-): Promise<AgentMemoryRecord> {
-  return invoke('agent_memory_save', { scope, target, text, sourceConversationId });
-}
-
-export function agentMemoryUpdate(id: string, text: string): Promise<AgentMemoryRecord> {
-  return invoke('agent_memory_update', { id, text });
-}
-
-export function agentMemoryDelete(id: string): Promise<void> {
-  return invoke('agent_memory_delete', { id });
-}

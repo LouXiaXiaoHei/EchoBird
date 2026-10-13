@@ -2,6 +2,7 @@ pub(crate) mod agent_context;
 pub(crate) mod agent_history;
 pub mod agent_loop;
 pub(crate) mod agent_memory;
+pub(crate) mod agent_memory_capture;
 pub(crate) mod agent_output_store;
 pub(crate) mod agent_output_summary;
 pub mod agent_tools;

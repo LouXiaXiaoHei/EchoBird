@@ -14,6 +14,10 @@ import { QuickCommandChips } from './QuickCommandChips';
 import { ReasoningControl } from './ReasoningControl';
 import { MA_PAGE_SIZE, type ChatMessage } from './types';
 
+function isVisibleMessage(message: ChatMessage) {
+  return message.type !== 'tool_call' || !message.name.startsWith('memory_');
+}
+
 // ===== Main Content (center area) — CHAT =====
 export function MotherAgentMain() {
   const { t } = useI18n();
@@ -46,6 +50,7 @@ export function MotherAgentMain() {
     setParasiteAgent,
     parasiteAvailable,
   } = useMotherAgent();
+  const visibleChatOutput = React.useMemo(() => chatOutput.filter(isVisibleMessage), [chatOutput]);
 
   // Build model list for RemoteModelSelector (with icons)
   const modelList: ModelOption[] = React.useMemo(
@@ -207,7 +212,7 @@ export function MotherAgentMain() {
     return () => ro.disconnect();
   }, [snapToBottom]);
 
-  const handleScroll = () => {
+  const handleScroll = async () => {
     const container = chatContainerRef.current;
     if (!container) return;
     const distanceFromBottom =
@@ -217,19 +222,19 @@ export function MotherAgentMain() {
     // at distance≈0, so they correctly keep sticky=true; user wheel/drag
     // away from the bottom flips it off.
     stickToBottomRef.current = isNearBottom;
-    setShowScrollBtn(!isNearBottom && chatOutput.length > 0);
+    setShowScrollBtn(!isNearBottom && visibleChatOutput.length > 0);
 
     if (container.scrollTop !== 0) return;
     const generation = paginationGenerationRef.current;
 
     // Phase 1: more in-memory messages to show
-    if (displayCount < chatOutput.length) {
+    if (displayCount < visibleChatOutput.length) {
       setShowSkeleton(true);
       const prevScrollHeight = container.scrollHeight;
       setTimeout(() => {
         if (generation !== paginationGenerationRef.current) return;
         setShowSkeleton(false);
-        setDisplayCount((c) => Math.min(c + PAGE_SIZE, chatOutput.length));
+        setDisplayCount((c) => Math.min(c + PAGE_SIZE, visibleChatOutput.length));
         requestAnimationFrame(() => {
           if (generation === paginationGenerationRef.current && chatContainerRef.current) {
             chatContainerRef.current.scrollTop =
@@ -246,23 +251,30 @@ export function MotherAgentMain() {
 
     setShowSkeleton(true);
     const prevScrollHeight2 = container.scrollHeight;
-    loadOlderChat()
-      .then((older) => {
+    try {
+      let loaded = alreadyLoaded;
+      let visibleLoaded = 0;
+      while (loaded < maDiskTotal) {
+        const older = await loadOlderChat();
         if (generation !== paginationGenerationRef.current) return;
-        setShowSkeleton(false);
-        if (older.length === 0) return;
-        setDisplayCount((c) => c + older.length);
-        requestAnimationFrame(() => {
-          if (generation === paginationGenerationRef.current && chatContainerRef.current) {
-            chatContainerRef.current.scrollTop =
-              chatContainerRef.current.scrollHeight - prevScrollHeight2;
-          }
-        });
-      })
-      .catch(() => {
-        if (generation !== paginationGenerationRef.current) return;
-        setShowSkeleton(false);
+        if (older.length === 0) break;
+        loaded += older.length;
+        visibleLoaded = older.filter(isVisibleMessage).length;
+        if (visibleLoaded > 0) break;
+      }
+      setShowSkeleton(false);
+      if (visibleLoaded === 0) return;
+      setDisplayCount((c) => c + visibleLoaded);
+      requestAnimationFrame(() => {
+        if (generation === paginationGenerationRef.current && chatContainerRef.current) {
+          chatContainerRef.current.scrollTop =
+            chatContainerRef.current.scrollHeight - prevScrollHeight2;
+        }
       });
+    } catch {
+      if (generation !== paginationGenerationRef.current) return;
+      setShowSkeleton(false);
+    }
   };
 
   const scrollToBottom = useCallback(() => {
@@ -271,7 +283,7 @@ export function MotherAgentMain() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatEndRef]);
 
-  const showWelcome = chatOutput.length === 0 && !isProcessing;
+  const showWelcome = visibleChatOutput.length === 0 && !isProcessing;
 
   return (
     <div className="flex flex-col h-full">
@@ -310,7 +322,7 @@ export function MotherAgentMain() {
                 [0, 1, 2].map((i) => (
                   <ChatBubble key={`sk-${i}`} role="skeleton" content="" variant="mother" />
                 ))}
-              {chatOutput.slice(-displayCount).map((msg, i, arr) => {
+              {visibleChatOutput.slice(-displayCount).map((msg, i, arr) => {
                 if (msg.type === 'user') {
                   return (
                     <ChatBubble
@@ -335,7 +347,7 @@ export function MotherAgentMain() {
                 }
                 if (msg.type === 'assistant') {
                   const isLast = arr.slice(i + 1).every((m) => m.type !== 'assistant');
-                  const lastOutput = chatOutput[chatOutput.length - 1];
+                  const lastOutput = visibleChatOutput[visibleChatOutput.length - 1];
                   const isCurrentResponse = isLast && lastOutput?.type === 'assistant';
                   return (
                     <ChatBubble
@@ -367,8 +379,8 @@ export function MotherAgentMain() {
               })}
               {/* Typing indicator — show when processing and no new assistant response has started */}
               {isProcessing &&
-                (chatOutput.length === 0 ||
-                  chatOutput[chatOutput.length - 1]?.type !== 'assistant') && (
+                (visibleChatOutput.length === 0 ||
+                  visibleChatOutput[visibleChatOutput.length - 1]?.type !== 'assistant') && (
                   <ChatBubble role="assistant" content="" variant="mother" isStreaming={true} />
                 )}
               <div ref={chatEndRef} />

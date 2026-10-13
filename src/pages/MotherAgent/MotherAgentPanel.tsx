@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { X, ChevronDown } from 'lucide-react';
 import { useConfirm } from '../../components/ConfirmDialog';
+import { ViewModeTabs } from '../../components/ViewModeTabs';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
 import { useMotherAgent } from './context';
 import { ConversationList } from './ConversationList';
-import { MemoryPanel } from './MemoryPanel';
 
 // ===== Right Panel (aside area) — SERVERS =====
 export function MotherAgentPanel() {
@@ -29,9 +29,7 @@ export function MotherAgentPanel() {
   // "disabled" without needing an explanatory banner.
   const parasiteLocked = parasiteAgent === 'claudecode';
 
-  const [panelTab, setPanelTab] = useState<'conversations' | 'memory' | 'servers' | 'guide'>(
-    'conversations'
-  );
+  const [panelTab, setPanelTab] = useState<'conversations' | 'servers' | 'guide'>('conversations');
   const [showSSHModal, setShowSSHModal] = useState(false);
   const [sshForm, setSSHForm] = useState({
     host: '',
@@ -76,48 +74,15 @@ export function MotherAgentPanel() {
     <>
       {/* Header with tabs */}
       <div className="h-10 px-2 flex items-center justify-between bg-transparent">
-        <div className="flex gap-1 w-full">
-          <button
-            onClick={() => setPanelTab('conversations')}
-            className={`flex-1 min-w-0 px-1.5 py-2 text-[14px] font-semibold whitespace-nowrap rounded transition-colors ${
-              panelTab === 'conversations'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('mother.conversations')}
-          </button>
-          <button
-            onClick={() => setPanelTab('memory')}
-            className={`flex-1 min-w-0 px-1.5 py-2 text-[14px] font-semibold whitespace-nowrap rounded transition-colors ${
-              panelTab === 'memory'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('mother.memory.tab')}
-          </button>
-          <button
-            onClick={() => setPanelTab('servers')}
-            className={`flex-1 min-w-0 px-1.5 py-2 text-[14px] font-semibold whitespace-nowrap rounded transition-colors ${
-              panelTab === 'servers'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('mother.servers')}
-          </button>
-          <button
-            onClick={() => setPanelTab('guide')}
-            className={`flex-1 min-w-0 px-1.5 py-2 text-[14px] font-semibold whitespace-nowrap rounded transition-colors ${
-              panelTab === 'guide'
-                ? 'bg-cyber-elevated text-cyber-text'
-                : 'text-cyber-text-secondary hover:text-cyber-text'
-            }`}
-          >
-            {t('mother.sshGuide')}
-          </button>
-        </div>
+        <ViewModeTabs
+          value={panelTab}
+          options={[
+            { value: 'conversations', label: t('mother.conversations') },
+            { value: 'servers', label: t('mother.servers') },
+            { value: 'guide', label: t('mother.sshGuide') },
+          ]}
+          onChange={setPanelTab}
+        />
       </div>
 
       {/* SSH Add Modal */}
@@ -370,10 +335,9 @@ export function MotherAgentPanel() {
 
       {/* Content */}
       <div className="flex-1 p-2 overflow-y-auto slim-scroll">
-        <MemoryPanel active={panelTab === 'memory'} />
         {panelTab === 'conversations' ? (
           <ConversationList />
-        ) : panelTab === 'memory' ? null : panelTab === 'servers' ? (
+        ) : panelTab === 'servers' ? (
           /* ── SERVERS tab ── */
           /* Server list — wrapped so we can gray + disable as a unit
              when parasite mode owns this turn's execution. The greyed-
