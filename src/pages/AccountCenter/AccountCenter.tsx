@@ -33,6 +33,7 @@ import { SortableCard } from '../../components/SortableCard';
 import { QuotaCountdown } from '../AppManager/QuotaCountdown';
 import { accountPlanLabel } from '../AppManager/accountPlanLabel';
 import { useI18n } from '../../hooks/useI18n';
+import { useUsageClock } from '../../hooks/useUsageClock';
 import * as api from '../../api/tauri';
 import { accountError, isAccountAuthorizationError } from '../../utils/accountError';
 import { quotaColorClasses, quotaTone } from '../../utils/quotaColors';
@@ -54,6 +55,7 @@ export function AccountCard({
   dragHandle?: ReactNode;
 }) {
   const { t } = useI18n();
+  const now = useUsageClock(account.metrics.some((metric) => Boolean(metric.resetLabel)));
   const name = [provider.name, account.detail].filter(Boolean).join(' · ');
   const singleMetric = account.metrics.length === 1;
   const balanceOnly =
@@ -76,7 +78,9 @@ export function AccountCard({
             <AccountSectionRewardButton
               email={account.identity}
               claimed={dailyClaimed}
-              disabled={!provider.installed || provider.busy || account.refreshing}
+              disabled={
+                !provider.installed || provider.busy || account.refreshing || account.claimDisabled
+              }
               onClaim={() => void account.claim!()}
             />
           )}
@@ -161,21 +165,23 @@ export function AccountCard({
                           {metric.label}
                         </span>
                       )}
-                      {provider.id === 'workbuddy' &&
+                      {(provider.id === 'workbuddy' ||
+                        (provider.id === 'traecn' && account.showUnclaimed)) &&
                         !dailyClaimed &&
                         metric.label === t('agent.rewardCredits') && (
                           <span className="flex-shrink-0 text-[10px] font-semibold leading-[16px] text-cyber-text">
                             {t('agent.dailyCreditsUnclaimed')}
                           </span>
                         )}
-                      {metric.resetAt != null && (
-                        <QuotaCountdown
-                          resetAt={metric.resetAt}
-                          compact
-                          small
-                          label={t('accountCenter.reset')}
-                        />
-                      )}
+                      {metric.resetAt != null &&
+                        (!metric.resetLabel || metric.resetAt > now / 1000) && (
+                          <QuotaCountdown
+                            resetAt={metric.resetAt}
+                            compact
+                            small
+                            label={metric.resetLabel ?? t('accountCenter.reset')}
+                          />
+                        )}
                     </span>
                     <span
                       aria-label={hideLabel ? `${metric.label} ${metric.value}` : undefined}
@@ -376,6 +382,7 @@ export function AccountCenterTitleActions() {
     setRunning(action);
     let authFailures = 0;
     let otherFailures = 0;
+    const claimedProviders = new Set<string>();
     const collectError = (error: unknown) => {
       if (isAccountAuthorizationError(error)) authFailures += 1;
       else otherFailures += 1;
@@ -389,7 +396,11 @@ export function AccountCenterTitleActions() {
         const account = provider?.accounts.find((account) => account.id === target.account.id);
         if (!provider?.installed || provider.busy || !account || account.refreshing) continue;
         if (action === 'claim') {
-          if (account.claim) await account.claim();
+          if (account.claim && !claimedProviders.has(provider.id)) {
+            const deviceClaimed = await account.claim();
+            if (deviceClaimed === true && batch.current === request)
+              claimedProviders.add(provider.id);
+          }
         } else {
           await account.refresh(collectError);
         }

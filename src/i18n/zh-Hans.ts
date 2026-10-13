@@ -307,6 +307,7 @@ const zhHans: Partial<Translations> = {
   'agent.baseCredits': '套餐基础积分',
   'agent.baseCreditsReset': '下次刷新',
   'agent.rewardCredits': '平台奖励积分',
+  'agent.rewardCreditsNextExpiry': '最早到期',
   'agent.purchasedCredits': '购买加量包剩余积分',
   'agent.claimDailyCredits': '领取每日积分',
   'agent.dailyCreditsClaimed': '今日积分已领取',

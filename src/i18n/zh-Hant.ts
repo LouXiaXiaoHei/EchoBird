@@ -327,6 +327,7 @@ const zhHant: Partial<Translations> = {
   'agent.baseCredits': '套餐基礎積分',
   'agent.baseCreditsReset': '下次刷新',
   'agent.rewardCredits': '平台獎勵積分',
+  'agent.rewardCreditsNextExpiry': '最早到期',
   'agent.purchasedCredits': '購買加量包剩餘積分',
   'agent.claimDailyCredits': '領取每日積分',
   'agent.dailyCreditsClaimed': '今日積分已領取',

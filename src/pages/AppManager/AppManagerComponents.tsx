@@ -9,6 +9,7 @@ import { QuotaCountdown } from './QuotaCountdown';
 import { codexPlanLabel } from './codexPlanLabel';
 import { isFreePlan } from './accountPlanLabel';
 import { WorkBuddyAccountSection } from './WorkBuddyAccountSection';
+import { TraeAccountSection } from './TraeAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -1079,6 +1080,8 @@ export const AppManagerPanel: React.FC = () => {
             <AntigravityAccountSection />
           ) : selectedTool === 'grokbot' || selectedTool === 'cursor' ? (
             <CursorAccountSection tool={selectedTool} />
+          ) : selectedTool === 'trae' || selectedTool === 'traecn' ? (
+            <TraeAccountSection />
           ) : selectedToolData.noModelConfig ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
               <BoxIcon size={28} className="text-cyber-text opacity-25" />
@@ -1167,6 +1170,7 @@ export const AppManagerBottom: React.FC = () => {
     claudeCodeAccounts,
     claudeDesktopAccounts,
     workBuddyAccounts,
+    traeAccounts,
     zcodeAccounts,
     deepSeekAccounts,
     grokAccounts,
@@ -1207,7 +1211,8 @@ export const AppManagerBottom: React.FC = () => {
     ((selectedTool === 'antigravity' || selectedTool === 'antigravitydesktop') &&
       !!antigravityAccounts.selectedId) ||
     ((selectedTool === 'workbuddy' || selectedTool === 'workbuddyai') &&
-      !!workBuddyAccounts.selectedId);
+      !!workBuddyAccounts.selectedId) ||
+    ((selectedTool === 'trae' || selectedTool === 'traecn') && !!traeAccounts.selectedId);
   // What will a click actually do?
   //  - "Apply" runs only when the user picked a model AND agreed to the config-write policy.
   //  - "Launch" runs whenever launchAfterApply is on, or unconditionally for desktop/no-config apps.
@@ -1226,6 +1231,7 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) ||
     (selectedTool === 'grokbot' && grokBotAccounts.busy) ||
     (selectedTool === 'cursor' && cursorAccounts.busy) ||
+    ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) ||
     (!isUninstalled && !willApply && !willLaunch);
 
   // Uninstalled → install flow; otherwise the existing launch/apply flow.

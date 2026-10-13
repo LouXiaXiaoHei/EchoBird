@@ -88,6 +88,7 @@ beforeEach(() => {
     antigravityAccounts: group,
     workBuddyAccounts: group,
     workBuddyAccountGroups: { workbuddy: group, workbuddyai: group },
+    traeAccountGroups: { trae: { ...group, accounts: [] }, traecn: { ...group, accounts: [] } },
     zcodeAccounts: { ...group, provider: 'bigmodel', setProvider: vi.fn() },
     deepSeekAccounts: { ...group, accounts: [] },
   } as unknown as AppManagerContextType;

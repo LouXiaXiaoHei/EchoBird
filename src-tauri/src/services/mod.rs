@@ -40,6 +40,7 @@ pub mod smart_router;
 pub mod tool_config_manager;
 pub mod tool_manager;
 pub mod tool_patcher;
+pub mod trae_accounts;
 pub mod usage_providers;
 #[cfg(windows)]
 pub mod windows_path;

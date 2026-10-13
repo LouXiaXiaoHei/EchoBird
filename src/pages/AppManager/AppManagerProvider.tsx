@@ -5,6 +5,7 @@ import { useGrokAccounts } from './useGrokAccounts';
 import { accountError } from '../../utils/accountError';
 import { ClaudeCodeLoginDialog } from './ClaudeCodeLoginDialog';
 import { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
+import { useTraeAccounts } from './useTraeAccounts';
 import { useZCodeAccounts } from './useZCodeAccounts';
 import { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
@@ -322,6 +323,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   );
   const workBuddyAccounts =
     workBuddyEdition === 'workbuddyai' ? workBuddyAiAccounts : workBuddyCnAccounts;
+
+  const traeCnAccounts = useTraeAccounts('traecn', accountGroupEnabled('traecn'), setApplyError);
+  const traeGlobalAccounts = useTraeAccounts('trae', accountGroupEnabled('trae'), setApplyError);
+  const traeAccounts = selectedTool === 'trae' ? traeGlobalAccounts : traeCnAccounts;
 
   const clearDeepSeekModel = useCallback(() => {
     setToolModelConfig((prev) => ({ ...prev, dsh: null }));
@@ -664,6 +669,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (selectedTool === 'zcode' && zcodeAccounts.busy) return;
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
+    if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) return;
     setIsLaunching(true);
     const switchingClaudeAccount =
       (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
@@ -671,6 +677,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (
       !switchingClaudeAccount &&
       !(workBuddyEdition && workBuddyAccounts.selectedId) &&
+      !((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
       !(selectedTool === 'grok' && grokAccounts.selectedId) &&
@@ -802,6 +809,18 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         await api.switchWorkBuddyAccount(workBuddyEdition, workBuddyAccounts.selectedId);
         await workBuddyAccounts.reload();
         if (launchAfterApply) await api.startTool(workBuddyEdition, toolData?.startCommand);
+      } catch (error) {
+        setApplyError(accountError(error, t));
+      } finally {
+        setIsLaunching(false);
+      }
+      return;
+    } else if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) {
+      try {
+        await api.switchTraeAccount(selectedTool, traeAccounts.selectedId);
+        await traeAccounts.reload();
+        if (launchAfterApply || noModelConfig)
+          await api.startTool(selectedTool, toolData?.startCommand);
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
@@ -968,6 +987,23 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           workbuddyai: {
             ...workBuddyAiAccounts,
             accounts: orderedAccounts('workbuddyai', workBuddyAiAccounts.accounts),
+          },
+        },
+        traeAccounts: {
+          ...traeAccounts,
+          accounts: orderedAccounts(
+            selectedTool === 'trae' ? 'trae' : 'traecn',
+            traeAccounts.accounts
+          ),
+        },
+        traeAccountGroups: {
+          trae: {
+            ...traeGlobalAccounts,
+            accounts: orderedAccounts('trae', traeGlobalAccounts.accounts),
+          },
+          traecn: {
+            ...traeCnAccounts,
+            accounts: orderedAccounts('traecn', traeCnAccounts.accounts),
           },
         },
         zcodeAccounts: {

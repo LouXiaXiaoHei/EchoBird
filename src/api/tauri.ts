@@ -351,6 +351,66 @@ export function deleteZCodeAccount(accountId: string): Promise<void> {
   return invoke('delete_zcode_account', { accountId });
 }
 
+export type TraeEdition = 'trae' | 'traecn';
+export interface TraeAccount {
+  id: string;
+  edition: TraeEdition;
+  name: string;
+  plan: string | null;
+  active: boolean;
+  remaining?: number | null;
+  workRemaining?: number | null;
+  total?: number | null;
+  currency?: string | null;
+  expiresAt?: number | null;
+  baseRemaining?: number | null;
+  baseTotal?: number | null;
+  baseResetAt?: number | null;
+  rewardRemaining?: number | null;
+  rewardTotal?: number | null;
+  rewardNextExpiryAt?: number | null;
+  addonRemaining?: number | null;
+  dailyClaimedAt?: number | null;
+  deviceClaimedAt?: number | null;
+  rewardEnabled?: boolean | null;
+  subscriptionEndAt?: number | null;
+}
+export interface TraeLogin {
+  loginId: string;
+  verificationUri: string;
+  expiresAt: number;
+}
+export function listTraeAccounts(edition: TraeEdition): Promise<TraeAccount[]> {
+  return invoke('list_trae_accounts', { edition });
+}
+export function startTraeLogin(edition: TraeEdition): Promise<TraeLogin> {
+  return invoke('start_trae_login', { edition });
+}
+export function pollTraeLogin(loginId: string): Promise<TraeAccount | null> {
+  return invoke('poll_trae_login', { loginId });
+}
+export function cancelTraeLogin(loginId: string): Promise<void> {
+  return invoke('cancel_trae_login', { loginId });
+}
+export function switchTraeAccount(edition: TraeEdition, accountId: string): Promise<void> {
+  return invoke('switch_trae_account', { edition, accountId });
+}
+export function refreshTraeAccountQuota(
+  edition: TraeEdition,
+  accountId: string
+): Promise<TraeAccount> {
+  return invoke('refresh_trae_account_quota', { edition, accountId });
+}
+export function claimTraeDailyCredits(
+  edition: TraeEdition,
+  accountId: string
+): Promise<TraeAccount> {
+  return invoke('claim_trae_daily_credits', { edition, accountId });
+}
+export function deleteTraeAccount(edition: TraeEdition, accountId: string): Promise<void> {
+  return invoke('delete_trae_account', { edition, accountId });
+}
+
 export type WorkBuddyEdition = 'workbuddy' | 'workbuddyai';
 export interface WorkBuddyAccount {
   id: string;

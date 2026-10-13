@@ -772,7 +772,55 @@ pub async fn delete_workbuddy_account(
     workbuddy_accounts::delete(edition, &account_id).await
 }
 
+use crate::services::trae_accounts::{self, Account as TraeAccount, Edition as TraeEdition};
 use crate::services::{deepseek_accounts, deepseek_oauth};
+
+#[tauri::command]
+pub async fn list_trae_accounts(edition: TraeEdition) -> Result<Vec<TraeAccount>, String> {
+    trae_accounts::list_accounts(edition).await
+}
+
+#[tauri::command]
+pub async fn start_trae_login(edition: TraeEdition) -> Result<trae_accounts::LoginStart, String> {
+    trae_accounts::start_login(edition).await
+}
+
+#[tauri::command]
+pub async fn poll_trae_login(login_id: String) -> Result<Option<TraeAccount>, String> {
+    trae_accounts::poll_login(&login_id).await
+}
+
+#[tauri::command]
+pub async fn cancel_trae_login(login_id: String) -> Result<(), String> {
+    trae_accounts::cancel_login(&login_id)
+}
+
+#[tauri::command]
+pub async fn switch_trae_account(edition: TraeEdition, account_id: String) -> Result<(), String> {
+    trae_accounts::activate_account(edition, &account_id).await
+}
+
+#[tauri::command]
+pub async fn refresh_trae_account_quota(
+    edition: TraeEdition,
+    account_id: String,
+) -> Result<TraeAccount, String> {
+    trae_accounts::refresh_quota(edition, &account_id).await
+}
+
+#[tauri::command]
+pub async fn claim_trae_daily_credits(
+    edition: TraeEdition,
+    account_id: String,
+) -> Result<TraeAccount, String> {
+    trae_accounts::claim_daily(edition, &account_id).await
+}
+
+#[tauri::command]
+pub async fn delete_trae_account(edition: TraeEdition, account_id: String) -> Result<(), String> {
+    trae_accounts::delete_account(edition, &account_id).await
+}
+
 #[tauri::command]
 pub async fn list_deepseek_accounts() -> Result<Vec<deepseek_accounts::Account>, String> {
     deepseek_accounts::list()

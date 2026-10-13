@@ -27,6 +27,14 @@ vi.mock('./useClaudeCodeAccounts', () => ({ useClaudeCodeAccounts: () => ({ acco
 vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
 vi.mock('./useDeepSeekAccounts', () => ({ useDeepSeekAccounts: () => ({ accounts: [] }) }));
 vi.mock('../../api/tauri', () => ({
+  listTraeAccounts: vi.fn().mockResolvedValue([]),
+  startTraeLogin: vi.fn(),
+  pollTraeLogin: vi.fn(),
+  cancelTraeLogin: vi.fn().mockResolvedValue(undefined),
+  switchTraeAccount: vi.fn(),
+  refreshTraeAccountQuota: vi.fn(),
+  claimTraeDailyCredits: vi.fn(),
+  deleteTraeAccount: vi.fn(),
   listZCodeAccounts: vi.fn(),
   startZCodeLogin: vi.fn(),
   pollZCodeLogin: vi.fn(),

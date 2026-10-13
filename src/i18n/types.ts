@@ -285,6 +285,7 @@ export type TKey =
   | 'agent.baseCredits'
   | 'agent.baseCreditsReset'
   | 'agent.rewardCredits'
+  | 'agent.rewardCreditsNextExpiry'
   | 'agent.purchasedCredits'
   | 'agent.claimDailyCredits'
   | 'agent.dailyCreditsClaimed'

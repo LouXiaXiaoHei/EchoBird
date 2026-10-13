@@ -217,7 +217,7 @@ describe('CodexAccountSection', () => {
       refreshingCodexAccountIds: new Set(),
       codexAuthorizationFailedIds: new Set(),
       addCodexAccount: async () => {},
-      refreshCodexAccountQuota: async () => {},
+      refreshCodexAccountQuota: async () => undefined,
       deleteCodexAccount: async () => {},
     };
 

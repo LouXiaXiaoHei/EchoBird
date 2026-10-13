@@ -2,8 +2,9 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
-import type { AppManagerContextType } from '../AppManager/context';
-import { AccountCard } from './AccountCenter';
+import { AppManagerContext, type AppManagerContextType } from '../AppManager/context';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
@@ -35,6 +36,7 @@ function context() {
     claudeDesktopAccounts: group(),
     deepSeekAccounts: group(),
     workBuddyAccountGroups: { workbuddy: group(), workbuddyai: group() },
+    traeAccountGroups: { trae: group(), traecn: group() },
     antigravityAccounts: group(),
     cursorAccounts: group(),
     zcodeAccounts: group(),
@@ -49,6 +51,60 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it.each(['device claimed', 'no device claim', 'ignored response'] as const)(
+    'uses the actual TRAE claim result before a render snapshot updates (%s)',
+    async (result) => {
+      const state = context();
+      const first = {
+        id: 'first',
+        edition: 'traecn' as const,
+        name: 'First',
+        plan: 'Free',
+        active: true,
+      };
+      const second = { ...first, id: 'second', name: 'Second', active: false };
+      state.detectedTools = [
+        { id: 'traecn', name: 'TRAE CN', category: 'Desktop', installed: true },
+      ];
+      state.traeAccountGroups.traecn.accounts = [first, second];
+      const claim = vi.fn().mockResolvedValueOnce(
+        result === 'ignored response'
+          ? undefined
+          : {
+              ...first,
+              dailyClaimedAt: Date.now() / 1000,
+              deviceClaimedAt: result === 'device claimed' ? Date.now() / 1000 : undefined,
+            }
+      );
+      state.traeAccountGroups.traecn.claimDaily = claim;
+      useNavigationStore.getState().setActivePage('accounts');
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        act(() => {
+          renderer = create(
+            <AppManagerContext.Provider value={state}>
+              <AccountCenterTitleActions />
+            </AppManagerContext.Provider>
+          );
+        });
+        expect(claim).not.toHaveBeenCalled();
+        await act(async () => {
+          await renderer!.root
+            .findByProps({ 'aria-label': 'accountCenter.claimAll' })
+            .props.onClick();
+        });
+        expect(claim).toHaveBeenCalledTimes(result === 'device claimed' ? 1 : 2);
+        expect(claim).toHaveBeenNthCalledWith(1, first);
+        if (result !== 'device claimed') expect(claim).toHaveBeenNthCalledWith(2, second);
+        expect(state.traeAccountGroups.traecn.accounts).toEqual([first, second]);
+        expect(state.traeAccountGroups.traecn.refresh).not.toHaveBeenCalled();
+      } finally {
+        act(() => renderer?.unmount());
+        useNavigationStore.getState().setActivePage('apps');
+      }
+    }
+  );
+
   it.each(['pro', 'free', 'Free'])(
     'keeps Manus %s subscription expiry separate from its credit balance and refresh time',
     (plan) => {
@@ -329,6 +385,327 @@ describe('Account Center display data', () => {
     ]);
     expect(cn.metrics[0].resetAt).toBe(123);
     expect(global.metrics[0]).toMatchObject({ value: '—', percent: undefined });
+  });
+
+  it('keeps regional TRAE plans and uncategorized balances separate, including unknown Free balances', () => {
+    const state = context();
+    state.traeAccountGroups.trae.accounts = [
+      { id: 'same', edition: 'trae', name: 'Global', plan: 'Free', active: false, remaining: null },
+    ];
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'same',
+        edition: 'traecn',
+        name: 'CN',
+        plan: 'Pro+',
+        active: true,
+        remaining: 25,
+        workRemaining: 0,
+        subscriptionEndAt: 1900000000,
+      },
+    ];
+    const groups = providers(state);
+    const global = groups.find((p) => p.id === 'trae')!;
+    const cn = groups.find((p) => p.id === 'traecn')!;
+    expect(global.accounts[0].metrics).toEqual([{ label: 'accountCenter.quota', value: '—' }]);
+    expect(global.accounts[0].claim).toBeUndefined();
+    expect(cn.accounts[0].metrics).toEqual([{ label: 'agent.credits', value: '25' }]);
+    expect(cn.accounts[0].subscriptionEndAt).toBe(1900000000);
+    const html = renderToStaticMarkup(<AccountCard provider={cn} account={cn.accounts[0]} />);
+    expect(html.split('Pro+')).toHaveLength(2);
+    expect(html).not.toContain('role="progressbar"');
+    const unknown = renderToStaticMarkup(
+      <AccountCard provider={global} account={global.accounts[0]} />
+    );
+    expect(unknown).toContain('text-2xl');
+    expect(unknown).toContain('items-center text-center');
+    expect(unknown).toContain('>—</span>');
+    expect(unknown).not.toContain('model.noUsageData');
+  });
+
+  it('reuses base/reward progress and daily claim text only from confirmed CN balances', () => {
+    const state = context();
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'cn',
+        edition: 'traecn',
+        name: 'CN',
+        plan: 'Pro',
+        active: true,
+        remaining: 95,
+        total: 150,
+        baseRemaining: 75,
+        baseTotal: 100,
+        baseResetAt: 1900000000,
+        rewardRemaining: 20,
+        rewardTotal: 50,
+        rewardEnabled: true,
+      },
+    ];
+    let provider = providers(state).find((p) => p.id === 'traecn')!;
+    expect(provider.accounts[0].metrics).toEqual([
+      { label: 'agent.baseCredits', value: '75', percent: 75, resetAt: 1900000000 },
+      { label: 'agent.rewardCredits', value: '20', percent: 40, resetAt: undefined },
+    ]);
+    const html = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[0]} />
+    );
+    expect(html.match(/role="progressbar"/g)).toHaveLength(2);
+    expect(html).toContain('>agent.dailyCreditsUnclaimed</span>');
+    expect(html).not.toContain('workbuddy-account-pill');
+    state.traeAccountGroups.traecn.accounts[0].dailyClaimedAt = Date.now() / 1000;
+    provider = providers(state).find((p) => p.id === 'traecn')!;
+    expect(
+      renderToStaticMarkup(<AccountCard provider={provider} account={provider.accounts[0]} />)
+    ).not.toContain('agent.dailyCreditsUnclaimed');
+    state.traeAccountGroups.traecn.accounts[0].dailyClaimedAt = null;
+    state.traeAccountGroups.traecn.accounts[0].rewardEnabled = null;
+    provider = providers(state).find((p) => p.id === 'traecn')!;
+    expect(
+      renderToStaticMarkup(<AccountCard provider={provider} account={provider.accounts[0]} />)
+    ).not.toContain('agent.dailyCreditsUnclaimed');
+  });
+
+  it('shows one international credit progress row and keeps its deadline separate from subscription expiry', () => {
+    const state = context();
+    state.traeAccountGroups.trae.accounts = [
+      {
+        id: 'global',
+        edition: 'trae',
+        name: 'Global',
+        plan: 'Lite',
+        active: true,
+        remaining: 4,
+        total: 8,
+        currency: 'USD',
+        expiresAt: 1900000000,
+        subscriptionEndAt: 1900100000,
+        baseRemaining: 3,
+        baseTotal: 10,
+        rewardRemaining: 1,
+        rewardTotal: 10,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'trae')!;
+    const account = provider.accounts[0];
+    expect(account.metrics).toEqual([
+      { label: 'accountCenter.quota', value: '$4', percent: 50, resetAt: 1900000000 },
+    ]);
+    expect(account.subscriptionEndAt).toBe(1900100000);
+    const html = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
+    expect(html.match(/role="progressbar"/g)).toHaveLength(1);
+    expect(html).not.toContain('agent.claimDailyCredits');
+    expect(html).not.toContain('agent.dailyCreditsUnclaimed');
+  });
+
+  it('shows a CN reward-only account without creating a base quota or deadline', () => {
+    const state = context();
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'cn',
+        edition: 'traecn',
+        name: 'CN',
+        plan: 'Free',
+        active: true,
+        remaining: 4600,
+        total: 4600,
+        baseRemaining: null,
+        baseTotal: null,
+        baseResetAt: null,
+        rewardRemaining: 4600,
+        rewardTotal: 4600,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'traecn')!;
+    const account = provider.accounts[0];
+    expect(account.metrics).toEqual([
+      { label: 'agent.rewardCredits', value: '4,600', percent: 100, resetAt: undefined },
+    ]);
+    const html = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
+    expect(html.match(/role="progressbar"/g)).toHaveLength(1);
+    expect(html).not.toContain('agent.baseCredits');
+    expect(html).not.toContain('accountCenter.reset');
+  });
+
+  it.each(['expired cache', 'minute tick'])(
+    'hides expired earliest-expiry text locally while keeping the CN credit value and progress (%s)',
+    async (scenario) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-10-13T04:00:00Z'));
+      const now = Date.now() / 1000;
+      const future = scenario === 'minute tick';
+      const state = context();
+      state.traeAccountGroups.traecn.accounts = [
+        {
+          id: 'cn',
+          edition: 'traecn',
+          name: 'CN',
+          plan: 'Free',
+          active: true,
+          baseRemaining: 0,
+          baseTotal: 0,
+          rewardRemaining: 4600,
+          rewardTotal: 4600,
+          rewardNextExpiryAt: now + (future ? 30 : -30),
+        },
+      ];
+      const provider = providers(state).find((p) => p.id === 'traecn')!;
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        act(() => {
+          renderer = create(<AccountCard provider={provider} account={provider.accounts[0]} />);
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        const earliestLabels = () =>
+          renderer!.root
+            .findAllByType('span')
+            .filter((node) => node.children.includes('agent.rewardCreditsNextExpiry'));
+        expect(earliestLabels()).toHaveLength(0);
+        if (future) {
+          expect(
+            renderer!.root.findAllByProps({ 'aria-label': 'agent.rewardCreditsNextExpiry 1m' })
+          ).toHaveLength(1);
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(60_000);
+          });
+        }
+        expect(earliestLabels()).toHaveLength(0);
+        expect(
+          renderer!.root.findAllByProps({ 'aria-label': 'agent.rewardCreditsNextExpiry 1m' })
+        ).toHaveLength(0);
+        expect(
+          renderer!.root.findAllByType('span').some((node) => node.children.includes('4,600'))
+        ).toBe(true);
+        expect(renderer!.root.findAllByProps({ role: 'progressbar' })).toHaveLength(2);
+        expect(state.traeAccountGroups.traecn.refresh).not.toHaveBeenCalled();
+        expect(state.traeAccountGroups.traecn.add).not.toHaveBeenCalled();
+        expect(state.traeAccountGroups.traecn.remove).not.toHaveBeenCalled();
+      } finally {
+        act(() => renderer?.unmount());
+        vi.useRealTimers();
+      }
+    }
+  );
+
+  it('shows a confirmed empty CN base bucket and the real earliest reward expiry without changing other providers', () => {
+    const state = context();
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'cn',
+        edition: 'traecn',
+        name: 'CN',
+        plan: 'Free',
+        active: true,
+        baseRemaining: 0,
+        baseTotal: 0,
+        rewardRemaining: 4600,
+        rewardTotal: 4600,
+        rewardNextExpiryAt: 1900000000,
+      },
+    ];
+    state.workBuddyAccountGroups.workbuddy.accounts = [
+      {
+        id: 'buddy',
+        edition: 'workbuddy',
+        name: 'Buddy',
+        plan: 'Free',
+        active: true,
+        remaining: 20,
+        total: 20,
+        expiresAt: null,
+        baseRemaining: 0,
+        baseTotal: 0,
+        rewardRemaining: 20,
+        rewardTotal: 20,
+      },
+    ];
+    const groups = providers(state);
+    const cn = groups.find((p) => p.id === 'traecn')!;
+    expect(cn.accounts[0].metrics).toEqual([
+      { label: 'agent.baseCredits', value: '0', percent: 0, resetAt: undefined },
+      {
+        label: 'agent.rewardCredits',
+        value: '4,600',
+        percent: 100,
+        resetAt: 1900000000,
+        resetLabel: 'agent.rewardCreditsNextExpiry',
+      },
+    ]);
+    expect(
+      groups.find((p) => p.id === 'workbuddy')!.accounts[0].metrics[0].percent
+    ).toBeUndefined();
+    const html = renderToStaticMarkup(<AccountCard provider={cn} account={cn.accounts[0]} />);
+    expect(html.match(/role="progressbar"/g)).toHaveLength(2);
+    expect(html).toContain('aria-valuenow="0"');
+    expect(html).not.toContain('>agent.rewardCreditsNextExpiry</span>');
+  });
+
+  it('preserves missing TRAE credit limits and zero balances without fabricated progress', () => {
+    const state = context();
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'cn',
+        edition: 'traecn',
+        name: 'CN',
+        plan: 'Free',
+        active: false,
+        baseRemaining: 0,
+        baseTotal: 100,
+        rewardRemaining: 20,
+        rewardTotal: null,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'traecn')!;
+    expect(provider.accounts[0].metrics).toMatchObject([
+      { label: 'agent.baseCredits', value: '0', percent: 0 },
+      { label: 'agent.rewardCredits', value: '20', percent: undefined },
+    ]);
+    const html = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[0]} />
+    );
+    expect(html.match(/role="progressbar"/g)).toHaveLength(1);
+    expect(html).toContain('aria-valuenow="0"');
+    expect(html).not.toContain('accountCenter.reset');
+  });
+
+  it('disables CN gifts on a device-used day without displaying another account as claimed', () => {
+    const state = context();
+    state.detectedTools = [{ id: 'traecn', name: 'TRAE CN', category: 'Desktop', installed: true }];
+    state.traeAccountGroups.traecn.accounts = [
+      {
+        id: 'first',
+        edition: 'traecn',
+        name: 'First',
+        plan: 'Pro',
+        active: true,
+        remaining: 100,
+        dailyClaimedAt: Date.now() / 1000,
+        deviceClaimedAt: Date.now() / 1000,
+      },
+      {
+        id: 'second',
+        edition: 'traecn',
+        name: 'Second',
+        plan: 'Free',
+        active: false,
+        remaining: 0,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'traecn')!;
+    expect(provider.accounts.map((account) => account.claimDisabled)).toEqual([true, true]);
+    const first = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[0]} />
+    );
+    const second = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[1]} />
+    );
+    expect(first).toContain('agent.dailyCreditsClaimed First');
+    expect(first).toContain('lucide-check');
+    expect(second).toMatch(/aria-label="agent.claimDailyCredits Second" disabled=""/);
+    expect(second).toContain('lucide-gift');
+    expect(second).not.toContain('agent.dailyCreditsClaimed');
   });
 
   it('keeps the Antigravity minimum-family reset paired with its percentage', () => {

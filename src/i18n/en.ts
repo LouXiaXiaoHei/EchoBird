@@ -341,6 +341,7 @@ const en: Translations = {
   'agent.baseCredits': 'Base credits',
   'agent.baseCreditsReset': 'Next reset',
   'agent.rewardCredits': 'Reward credits',
+  'agent.rewardCreditsNextExpiry': 'Earliest expiry',
   'agent.purchasedCredits': 'Purchased top-up credits',
   'agent.claimDailyCredits': 'Claim daily credits',
   'agent.dailyCreditsClaimed': 'Daily credits claimed',

@@ -3,6 +3,7 @@ import type { useAntigravityAccounts } from './useAntigravityAccounts';
 import type { useDeepSeekAccounts } from './useDeepSeekAccounts';
 import type { useGrokAccounts } from './useGrokAccounts';
 import type { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
+import type { useTraeAccounts } from './useTraeAccounts';
 import type { useZCodeAccounts } from './useZCodeAccounts';
 import type { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import type { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
@@ -32,6 +33,8 @@ export interface AppManagerContextType {
   claudeCodeAccounts: ReturnType<typeof useClaudeCodeAccounts>;
   claudeDesktopAccounts: ReturnType<typeof useClaudeDesktopAccounts>;
   workBuddyAccounts: ReturnType<typeof useWorkBuddyAccounts>;
+  traeAccounts: ReturnType<typeof useTraeAccounts>;
+  traeAccountGroups: Record<'trae' | 'traecn', ReturnType<typeof useTraeAccounts>>;
   workBuddyAccountGroups: Record<
     'workbuddy' | 'workbuddyai',
     ReturnType<typeof useWorkBuddyAccounts>

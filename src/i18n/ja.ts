@@ -340,6 +340,7 @@ const ja: Partial<Translations> = {
   'agent.baseCredits': '基本クレジット',
   'agent.baseCreditsReset': '次回更新',
   'agent.rewardCredits': '報酬クレジット',
+  'agent.rewardCreditsNextExpiry': '最短の有効期限',
   'agent.purchasedCredits': '購入した追加クレジット',
   'agent.claimDailyCredits': '毎日のクレジットを受け取る',
   'agent.dailyCreditsClaimed': '本日のクレジットは受取済み',

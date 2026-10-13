@@ -1,15 +1,17 @@
 import type { AppManagerContextType } from '../AppManager/context';
 import type { ManagedAccount } from '../AppManager/useManagedAccounts';
-import type { AntigravityQuota, WorkBuddyAccount } from '../../api/tauri';
+import type { AntigravityQuota, TraeAccount, WorkBuddyAccount } from '../../api/tauri';
 import type { TKey } from '../../i18n';
 import { codexPlanLabel } from '../AppManager/codexPlanLabel';
 import { isFreePlan } from '../AppManager/accountPlanLabel';
+import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
 
 export interface AccountMetric {
   label: string;
   value: string;
   percent?: number | null;
   resetAt?: number | null;
+  resetLabel?: string;
   showProgress?: boolean;
 }
 
@@ -23,8 +25,10 @@ export interface AccountCardData {
   refreshing: boolean;
   authorizationFailed: boolean;
   refresh: (onError?: (error: unknown) => void) => Promise<void>;
-  claim?: () => Promise<void>;
+  claim?: () => Promise<unknown>;
+  claimDisabled?: boolean;
   dailyClaimedAt?: number | null;
+  showUnclaimed?: boolean;
   remove: () => void;
 }
 
@@ -57,7 +61,7 @@ interface AccountGroup<A> {
     account: A,
     operation?: (account: A) => Promise<A>,
     onError?: (error: unknown) => void
-  ) => Promise<void>;
+  ) => Promise<unknown>;
   remove: (account: A) => Promise<void>;
 }
 
@@ -87,20 +91,21 @@ export function accountCenterProviders(
       .reduce<
         AntigravityQuota | undefined
       >((lowest, q) => (!lowest || q.remainingPercent < lowest.remainingPercent ? q : lowest), undefined);
-  const workBuddyMetrics = (account: WorkBuddyAccount): AccountMetric[] => {
+  const credits = (
+    label: string,
+    remaining?: number | null,
+    total?: number | null,
+    resetAt?: number | null,
+    currency?: string | null
+  ): AccountMetric => ({
+    label,
+    value: remaining != null && currency === 'USD' ? `$${number(remaining)}` : number(remaining),
+    resetAt,
+    percent:
+      remaining != null && total != null && total > 0 ? (remaining / total) * 100 : undefined,
+  });
+  const creditMetrics = (account: WorkBuddyAccount | TraeAccount): AccountMetric[] => {
     const metrics: AccountMetric[] = [];
-    const credits = (
-      label: string,
-      remaining?: number | null,
-      total?: number | null,
-      resetAt?: number | null
-    ) => ({
-      label,
-      value: number(remaining),
-      resetAt,
-      percent:
-        remaining != null && total != null && total > 0 ? (remaining / total) * 100 : undefined,
-    });
     if (account.baseRemaining != null)
       metrics.push(
         credits(
@@ -128,7 +133,15 @@ export function accountCenterProviders(
       account: A
     ) => Pick<
       AccountCardData,
-      'identity' | 'detail' | 'plan' | 'metrics' | 'subscriptionEndAt' | 'claim' | 'dailyClaimedAt'
+      | 'identity'
+      | 'detail'
+      | 'plan'
+      | 'metrics'
+      | 'subscriptionEndAt'
+      | 'claim'
+      | 'claimDisabled'
+      | 'dailyClaimedAt'
+      | 'showUnclaimed'
     >
   ): AccountProvider => ({
     id,
@@ -163,6 +176,8 @@ export function accountCenterProviders(
         subscriptionEndAt:
           free && summary.subscriptionEndAt == null ? undefined : summary.subscriptionEndAt,
         metrics:
+          id !== 'trae' &&
+          id !== 'traecn' &&
           free &&
           summary.metrics.every(
             (metric) => metric.value === '—' && metric.percent == null && metric.resetAt == null
@@ -171,7 +186,9 @@ export function accountCenterProviders(
             : summary.metrics,
         refreshing: group.refreshing.has(account.id),
         authorizationFailed: group.authorizationFailedIds.has(account.id),
-        refresh: (onError) => group.refresh(account, undefined, onError),
+        refresh: async (onError) => {
+          await group.refresh(account, undefined, onError);
+        },
         remove: () => void group.remove(account),
       };
     }),
@@ -279,7 +296,7 @@ export function accountCenterProviders(
         (account) => ({
           identity: account.name,
           plan: account.plan,
-          metrics: workBuddyMetrics(account),
+          metrics: creditMetrics(account),
           ...(edition === 'workbuddy'
             ? {
                 claim: () => context.workBuddyAccountGroups.workbuddy.claimDaily(account),
@@ -287,6 +304,64 @@ export function accountCenterProviders(
               }
             : {}),
         })
+      )
+    ),
+    ...(['trae', 'traecn'] as const).map((edition) =>
+      provider(
+        edition,
+        edition === 'trae' ? 'TRAE' : 'TRAE CN',
+        `/icons/tools/${edition}.svg`,
+        [edition],
+        context.traeAccountGroups[edition],
+        (account) => {
+          const metrics =
+            edition === 'traecn'
+              ? creditMetrics(account)
+              : [
+                  credits(
+                    t('accountCenter.quota'),
+                    account.remaining,
+                    account.total,
+                    account.expiresAt,
+                    account.currency
+                  ),
+                ];
+          if (edition === 'traecn') {
+            for (const metric of metrics) {
+              if (
+                metric.label === t('agent.baseCredits') &&
+                account.baseRemaining === 0 &&
+                account.baseTotal === 0
+              )
+                metric.percent = 0;
+              if (metric.label === t('agent.rewardCredits') && account.rewardNextExpiryAt != null) {
+                metric.resetAt = account.rewardNextExpiryAt;
+                metric.resetLabel = t('agent.rewardCreditsNextExpiry');
+              }
+            }
+          }
+          return {
+            identity: account.name,
+            plan: account.plan,
+            subscriptionEndAt: account.subscriptionEndAt ?? undefined,
+            metrics,
+            ...(edition === 'traecn'
+              ? {
+                  claim: async () => {
+                    const group = context.traeAccountGroups.traecn;
+                    if (traeClaimUnavailable(account, group.accounts)) return;
+                    const updated = await group.claimDaily(account);
+                    return updated != null && traeClaimedToday(updated.deviceClaimedAt);
+                  },
+                  claimDisabled:
+                    context.traeAccountGroups.traecn.refreshing.size > 0 ||
+                    traeClaimUnavailable(account, context.traeAccountGroups.traecn.accounts),
+                  dailyClaimedAt: account.dailyClaimedAt,
+                  showUnclaimed: account.rewardEnabled === true,
+                }
+              : {}),
+          };
+        }
       )
     ),
     provider(

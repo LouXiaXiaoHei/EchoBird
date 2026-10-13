@@ -228,7 +228,7 @@ describe('shared account request boundaries', () => {
     expect([...state.authorizationFailedIds]).toEqual(['saved']);
     const retry = deferred<Account>();
     vi.mocked(client.refresh).mockReturnValueOnce(retry.promise);
-    let task!: Promise<void>;
+    let task!: Promise<unknown>;
     act(() => {
       task = state.refresh(account);
     });
@@ -262,7 +262,7 @@ describe('shared account request boundaries', () => {
         if (failure) throw new Error('accountError.loginRequired');
         return { ...account, quota: 1 };
       });
-      let task!: Promise<void>;
+      let task!: Promise<unknown>;
       act(() => {
         task = state.refresh(account);
       });
@@ -282,7 +282,7 @@ describe('shared account request boundaries', () => {
       expect(state.refreshing.size).toBe(0);
       await act(async () => {
         late.resolve();
-        await task;
+        expect(await task).toBeUndefined();
       });
       expect(state.authorizationFailedIds.size).toBe(0);
       expect(showError).toHaveBeenCalledTimes(1);
@@ -297,7 +297,7 @@ describe('shared account request boundaries', () => {
       await late.promise;
       throw new Error('accountError.loginRequired');
     });
-    let task!: Promise<void>;
+    let task!: Promise<unknown>;
     act(() => {
       task = state.refresh(account);
     });
@@ -426,7 +426,7 @@ describe('shared account request boundaries', () => {
     const poll = deferred<Account | null>();
     vi.mocked(client.refresh).mockReturnValue(quota.promise);
     vi.mocked(client.poll!).mockReturnValue(poll.promise);
-    let refreshing!: Promise<void>;
+    let refreshing!: Promise<unknown>;
     let adding!: Promise<void>;
     await act(async () => {
       refreshing = state.refresh(account);

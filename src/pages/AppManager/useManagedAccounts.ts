@@ -333,6 +333,7 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
           ...prev,
           [scope]: (prev[scope] ?? []).map((a) => (a.id === updated.id ? updated : a)),
         }));
+        return updated;
       }
     } catch (error) {
       if (current === generation.current && requests.get(account.id) === request) {

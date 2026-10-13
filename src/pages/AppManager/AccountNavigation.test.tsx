@@ -18,6 +18,7 @@ import {
 } from '../AccountCenter/AccountCenter';
 import { open as folderPicker } from '@tauri-apps/plugin-dialog';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import { TraeAccountSection } from './TraeAccountSection';
 
 vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('../../hooks/useI18n', () => {
@@ -69,6 +70,14 @@ vi.mock('../../api/tauri', () => {
     'completeClaudeCodeLogin',
     'refreshClaudeCodeAccountQuota',
     'listWorkBuddyAccounts',
+    'listTraeAccounts',
+    'startTraeLogin',
+    'pollTraeLogin',
+    'cancelTraeLogin',
+    'switchTraeAccount',
+    'refreshTraeAccountQuota',
+    'claimTraeDailyCredits',
+    'deleteTraeAccount',
     'deleteWorkBuddyAccount',
     'startWorkBuddyLogin',
     'cancelWorkBuddyLogin',
@@ -181,6 +190,7 @@ const listNames = [
   'listClaudeCodeAccounts',
   'listClaudeDesktopAccounts',
   'listWorkBuddyAccounts',
+  'listTraeAccounts',
   'listDeepSeekAccounts',
   'listGrokAccounts',
   'listManusAccounts',
@@ -197,6 +207,8 @@ const listFor = {
   claudedesktop: 'listClaudeDesktopAccounts',
   workbuddy: 'listWorkBuddyAccounts',
   workbuddyai: 'listWorkBuddyAccounts',
+  trae: 'listTraeAccounts',
+  traecn: 'listTraeAccounts',
   dsh: 'listDeepSeekAccounts',
   grok: 'listGrokAccounts',
   manus: 'listManusAccounts',
@@ -218,7 +230,9 @@ async function mount(tool: Tool, installed = true) {
       id: tool,
       name: tool,
       category: tool === 'grok' || tool === 'antigravity' ? 'CLI Code' : 'Desktop',
-      noModelConfig: ['antigravity', 'antigravitydesktop', 'cursor'].includes(tool),
+      noModelConfig: ['antigravity', 'antigravitydesktop', 'cursor', 'trae', 'traecn'].includes(
+        tool
+      ),
       installed,
     },
   ]);
@@ -659,6 +673,8 @@ const refreshFor = {
   dsh: 'refreshDeepSeekAccountQuota',
   workbuddy: 'refreshWorkBuddyAccountQuota',
   workbuddyai: 'refreshWorkBuddyAccountQuota',
+  trae: 'refreshTraeAccountQuota',
+  traecn: 'refreshTraeAccountQuota',
   antigravity: 'refreshAntigravityAccount',
   antigravitydesktop: 'refreshAntigravityAccount',
   cursor: 'refreshCursorAccount',
@@ -679,7 +695,12 @@ it.each(Object.keys(listFor) as Tool[])(
       name: 'Saved user',
       email: 'saved@example.test',
       active: true,
-      edition: tool === 'workbuddyai' ? 'workbuddyai' : 'workbuddy',
+      edition:
+        tool === 'trae' || tool === 'traecn'
+          ? tool
+          : tool === 'workbuddyai'
+            ? 'workbuddyai'
+            : 'workbuddy',
       provider: 'bigmodel',
       plan: 'Plus',
       quotaPercent: 64,
@@ -879,7 +900,7 @@ it('Account Center: a batch marks only authorization failures, preserves them on
       resolve = done;
     })
   );
-  let task!: Promise<void>;
+  let task!: Promise<unknown>;
   act(() => {
     task = state.refreshCodexAccountQuota(state.codexAccounts.find((row) => row.id === 'same')!);
   });
@@ -1550,7 +1571,7 @@ it.each(['claudecode', 'workbuddy', 'dsh', 'chatgptdesktop'] as const)(
       dsh: state.deepSeekAccounts.refresh,
       chatgptdesktop: state.refreshCodexAccountQuota,
     }[tool];
-    let task!: Promise<void>;
+    let task!: Promise<unknown>;
     act(() => {
       task = refresh(row);
       void refresh(row);
@@ -1594,7 +1615,7 @@ it.each(['workbuddy', 'dsh'] as const)(
     const accountState = () =>
       tool === 'workbuddy' ? state.workBuddyAccounts : state.deepSeekAccounts;
     let loginTask!: Promise<void>;
-    let refreshTask!: Promise<void>;
+    let refreshTask!: Promise<unknown>;
     await act(async () => {
       loginTask = accountState().add();
       refreshTask = accountState().refresh(row);
@@ -1925,9 +1946,13 @@ it('Account Center: loads installed groups once, shared stores once, and WorkBud
   act(() => useNavigationStore.getState().setActivePage('accounts'));
   await tick();
   for (const list of listNames)
-    expect(api[list]).toHaveBeenCalledTimes(list === 'listWorkBuddyAccounts' ? 2 : 1);
+    expect(api[list]).toHaveBeenCalledTimes(
+      ['listWorkBuddyAccounts', 'listTraeAccounts'].includes(list) ? 2 : 1
+    );
   expect(api.listWorkBuddyAccounts).toHaveBeenCalledWith('workbuddy');
   expect(api.listWorkBuddyAccounts).toHaveBeenCalledWith('workbuddyai');
+  expect(api.listTraeAccounts).toHaveBeenCalledWith('trae');
+  expect(api.listTraeAccounts).toHaveBeenCalledWith('traecn');
   for (const name of ['start', 'refresh', 'switch', 'delete', 'claim', 'apply'] as const) {
     for (const [key, action] of Object.entries(api))
       if (key.startsWith(name) && vi.isMockFunction(action)) expect(action).not.toHaveBeenCalled();
@@ -2540,7 +2565,7 @@ it('ZCode: explicit quota failure remains visible and cached, delete uses the sh
       finish = resolve;
     })
   );
-  let refresh!: Promise<void>;
+  let refresh!: Promise<unknown>;
   await act(async () => {
     refresh = state.zcodeAccounts.refresh(zcodeRow);
   });
@@ -2562,3 +2587,237 @@ it('ZCode: explicit quota failure remains visible and cached, delete uses the sh
   expect(state.zcodeAccounts.accounts).toEqual([]);
   expect(state.zcodeAccounts.selectedId).toBeNull();
 });
+
+const traeRow: api.TraeAccount = {
+  id: 'same',
+  edition: 'traecn',
+  name: 'CN account',
+  plan: 'Pro',
+  active: true,
+  remaining: 20,
+};
+
+it.each(['trae', 'traecn'] as const)(
+  '%s: account-only panel and passive navigation preserve native account/model state',
+  async (edition) => {
+    const storage = mockAccountOrderStorage();
+    vi.mocked(api.listTraeAccounts).mockImplementation(async (scope) => [
+      { ...traeRow, edition: scope, name: scope },
+    ]);
+    await mount(edition);
+    act(() =>
+      renderer.update(
+        <AppManagerProvider>
+          <Harness panel />
+        </AppManagerProvider>
+      )
+    );
+    expect(renderer.root.findAllByType(TraeAccountSection)).toHaveLength(1);
+    for (const mode of ['install', 'desktop'] as const) {
+      act(() => state.setViewMode(mode));
+      await tick();
+    }
+    for (const page of ['models', 'accounts', 'apps'] as const) {
+      act(() => useNavigationStore.getState().setActivePage(page));
+      await tick();
+    }
+    expect(state.traeAccountGroups[edition].accounts[0].edition).toBe(edition);
+    expect(storage.setItem).not.toHaveBeenCalled();
+    for (const [key, action] of Object.entries(api))
+      if (/^(start|refresh|switch|delete|claim|restore)/.test(key) && vi.isMockFunction(action))
+        expect(action).not.toHaveBeenCalled();
+    expect(folderPicker).not.toHaveBeenCalled();
+    expect(state.applyError).toBeNull();
+  }
+);
+
+it.each(['trae', 'traecn'] as const)(
+  '%s: explicit account apply switches its own region and launches without model restore',
+  async (edition) => {
+    vi.mocked(api.listTraeAccounts).mockImplementation(async (scope) => [
+      { ...traeRow, edition: scope },
+    ]);
+    vi.mocked(api.switchTraeAccount).mockResolvedValue(undefined);
+    await mount(edition);
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(api.switchTraeAccount).toHaveBeenCalledExactlyOnceWith(edition, traeRow.id);
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith(edition, undefined);
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();
+    expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+    expect(folderPicker).not.toHaveBeenCalled();
+    expect(state.isLaunching).toBe(false);
+  }
+);
+
+it('TRAE: pending account apply cannot be repeated after the normal launch cooldown', async () => {
+  vi.mocked(api.listTraeAccounts).mockResolvedValue([traeRow]);
+  await mount('traecn');
+  let resolve!: () => void;
+  vi.mocked(api.switchTraeAccount).mockReturnValueOnce(
+    new Promise<void>((done) => {
+      resolve = done;
+    })
+  );
+  let applying!: Promise<void>;
+  act(() => {
+    applying = state.handleLaunch();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3100);
+    await state.handleLaunch();
+  });
+  expect(state.isLaunching).toBe(true);
+  expect(api.switchTraeAccount).toHaveBeenCalledTimes(1);
+  expect(api.startTool).not.toHaveBeenCalled();
+  await act(async () => {
+    resolve();
+    await applying;
+  });
+  expect(api.startTool).toHaveBeenCalledExactlyOnceWith('traecn', undefined);
+});
+
+it('TRAE: explicit switch failure is visible and prevents launch', async () => {
+  vi.mocked(api.listTraeAccounts).mockResolvedValue([traeRow]);
+  vi.mocked(api.switchTraeAccount).mockRejectedValueOnce(new Error('accountError.write'));
+  await mount('traecn');
+  await act(async () => {
+    await state.handleLaunch();
+  });
+  expect(state.applyError).toBe('accountError.write');
+  expect(state.traeAccounts.accounts).toEqual([traeRow]);
+  expect(api.startTool).not.toHaveBeenCalled();
+  expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+});
+
+it('Account Center: TRAE regions stay separate and the shared reward batch skips unavailable rows', async () => {
+  const now = Date.now() / 1000;
+  const claimed = { ...traeRow, id: 'claimed', name: 'Claimed', dailyClaimedAt: now };
+  const eligible = { ...traeRow, id: 'eligible', name: 'Eligible', active: false };
+  const disabled = { ...traeRow, id: 'disabled', name: 'Disabled', rewardEnabled: false };
+  vi.mocked(api.listTraeAccounts).mockImplementation(async (edition) =>
+    edition === 'traecn'
+      ? [claimed, eligible, disabled]
+      : [{ ...traeRow, edition: 'trae', name: 'Global' }]
+  );
+  vi.mocked(api.claimTraeDailyCredits).mockResolvedValue({
+    ...eligible,
+    dailyClaimedAt: now,
+    deviceClaimedAt: now,
+    remaining: 120,
+  });
+  await showAccountCenter(['traecn', 'trae']);
+  expect(state.traeAccountGroups.trae.accounts[0].edition).toBe('trae');
+  expect(state.traeAccountGroups.traecn.accounts).toHaveLength(3);
+  expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+  expect(
+    renderer.root
+      .findAllByType('button')
+      .some((button) => button.props['aria-label'] === 'agent.claimDailyCredits Global')
+  ).toBe(false);
+  await act(async () => {
+    await renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' }).props.onClick();
+  });
+  expect(api.claimTraeDailyCredits).toHaveBeenCalledExactlyOnceWith('traecn', 'eligible');
+  expect(
+    state.traeAccountGroups.traecn.accounts.find((row) => row.id === 'eligible')?.remaining
+  ).toBe(120);
+  expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();
+  expect(api.switchTraeAccount).not.toHaveBeenCalled();
+  expect(api.startTraeLogin).not.toHaveBeenCalled();
+});
+
+it('Account Center: a used TRAE device leaves unclaimed gifts disabled and does not request status or rewards', async () => {
+  vi.mocked(api.listTraeAccounts).mockResolvedValue([
+    { ...traeRow, deviceClaimedAt: Date.now() / 1000 },
+    { ...traeRow, id: 'other', name: 'Other', active: false },
+  ]);
+  await showAccountCenter(['traecn']);
+  const other = renderer.root.findByProps({ 'aria-label': 'agent.claimDailyCredits Other' });
+  expect(other.props.disabled).toBe(true);
+  await act(async () => {
+    await renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' }).props.onClick();
+  });
+  expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+  expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();
+});
+
+it('Account Center: an explicit TRAE reward batch rechecks eligibility after China midnight', async () => {
+  vi.setSystemTime(new Date('2026-10-13T15:59:30Z'));
+  const beforeMidnight = Date.now() / 1000;
+  const account = {
+    ...traeRow,
+    dailyClaimedAt: beforeMidnight,
+    deviceClaimedAt: beforeMidnight,
+  };
+  vi.mocked(api.listTraeAccounts).mockResolvedValue([account]);
+  vi.mocked(api.claimTraeDailyCredits).mockResolvedValue({
+    ...account,
+    dailyClaimedAt: beforeMidnight + 60,
+    deviceClaimedAt: beforeMidnight + 60,
+  });
+  await showAccountCenter(['traecn']);
+  expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+  vi.setSystemTime(new Date('2026-10-13T16:00:01Z'));
+  expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+  await act(async () => {
+    await renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' }).props.onClick();
+  });
+  expect(api.claimTraeDailyCredits).toHaveBeenCalledExactlyOnceWith('traecn', account.id);
+  expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();
+  expect(api.startTraeLogin).not.toHaveBeenCalled();
+  expect(api.switchTraeAccount).not.toHaveBeenCalled();
+});
+
+it.each(['failure', 'success'] as const)(
+  'Account Center: a TRAE reward batch rechecks the next row after an asynchronous %s',
+  async (outcome) => {
+    const first = { ...traeRow, id: 'first', name: 'First' };
+    const second = { ...traeRow, id: 'second', name: 'Second', active: false };
+    vi.mocked(api.listTraeAccounts).mockResolvedValue([first, second]);
+    let resolve!: (account: api.TraeAccount) => void;
+    let reject!: (error: Error) => void;
+    vi.mocked(api.claimTraeDailyCredits)
+      .mockReset()
+      .mockReturnValueOnce(
+        new Promise<api.TraeAccount>((done, fail) => {
+          resolve = done;
+          reject = fail;
+        })
+      )
+      .mockResolvedValueOnce({
+        ...second,
+        dailyClaimedAt: Date.now() / 1000,
+        deviceClaimedAt: Date.now() / 1000,
+      });
+    await showAccountCenter(['traecn']);
+    expect(api.claimTraeDailyCredits).not.toHaveBeenCalled();
+    let batch!: Promise<void>;
+    await act(async () => {
+      batch = renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' }).props.onClick();
+    });
+    expect(api.claimTraeDailyCredits).toHaveBeenCalledExactlyOnceWith('traecn', first.id);
+    expect(state.traeAccountGroups.traecn.refreshing.has(first.id)).toBe(true);
+    await act(async () => {
+      if (outcome === 'failure') reject(new Error('accountError.network'));
+      else
+        resolve({
+          ...first,
+          dailyClaimedAt: Date.now() / 1000,
+          deviceClaimedAt: Date.now() / 1000,
+        });
+      await batch;
+    });
+    expect(api.claimTraeDailyCredits).toHaveBeenCalledTimes(outcome === 'failure' ? 2 : 1);
+    if (outcome === 'failure') {
+      expect(api.claimTraeDailyCredits).toHaveBeenLastCalledWith('traecn', second.id);
+      expect(state.applyError).toBe('accountError.network');
+    }
+    expect(state.traeAccountGroups.traecn.refreshing.size).toBe(0);
+    expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();
+    expect(api.startTraeLogin).not.toHaveBeenCalled();
+    expect(api.switchTraeAccount).not.toHaveBeenCalled();
+  }
+);
