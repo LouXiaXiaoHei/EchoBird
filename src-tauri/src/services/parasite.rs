@@ -18,7 +18,9 @@
 // longer the goal.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -101,16 +103,27 @@ impl ParasiteSession {
         }
     }
 
-    pub fn prepare(&mut self) {
+    pub fn prepare(&mut self) -> Result<(), String> {
+        if self.running {
+            return Err("Parasite agent is already processing a request".into());
+        }
         if self.cancel.is_cancelled() {
             self.cancel = CancellationToken::new();
         }
         self.running = true;
+        Ok(())
     }
 
     pub fn abort(&mut self) {
         self.cancel.cancel();
-        self.running = false;
+    }
+
+    pub fn reset(&mut self) -> Result<(), String> {
+        if self.running {
+            return Err("Parasite agent is still processing a request".into());
+        }
+        self.session_id = None;
+        Ok(())
     }
 }
 
@@ -120,12 +133,60 @@ impl Default for ParasiteSession {
     }
 }
 
-/// Keyed by agent_id so each parasitable agent keeps its own session ID state
-/// (e.g. Claude Code remembers its --resume target).
+/// Keyed by agent and conversation so each keeps its own --resume target.
 pub type SharedParasiteSessions = Arc<Mutex<HashMap<String, ParasiteSession>>>;
 
 pub fn create_parasite_sessions() -> SharedParasiteSessions {
     Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn session_key(agent_id: &str, conversation_id: Option<&str>) -> String {
+    match conversation_id {
+        Some(id) => format!("{}:{}:{}", agent_id.len(), agent_id, id),
+        None => agent_id.to_string(),
+    }
+}
+
+fn sessions_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".echobird")
+        .join("config")
+        .join("parasite_sessions")
+}
+
+fn session_file_in(directory: &Path, key: &str) -> PathBuf {
+    directory.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+}
+
+fn load_session_from_file(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+pub fn load_session_from_disk(key: &str) -> Option<String> {
+    load_session_from_file(&session_file_in(&sessions_dir(), key))
+}
+
+fn save_session_to_file(path: &Path, session_id: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let bytes = serde_json::to_vec(session_id).map_err(std::io::Error::other)?;
+    std::fs::write(path, bytes)
+}
+
+pub fn clear_session_from_disk(key: &str) -> Result<(), String> {
+    clear_session_file(&session_file_in(&sessions_dir(), key))
+}
+
+fn clear_session_file(path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to clear parasite session file: {}", e)),
+    }
 }
 
 // ── Detection ──
@@ -202,20 +263,47 @@ pub async fn send_message(
     sessions: SharedParasiteSessions,
     agent_id: String,
     message: String,
+    conversation_id: Option<String>,
+    request_id: Option<String>,
 ) -> Result<(), String> {
     let agent =
         lookup_agent(&agent_id).ok_or_else(|| format!("Unknown parasite agent: {}", agent_id))?;
+    let key = session_key(&agent_id, conversation_id.as_deref());
 
-    // Snapshot/prepare session state (drop lock before spawn).
+    // The command has already reserved the session; preserve any startup cancellation.
     let (existing_session_id, cancel_token) = {
         let mut map = sessions.lock().await;
-        let sess = map.entry(agent_id.clone()).or_default();
-        sess.prepare();
+        let sess = map.entry(key.clone()).or_insert_with(|| {
+            let mut sess = ParasiteSession::new();
+            sess.session_id = load_session_from_disk(&key);
+            sess
+        });
         (sess.session_id.clone(), sess.cancel.clone())
     };
 
-    let _ = app.emit(
-        "parasite_event",
+    if cancel_token.is_cancelled() {
+        finish_session(&sessions, &key, None).await;
+        emit_event(
+            &app,
+            conversation_id.as_deref(),
+            request_id.as_deref(),
+            ParasiteEvent::Error {
+                message: "Cancelled by user".into(),
+            },
+        );
+        emit_event(
+            &app,
+            conversation_id.as_deref(),
+            request_id.as_deref(),
+            ParasiteEvent::Done {},
+        );
+        return Ok(());
+    }
+
+    emit_event(
+        &app,
+        conversation_id.as_deref(),
+        request_id.as_deref(),
         ParasiteEvent::StateChange {
             state: "processing".into(),
         },
@@ -243,9 +331,19 @@ pub async fn send_message(
         Err(e) => {
             let msg = format!("Failed to spawn {}: {}", agent.command, e);
             log::error!("[Parasite] {}", msg);
-            finish_session(&sessions, &agent_id, None).await;
-            let _ = app.emit("parasite_event", ParasiteEvent::Error { message: msg });
-            let _ = app.emit("parasite_event", ParasiteEvent::Done {});
+            finish_session(&sessions, &key, None).await;
+            emit_event(
+                &app,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
+                ParasiteEvent::Error { message: msg },
+            );
+            emit_event(
+                &app,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
+                ParasiteEvent::Done {},
+            );
             return Ok(());
         }
     };
@@ -281,17 +379,24 @@ pub async fn send_message(
 
     match outcome {
         ParasiteOutcome::Cancelled => {
-            finish_session(&sessions, &agent_id, effective_session_id).await;
-            let _ = app.emit(
-                "parasite_event",
+            finish_session(&sessions, &key, effective_session_id).await;
+            emit_event(
+                &app,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
                 ParasiteEvent::Error {
                     message: "error.userCancelled".into(),
                 },
             );
         }
         ParasiteOutcome::SpawnError(e) => {
-            finish_session(&sessions, &agent_id, None).await;
-            let _ = app.emit("parasite_event", ParasiteEvent::Error { message: e });
+            finish_session(&sessions, &key, None).await;
+            emit_event(
+                &app,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
+                ParasiteEvent::Error { message: e },
+            );
         }
         ParasiteOutcome::Completed {
             status,
@@ -306,8 +411,13 @@ pub async fn send_message(
                 } else {
                     format!("{} exited with status {}", agent.command, status)
                 };
-                finish_session(&sessions, &agent_id, effective_session_id).await;
-                let _ = app.emit("parasite_event", ParasiteEvent::Error { message: msg });
+                finish_session(&sessions, &key, effective_session_id).await;
+                emit_event(
+                    &app,
+                    conversation_id.as_deref(),
+                    request_id.as_deref(),
+                    ParasiteEvent::Error { message: msg },
+                );
             } else {
                 let parsed = parse_claude_json(&stdout);
                 let final_session_id = parsed.session_id.or(effective_session_id);
@@ -315,7 +425,7 @@ pub async fn send_message(
                 // agent's conversation state is still valid; the next turn
                 // (after the user fixes auth, switches model, etc.) should
                 // resume rather than start fresh.
-                finish_session(&sessions, &agent_id, final_session_id).await;
+                finish_session(&sessions, &key, final_session_id).await;
                 if parsed.is_error {
                     // Wrapped agent returned a "successful" envelope that
                     // wraps an actual failure (Claude Code's 403 etc.) —
@@ -326,10 +436,17 @@ pub async fn send_message(
                     } else {
                         parsed.text
                     };
-                    let _ = app.emit("parasite_event", ParasiteEvent::Error { message });
+                    emit_event(
+                        &app,
+                        conversation_id.as_deref(),
+                        request_id.as_deref(),
+                        ParasiteEvent::Error { message },
+                    );
                 } else if !parsed.text.is_empty() {
-                    let _ = app.emit(
-                        "parasite_event",
+                    emit_event(
+                        &app,
+                        conversation_id.as_deref(),
+                        request_id.as_deref(),
                         ParasiteEvent::TextDelta { text: parsed.text },
                     );
                 }
@@ -337,9 +454,16 @@ pub async fn send_message(
         }
     }
 
-    let _ = app.emit("parasite_event", ParasiteEvent::Done {});
-    let _ = app.emit(
-        "parasite_event",
+    emit_event(
+        &app,
+        conversation_id.as_deref(),
+        request_id.as_deref(),
+        ParasiteEvent::Done {},
+    );
+    emit_event(
+        &app,
+        conversation_id.as_deref(),
+        request_id.as_deref(),
         ParasiteEvent::StateChange {
             state: "idle".into(),
         },
@@ -357,18 +481,45 @@ enum ParasiteOutcome {
     },
 }
 
-async fn finish_session(
-    sessions: &SharedParasiteSessions,
-    agent_id: &str,
-    session_id: Option<String>,
-) {
+async fn finish_session(sessions: &SharedParasiteSessions, key: &str, session_id: Option<String>) {
     let mut map = sessions.lock().await;
-    if let Some(sess) = map.get_mut(agent_id) {
+    if let Some(sess) = map.get_mut(key) {
         sess.running = false;
         if session_id.is_some() {
             sess.session_id = session_id;
         }
+        if let Some(id) = &sess.session_id {
+            if let Err(e) = save_session_to_file(&session_file_in(&sessions_dir(), key), id) {
+                log::error!("[ParasiteSession] Failed to save session: {}", e);
+            }
+        }
     }
+}
+
+#[derive(Serialize)]
+struct ScopedParasiteEvent<'a> {
+    #[serde(flatten)]
+    event: ParasiteEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+}
+
+pub fn emit_event(
+    app: &AppHandle,
+    conversation_id: Option<&str>,
+    request_id: Option<&str>,
+    event: ParasiteEvent,
+) {
+    let _ = app.emit(
+        "parasite_event",
+        &ScopedParasiteEvent {
+            event,
+            conversation_id,
+            request_id,
+        },
+    );
 }
 
 // ── Output Parsing ──
@@ -432,6 +583,138 @@ fn safe_truncate(s: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clearing_resume_target_handles_missing_files_and_reports_deletion_failure() {
+        let directory =
+            std::env::temp_dir().join(format!("echobird-parasite-reset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.json");
+
+        clear_session_file(&path).unwrap();
+        save_session_to_file(&path, "native-session-a").unwrap();
+        clear_session_file(&path).unwrap();
+        assert!(load_session_from_file(&path).is_none());
+
+        std::fs::create_dir(&path).unwrap();
+        assert!(clear_session_file(&path).is_err());
+        assert!(
+            path.is_dir(),
+            "failed deletion must preserve the saved path"
+        );
+        std::fs::remove_dir(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn abort_keeps_session_busy_and_reset_preserves_resume_target_until_finalized() {
+        let mut session = ParasiteSession::new();
+        session.session_id = Some("native-session-a".into());
+        session.prepare().unwrap();
+        assert!(
+            session.prepare().is_err(),
+            "accepted run reserves the session immediately"
+        );
+        session.abort();
+        assert!(session.cancel.is_cancelled());
+        assert!(
+            session.running,
+            "cancelled run must remain reserved until it exits"
+        );
+        assert!(session.reset().is_err());
+        assert!(
+            session.prepare().is_err(),
+            "cancelled run must reject overlapping sends"
+        );
+        assert!(
+            session.cancel.is_cancelled(),
+            "rejected send must preserve pending cancellation"
+        );
+        assert_eq!(session.session_id.as_deref(), Some("native-session-a"));
+
+        session.running = false;
+        session.reset().unwrap();
+        assert!(session.session_id.is_none());
+        session.prepare().unwrap();
+        assert!(!session.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn session_keys_isolate_conversations_and_preserve_legacy_agent_key() {
+        assert_eq!(session_key("claudecode", None), "claudecode");
+        assert_ne!(
+            session_key("claudecode", Some("first")),
+            session_key("claudecode", Some("second"))
+        );
+        assert_ne!(
+            session_key("first", Some("same")),
+            session_key("second", Some("same"))
+        );
+        assert_ne!(session_key("a", Some("b:c")), session_key("a:b", Some("c")));
+    }
+
+    #[test]
+    fn persistence_paths_stay_inside_directory_and_do_not_merge_sanitized_ids() {
+        let directory = PathBuf::from("sessions");
+        let first = session_file_in(&directory, &session_key("claudecode", Some("../a/b")));
+        let second = session_file_in(&directory, &session_key("claudecode", Some("..\\a\\b")));
+        assert_eq!(first.parent(), Some(directory.as_path()));
+        assert_eq!(second.parent(), Some(directory.as_path()));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn persisted_resume_target_survives_memory_reset_without_crossing_conversations() {
+        let directory =
+            std::env::temp_dir().join(format!("echobird-parasite-{}", uuid::Uuid::new_v4()));
+        let first = session_file_in(&directory, &session_key("claudecode", Some("first")));
+        let second = session_file_in(&directory, &session_key("claudecode", Some("second")));
+        assert!(load_session_from_file(&first).is_none());
+        save_session_to_file(&first, "native-session-a").unwrap();
+        save_session_to_file(&second, "native-session-b").unwrap();
+
+        let restored = load_session_from_file(&first).unwrap();
+        let agent = lookup_agent("claudecode").unwrap();
+        let (args, session_id) = build_args(&agent, "follow up", Some(&restored));
+        assert_eq!(session_id.as_deref(), Some("native-session-a"));
+        assert!(args.contains(&"--resume".to_string()));
+        assert!(args.contains(&"native-session-a".to_string()));
+        assert_eq!(
+            load_session_from_file(&second).as_deref(),
+            Some("native-session-b")
+        );
+
+        std::fs::remove_file(&first).unwrap();
+        assert!(load_session_from_file(&first).is_none());
+        assert_eq!(
+            load_session_from_file(&second).as_deref(),
+            Some("native-session-b")
+        );
+        std::fs::remove_file(second).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn events_include_scope_without_changing_legacy_shape() {
+        let scoped = serde_json::to_value(ScopedParasiteEvent {
+            event: ParasiteEvent::TextDelta {
+                text: "reply".into(),
+            },
+            conversation_id: Some("conversation-a"),
+            request_id: Some("request-a"),
+        })
+        .unwrap();
+        assert_eq!(scoped["conversation_id"], "conversation-a");
+        assert_eq!(scoped["request_id"], "request-a");
+        assert_eq!(scoped["text"], "reply");
+        let legacy = serde_json::to_value(ScopedParasiteEvent {
+            event: ParasiteEvent::Done {},
+            conversation_id: None,
+            request_id: None,
+        })
+        .unwrap();
+        assert_eq!(legacy, serde_json::json!({"type": "done"}));
+    }
 
     #[test]
     fn claude_args_new_session_generates_session_id() {

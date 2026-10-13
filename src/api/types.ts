@@ -220,6 +220,8 @@ export interface StoreModel {
 
 export interface AgentRequest {
   message: string;
+  conversation_id?: string;
+  request_id?: string;
   model_id: string;
   base_url: string; // OpenAI-compatible URL (also used as final OpenAI fallback)
   api_key: string;
@@ -234,7 +236,7 @@ export interface AgentRequest {
   locale?: string;
 }
 
-export type AgentEvent =
+export type AgentEvent = { conversation_id?: string; request_id?: string } & (
   | { type: 'text_delta'; text: string }
   | { type: 'thinking'; text: string }
   | { type: 'tool_call_start'; id: string; name: string }
@@ -242,7 +244,8 @@ export type AgentEvent =
   | { type: 'tool_result'; id: string; output: string; success: boolean }
   | { type: 'done' }
   | { type: 'error'; message: string }
-  | { type: 'state'; state: string };
+  | { type: 'state'; state: string }
+);
 
 // ─── Parasite Types ───
 // Mother Agent's "Connect" mode delegates a turn to the installed Claude
@@ -251,11 +254,14 @@ export type AgentEvent =
 
 export interface ParasiteSendRequest {
   agentId: string;
+  conversationId?: string;
+  requestId?: string;
   message: string;
 }
 
-export type ParasiteEvent =
+export type ParasiteEvent = { conversation_id?: string; request_id?: string } & (
   | { type: 'text_delta'; text: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
-  | { type: 'state'; state: string };
+  | { type: 'state'; state: string }
+);

@@ -55,6 +55,10 @@ pub enum AgentEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRequest {
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub model_id: String,
     pub base_url: String, // OpenAI-compatible URL
     pub api_key: String,
@@ -67,6 +71,15 @@ pub struct AgentRequest {
     pub skills: Vec<String>,     // skill descriptions
     /// UI locale ("en" or "zh-Hans"). Used to hint the agent's response language.
     pub locale: Option<String>,
+}
+
+impl AgentRequest {
+    pub fn session_key(&self) -> String {
+        self.conversation_id
+            .clone()
+            .or_else(|| self.server_ids.first().cloned())
+            .unwrap_or_else(|| "local".to_string())
+    }
 }
 
 // ── Session State (kept in memory for continuous operation) ──
@@ -109,11 +122,21 @@ impl AgentSession {
     /// Cancel current operation and create a fresh token for next run
     pub fn cancel(&mut self) {
         self.cancel_token.cancel();
-        self.running = false;
+    }
+
+    pub fn reset(&mut self) -> Result<(), String> {
+        if self.running {
+            return Err("Agent is still processing a request".into());
+        }
+        *self = Self::new();
+        Ok(())
     }
 
     /// Prepare for a new run
-    pub fn prepare_run(&mut self) {
+    pub fn prepare_run(&mut self) -> Result<(), String> {
+        if self.running {
+            return Err("Agent is already processing a request".into());
+        }
         if self.cancel_token.is_cancelled() {
             self.cancel_token = CancellationToken::new();
         }
@@ -121,6 +144,7 @@ impl AgentSession {
         // New turn — drop history of the previous turn's calls so a tool
         // legitimately re-used across turns doesn't get flagged.
         self.recent_calls.clear();
+        Ok(())
     }
 
     /// Record a tool call and return Some(reason) if it has now repeated
@@ -159,7 +183,7 @@ fn loop_args_hash(tool_name: &str, args: &str) -> u64 {
     h.finish()
 }
 
-// Per-server session map (keyed by server_id: "local" or SSH server id)
+// Keyed by conversation ID, or the legacy server ID when no conversation is supplied.
 pub type SharedSessionMap = Arc<Mutex<std::collections::HashMap<String, AgentSession>>>;
 
 pub fn create_session_map() -> SharedSessionMap {
@@ -220,18 +244,15 @@ pub fn load_session_from_disk(server_key: &str) -> Vec<Message> {
 }
 
 /// Clear a session's persisted file from disk
-pub fn clear_session_from_disk(server_key: &str) {
-    let path = session_file(server_key);
-    if path.exists() {
-        if let Err(e) = std::fs::remove_file(&path) {
-            log::error!(
-                "[AgentSession] Failed to delete session file {}: {}",
-                server_key,
-                e
-            );
-        } else {
-            log::info!("[AgentSession] Session file deleted for {}", server_key);
-        }
+pub fn clear_session_from_disk(server_key: &str) -> Result<(), String> {
+    clear_session_file(&session_file(server_key))
+}
+
+fn clear_session_file(path: &std::path::Path) -> Result<(), String> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to clear agent session file: {}", e)),
     }
 }
 
@@ -243,12 +264,7 @@ pub async fn run_agent(
     session_map: SharedSessionMap,
     ssh_pool: SSHPool,
 ) -> Result<(), String> {
-    // Derive server key from request
-    let server_key = request
-        .server_ids
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "local".to_string());
+    let server_key = request.session_key();
 
     // 1. Build the LLM client — one protocol per session, decided by config
     //    and never switched mid-session: Anthropic when anthropic_url is set,
@@ -286,7 +302,6 @@ pub async fn run_agent(
             s.messages = load_session_from_disk(&server_key);
             s
         });
-        sess.prepare_run();
         sess.messages.push(Message {
             role: "user".into(),
             content: MessageContent::Text(request.message.clone()),
@@ -301,6 +316,8 @@ pub async fn run_agent(
 
     emit_event(
         &app,
+        request.conversation_id.as_deref(),
+        request.request_id.as_deref(),
         AgentEvent::StateChange {
             state: "processing".into(),
         },
@@ -316,6 +333,8 @@ pub async fn run_agent(
         if loop_count > MAX_TOOL_LOOPS {
             emit_event(
                 &app,
+                request.conversation_id.as_deref(),
+                request.request_id.as_deref(),
                 AgentEvent::Error {
                     message: format!("Reached maximum tool call limit ({})", MAX_TOOL_LOOPS),
                 },
@@ -328,6 +347,8 @@ pub async fn run_agent(
             log::info!("[AgentLoop] Cancelled by user");
             emit_event(
                 &app,
+                request.conversation_id.as_deref(),
+                request.request_id.as_deref(),
                 AgentEvent::Error {
                     message: "Cancelled by user".into(),
                 },
@@ -398,7 +419,12 @@ pub async fn run_agent(
                 // Fatal: LLM server is unreachable — no point retrying
                 let msg = format_server_down_error(e);
                 log::error!("[AgentLoop] LLM server is down, aborting: {}", e);
-                emit_event(&app, AgentEvent::Error { message: msg });
+                emit_event(
+                    &app,
+                    request.conversation_id.as_deref(),
+                    request.request_id.as_deref(),
+                    AgentEvent::Error { message: msg },
+                );
                 break;
             }
             Err(e) => {
@@ -417,7 +443,12 @@ pub async fn run_agent(
                     loop_count -= 1; // Don't count retries toward tool loop limit
                     continue;
                 }
-                emit_event(&app, AgentEvent::Error { message: e });
+                emit_event(
+                    &app,
+                    request.conversation_id.as_deref(),
+                    request.request_id.as_deref(),
+                    AgentEvent::Error { message: e },
+                );
                 break;
             }
         };
@@ -455,7 +486,7 @@ pub async fn run_agent(
                 ) => result,
                 _ = cancel_token.cancelled() => {
                     log::info!("[AgentLoop] Cancelled during LLM stream");
-                    emit_event(&app, AgentEvent::Error { message: "Cancelled by user".into() });
+                    emit_event(&app, request.conversation_id.as_deref(), request.request_id.as_deref(), AgentEvent::Error { message: "Cancelled by user".into() });
                     had_error = true;
                     break;
                 }
@@ -477,7 +508,12 @@ pub async fn run_agent(
                             wait_warnings,
                             MAX_WAIT_WARNINGS
                         );
-                        emit_event(&app, AgentEvent::TextDelta { text: hint });
+                        emit_event(
+                            &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
+                            AgentEvent::TextDelta { text: hint },
+                        );
                         continue; // Keep waiting
                     }
                     // Max warnings reached — abort
@@ -489,6 +525,8 @@ pub async fn run_agent(
                     log::error!("[AgentLoop] LLM response timed out");
                     emit_event(
                         &app,
+                        request.conversation_id.as_deref(),
+                        request.request_id.as_deref(),
                         AgentEvent::Error {
                             message: timeout_msg,
                         },
@@ -507,12 +545,22 @@ pub async fn run_agent(
                         received_any_token = true;
                         wait_warnings = 0;
                         text_accumulator.push_str(&text);
-                        emit_event(&app, AgentEvent::TextDelta { text });
+                        emit_event(
+                            &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
+                            AgentEvent::TextDelta { text },
+                        );
                     }
                     LlmEvent::Thinking(text) => {
                         received_any_token = true;
                         thinking_accumulator.push_str(&text);
-                        emit_event(&app, AgentEvent::Thinking { text });
+                        emit_event(
+                            &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
+                            AgentEvent::Thinking { text },
+                        );
                     }
                     LlmEvent::ThinkingSignature(sig) => {
                         // Anthropic streams signature separately; keep latest.
@@ -522,6 +570,8 @@ pub async fn run_agent(
                         received_any_token = true;
                         emit_event(
                             &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
                             AgentEvent::ToolCallStart {
                                 id: id.clone(),
                                 name: name.clone(),
@@ -529,6 +579,8 @@ pub async fn run_agent(
                         );
                         emit_event(
                             &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
                             AgentEvent::StateChange {
                                 state: "tool_calling".into(),
                             },
@@ -546,6 +598,8 @@ pub async fn run_agent(
                         }
                         emit_event(
                             &app,
+                            request.conversation_id.as_deref(),
+                            request.request_id.as_deref(),
                             AgentEvent::ToolCallArgs {
                                 id,
                                 args: args_chunk,
@@ -582,7 +636,12 @@ pub async fn run_agent(
                         if is_llm_server_down(&e) {
                             let msg = format_server_down_error(&e);
                             log::error!("[AgentLoop] LLM server went down during stream: {}", e);
-                            emit_event(&app, AgentEvent::Error { message: msg });
+                            emit_event(
+                                &app,
+                                request.conversation_id.as_deref(),
+                                request.request_id.as_deref(),
+                                AgentEvent::Error { message: msg },
+                            );
                             had_error = true;
                             sse_error_msg = String::new(); // Prevent retry
                             break;
@@ -632,6 +691,8 @@ pub async fn run_agent(
             if !sse_error_msg.is_empty() {
                 emit_event(
                     &app,
+                    request.conversation_id.as_deref(),
+                    request.request_id.as_deref(),
                     AgentEvent::Error {
                         message: format!("__CONN_FAILED__:{}\n__CONN_HINT__", MAX_SSE_RETRIES),
                     },
@@ -680,6 +741,8 @@ pub async fn run_agent(
         log::info!("[AgentLoop] Executing {} tool calls", tool_calls.len());
         emit_event(
             &app,
+            request.conversation_id.as_deref(),
+            request.request_id.as_deref(),
             AgentEvent::StateChange {
                 state: "executing".into(),
             },
@@ -805,6 +868,8 @@ pub async fn run_agent(
                 datalog.log_tool_result(&result.output, result.success);
                 emit_event(
                     &app,
+                    request.conversation_id.as_deref(),
+                    request.request_id.as_deref(),
                     AgentEvent::ToolResult {
                         id: tc.id.clone(),
                         output: result.output.clone(),
@@ -887,6 +952,8 @@ pub async fn run_agent(
                 // Always emit ToolResult to frontend
                 emit_event(
                     &app,
+                    request.conversation_id.as_deref(),
+                    request.request_id.as_deref(),
                     AgentEvent::ToolResult {
                         id: tc.id.clone(),
                         output: result.output.clone(),
@@ -965,6 +1032,8 @@ pub async fn run_agent(
         // Continue loop — feed tool results back to LLM
         emit_event(
             &app,
+            request.conversation_id.as_deref(),
+            request.request_id.as_deref(),
             AgentEvent::StateChange {
                 state: "processing".into(),
             },
@@ -980,9 +1049,16 @@ pub async fn run_agent(
         }
     }
     datalog.end_turn();
-    emit_event(&app, AgentEvent::Done {});
     emit_event(
         &app,
+        request.conversation_id.as_deref(),
+        request.request_id.as_deref(),
+        AgentEvent::Done {},
+    );
+    emit_event(
+        &app,
+        request.conversation_id.as_deref(),
+        request.request_id.as_deref(),
         AgentEvent::StateChange {
             state: "idle".into(),
         },
@@ -993,8 +1069,28 @@ pub async fn run_agent(
 
 // ── Helpers ──
 
-fn emit_event(app: &AppHandle, event: AgentEvent) {
-    if let Err(e) = app.emit("agent_event", &event) {
+#[derive(Serialize)]
+struct ScopedAgentEvent<'a> {
+    #[serde(flatten)]
+    event: AgentEvent,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversation_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+}
+
+pub fn emit_event(
+    app: &AppHandle,
+    conversation_id: Option<&str>,
+    request_id: Option<&str>,
+    event: AgentEvent,
+) {
+    let payload = ScopedAgentEvent {
+        event,
+        conversation_id,
+        request_id,
+    };
+    if let Err(e) = app.emit("agent_event", &payload) {
         log::error!("[AgentLoop] Failed to emit event: {}", e);
     }
 }
@@ -1737,6 +1833,158 @@ fn is_legacy_opencode_install(command: &str) -> bool {
 }
 
 #[cfg(test)]
+mod conversation_tests {
+    use super::*;
+
+    #[test]
+    fn clearing_persisted_history_handles_missing_files_and_reports_deletion_failure() {
+        let directory =
+            std::env::temp_dir().join(format!("echobird-agent-reset-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("session.json");
+
+        clear_session_file(&path).unwrap();
+        std::fs::write(&path, "saved history").unwrap();
+        clear_session_file(&path).unwrap();
+        assert!(!path.exists());
+
+        std::fs::create_dir(&path).unwrap();
+        assert!(clear_session_file(&path).is_err());
+        assert!(
+            path.is_dir(),
+            "failed deletion must preserve the saved path"
+        );
+        std::fs::remove_dir(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    fn legacy_request() -> AgentRequest {
+        serde_json::from_value(serde_json::json!({
+            "message": "hello",
+            "model_id": "model",
+            "base_url": "https://example.test",
+            "api_key": "test-key",
+            "model_name": "model",
+            "provider": "openai",
+            "server_ids": ["server-a"],
+            "skills": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn legacy_request_keeps_server_session_key() {
+        let mut request = legacy_request();
+        assert!(request.conversation_id.is_none());
+        assert!(request.request_id.is_none());
+        assert_eq!(request.session_key(), "server-a");
+        request.server_ids.clear();
+        assert_eq!(request.session_key(), "local");
+    }
+
+    #[test]
+    fn conversation_key_does_not_change_tool_targets() {
+        let mut request = legacy_request();
+        request.conversation_id = Some("conversation-a".into());
+        request.request_id = Some("request-a".into());
+        assert_eq!(request.session_key(), "conversation-a");
+        assert_eq!(request.server_ids, ["server-a"]);
+        request.server_ids = vec!["server-b".into()];
+        assert_eq!(request.session_key(), "conversation-a");
+        request.request_id = Some("request-b".into());
+        assert_eq!(request.session_key(), "conversation-a");
+    }
+
+    #[test]
+    fn cancellation_keeps_session_busy_and_reset_preserves_history_until_finalized() {
+        let mut session = AgentSession::new();
+        let original_id = session.id.clone();
+        session.messages.push(Message {
+            role: "user".into(),
+            content: MessageContent::Text("keep this history".into()),
+        });
+        session.prepare_run().unwrap();
+        assert!(
+            session.prepare_run().is_err(),
+            "accepted run reserves the session immediately"
+        );
+        session.cancel();
+        assert!(session.cancel_token.is_cancelled());
+        assert!(
+            session.running,
+            "cancelled run must remain reserved until it exits"
+        );
+        assert!(session.reset().is_err());
+        assert!(
+            session.prepare_run().is_err(),
+            "cancelled run must reject overlapping sends"
+        );
+        assert!(
+            session.cancel_token.is_cancelled(),
+            "rejected send must preserve pending cancellation"
+        );
+        assert_eq!(session.id, original_id);
+        assert_eq!(session.messages.len(), 1);
+
+        session.running = false;
+        session.reset().unwrap();
+        assert_ne!(session.id, original_id);
+        assert!(session.messages.is_empty());
+        assert!(!session.cancel_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn conversations_on_the_same_server_have_independent_history_and_cancellation() {
+        let mut request = legacy_request();
+        request.conversation_id = Some("conversation-a".into());
+        let first_key = request.session_key();
+        request.conversation_id = Some("conversation-b".into());
+        let second_key = request.session_key();
+        let sessions = create_session_map();
+        let mut map = sessions.lock().await;
+        let first = map.entry(first_key.clone()).or_default();
+        first.prepare_run().unwrap();
+        first.messages.push(Message {
+            role: "user".into(),
+            content: MessageContent::Text("first conversation".into()),
+        });
+        let second = map.entry(second_key).or_default();
+        assert!(second.messages.is_empty());
+        second.prepare_run().unwrap();
+        second.cancel();
+        let first = &map[&first_key];
+        assert!(first.running);
+        assert!(!first.cancel_token.is_cancelled());
+        assert_eq!(first.messages.len(), 1);
+    }
+
+    #[test]
+    fn events_include_conversation_scope_and_keep_legacy_shape() {
+        let scoped = serde_json::to_value(ScopedAgentEvent {
+            event: AgentEvent::Done {},
+            conversation_id: Some("conversation-a"),
+            request_id: Some("request-a"),
+        })
+        .unwrap();
+        assert_eq!(scoped["conversation_id"], "conversation-a");
+        assert_eq!(scoped["request_id"], "request-a");
+        assert_eq!(scoped["type"], "done");
+        let legacy = serde_json::to_value(ScopedAgentEvent {
+            event: AgentEvent::Error {
+                message: "failure".into(),
+            },
+            conversation_id: None,
+            request_id: None,
+        })
+        .unwrap();
+        assert_eq!(
+            legacy,
+            serde_json::json!({"type": "error", "message": "failure"})
+        );
+    }
+}
+
+#[cfg(test)]
 mod install_intent_tests {
     use super::*;
 
@@ -1949,7 +2197,7 @@ mod loop_detection_tests {
         let h = 99_u64;
         s.record_call_and_detect_loop(h);
         s.record_call_and_detect_loop(h);
-        s.prepare_run();
+        s.prepare_run().unwrap();
         // After reset the same hash must not trip until 3 fresh repeats.
         assert!(s.record_call_and_detect_loop(h).is_none());
         assert!(s.record_call_and_detect_loop(h).is_none());

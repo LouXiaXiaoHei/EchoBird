@@ -8,7 +8,7 @@ import type { MotherHint } from './types';
 import { useToolsStore } from '../../stores/toolsStore';
 import { pickToolName } from '../../stores/myProjectsStore';
 
-// Quick-command chips for the Mother Agent right panel. Each chip drops a
+// Quick-command chips for the Mother Agent welcome screen. Each chip drops a
 // self-contained prompt into the chat input (the user edits, then sends).
 // Hints come from the bundled registry (getMotherHints) with EchoBird's own
 // FRONTEND_HINTS prepended; a hint with no localized label renders nothing,
@@ -60,7 +60,7 @@ export function QuickCommandChips() {
             // can't reach from here; setting the shared input value is enough —
             // the text appears and the user takes it from there.
             onClick={() => setChatInput(label)}
-            className="px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors cursor-pointer"
+            className="grow px-3 py-1.5 text-xs rounded-lg bg-cyber-surface border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
           >
             {label}
           </button>

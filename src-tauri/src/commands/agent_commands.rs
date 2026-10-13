@@ -1,8 +1,8 @@
 // Agent Commands — Tauri IPC commands for the MotherAgent frontend
 
 use crate::commands::ssh_commands::SSHPool;
-use crate::services::agent_loop::{self, AgentRequest, SharedSessionMap};
-use tauri::{AppHandle, Emitter, State};
+use crate::services::agent_loop::{self, AgentEvent, AgentRequest, SharedSessionMap};
+use tauri::{AppHandle, State};
 
 /// Send a message to the agent. The agent will process asynchronously
 /// and emit `agent_event` events to the frontend.
@@ -13,26 +13,12 @@ pub async fn agent_send_message(
     ssh_pool: State<'_, SSHPool>,
     request: AgentRequest,
 ) -> Result<String, String> {
-    let server_key = request
-        .server_ids
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "local".to_string());
-
-    // Check if already running on this server
-    {
-        let map = session_map.lock().await;
-        if let Some(sess) = map.get(&server_key) {
-            if sess.running {
-                return Err("Agent is already processing a request".into());
-            }
-        }
-    }
+    let server_key = request.session_key();
 
     let map_clone = session_map.inner().clone();
     let pool_clone = ssh_pool.inner().clone();
 
-    // Get or create session ID
+    // Reserve the session before spawning so abort/reset also see pending startup.
     let session_id = {
         let mut map = session_map.lock().await;
         let sess = map.entry(server_key.clone()).or_insert_with(|| {
@@ -40,27 +26,32 @@ pub async fn agent_send_message(
             s.messages = agent_loop::load_session_from_disk(&server_key);
             s
         });
+        sess.prepare_run()?;
         sess.id.clone()
     };
 
     // Spawn agent as background task
     let app_clone = app.clone();
+    let conversation_id = request.conversation_id.clone();
+    let request_id = request.request_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = agent_loop::run_agent(app, request, map_clone, pool_clone).await {
+        if let Err(e) = agent_loop::run_agent(app, request, map_clone.clone(), pool_clone).await {
             log::error!("[AgentCommand] Agent error: {}", e);
+            if let Some(sess) = map_clone.lock().await.get_mut(&server_key) {
+                sess.running = false;
+            }
             // Safety net: ensure frontend is never left stuck in isProcessing
-            let _ = app_clone.emit(
-                "agent_event",
-                serde_json::json!({
-                    "type": "error",
-                    "message": e,
-                }),
+            agent_loop::emit_event(
+                &app_clone,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
+                AgentEvent::Error { message: e },
             );
-            let _ = app_clone.emit(
-                "agent_event",
-                serde_json::json!({
-                    "type": "done",
-                }),
+            agent_loop::emit_event(
+                &app_clone,
+                conversation_id.as_deref(),
+                request_id.as_deref(),
+                AgentEvent::Done {},
             );
         }
     });
@@ -92,12 +83,15 @@ pub async fn agent_reset(
     server_key: String,
 ) -> Result<String, String> {
     let mut map = session_map.lock().await;
+    if map.get(&server_key).is_some_and(|sess| sess.running) {
+        return Err("Agent is still processing a request".into());
+    }
+    // Keep the live history intact if removing its persisted copy fails.
+    agent_loop::clear_session_from_disk(&server_key)?;
     let sess = map
         .entry(server_key.clone())
         .or_insert_with(agent_loop::AgentSession::new);
-    *sess = agent_loop::AgentSession::new();
-    // Also clear persisted session file from disk
-    agent_loop::clear_session_from_disk(&server_key);
+    sess.reset()?;
     log::info!(
         "[AgentCommand] Session reset for server {}: {}",
         server_key,

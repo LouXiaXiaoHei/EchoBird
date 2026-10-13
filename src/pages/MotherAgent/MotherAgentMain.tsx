@@ -11,6 +11,7 @@ import * as api from '../../api/tauri';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useMotherAgent } from './context';
+import { QuickCommandChips } from './QuickCommandChips';
 import { MA_PAGE_SIZE, type ChatMessage } from './types';
 
 // ===== Main Content (center area) — CHAT =====
@@ -34,6 +35,7 @@ export function MotherAgentMain() {
 
     sshServers: _sshServers,
     selectedServerId,
+    activeConversationId,
     clearChat,
     abortAgent,
     maDiskTotal,
@@ -81,6 +83,11 @@ export function MotherAgentMain() {
   const [pendingFiles, setPendingFiles] = useState<
     Array<{ id: string; name: string; type: 'file' | 'image'; preview?: string }>
   >([]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPendingFiles([]);
+  }, [activeConversationId, selectedServerId]);
 
   // Wrap handleChatSend to append pending file info as text
   const localSend = useCallback(() => {
@@ -154,6 +161,7 @@ export function MotherAgentMain() {
   const PAGE_SIZE = MA_PAGE_SIZE;
   const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
   const [showSkeleton, setShowSkeleton] = useState(false);
+  const paginationGenerationRef = useRef(0);
 
   // Re-snap to bottom every time the user opens this page — not just on first
   // hydration (the component stays mounted via CSS hidden, so a one-shot
@@ -167,13 +175,15 @@ export function MotherAgentMain() {
     setShowScrollBtn(false);
   }, []);
 
-  // Reset pagination + re-arm sticky when the server changes
+  // Reset pagination + re-arm sticky when the conversation changes
   useEffect(() => {
+    paginationGenerationRef.current += 1;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setDisplayCount(PAGE_SIZE);
+    setShowSkeleton(false);
     stickToBottomRef.current = true;
     requestAnimationFrame(snapToBottom);
-  }, [selectedServerId, snapToBottom, PAGE_SIZE]);
+  }, [selectedServerId, activeConversationId, snapToBottom, PAGE_SIZE]);
 
   // Re-arm sticky + snap whenever the page becomes active
   useEffect(() => {
@@ -215,16 +225,18 @@ export function MotherAgentMain() {
     setShowScrollBtn(!isNearBottom && chatOutput.length > 0);
 
     if (container.scrollTop !== 0) return;
+    const generation = paginationGenerationRef.current;
 
     // Phase 1: more in-memory messages to show
     if (displayCount < chatOutput.length) {
       setShowSkeleton(true);
       const prevScrollHeight = container.scrollHeight;
       setTimeout(() => {
+        if (generation !== paginationGenerationRef.current) return;
         setShowSkeleton(false);
         setDisplayCount((c) => Math.min(c + PAGE_SIZE, chatOutput.length));
         requestAnimationFrame(() => {
-          if (chatContainerRef.current) {
+          if (generation === paginationGenerationRef.current && chatContainerRef.current) {
             chatContainerRef.current.scrollTop =
               chatContainerRef.current.scrollHeight - prevScrollHeight;
           }
@@ -241,17 +253,19 @@ export function MotherAgentMain() {
     const prevScrollHeight2 = container.scrollHeight;
     loadOlderChat()
       .then((older) => {
+        if (generation !== paginationGenerationRef.current) return;
         setShowSkeleton(false);
         if (older.length === 0) return;
         setDisplayCount((c) => c + older.length);
         requestAnimationFrame(() => {
-          if (chatContainerRef.current) {
+          if (generation === paginationGenerationRef.current && chatContainerRef.current) {
             chatContainerRef.current.scrollTop =
               chatContainerRef.current.scrollHeight - prevScrollHeight2;
           }
         });
       })
       .catch(() => {
+        if (generation !== paginationGenerationRef.current) return;
         setShowSkeleton(false);
       });
   };
@@ -262,6 +276,8 @@ export function MotherAgentMain() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatEndRef]);
 
+  const showWelcome = chatOutput.length === 0 && !isProcessing;
+
   return (
     <div className="flex flex-col h-full">
       {/* Chat conversation area */}
@@ -269,78 +285,98 @@ export function MotherAgentMain() {
         <div
           ref={chatContainerRef}
           onScroll={handleScroll}
-          className="absolute inset-0 overflow-y-auto slim-scroll p-4"
+          className={`absolute inset-0 overflow-y-auto slim-scroll ${showWelcome ? 'py-4' : 'p-4'}`}
         >
-          {/* Chat messages — markdown stream */}
-          <div className="pt-2 pb-2">
-            {/* Skeleton placeholders — shown briefly when lazy-loading older messages */}
-            {showSkeleton &&
-              [0, 1, 2].map((i) => (
-                <ChatBubble key={`sk-${i}`} role="skeleton" content="" variant="mother" />
-              ))}
-            {chatOutput.slice(-displayCount).map((msg, i, arr) => {
-              if (msg.type === 'user') {
-                return (
-                  <ChatBubble
-                    key={i}
-                    role="user"
-                    content={msg.text}
-                    variant="mother"
-                    chips={msg.chips}
-                  />
-                );
-              }
-              if (msg.type === 'tool_call') {
-                return (
-                  <ToolCallCard
-                    key={`${i}-${msg.id}`}
-                    name={msg.name}
-                    args={msg.args}
-                    status={msg.status}
-                    output={msg.output}
-                  />
-                );
-              }
-              if (msg.type === 'assistant') {
-                const isLast = arr.slice(i + 1).every((m) => m.type !== 'assistant');
-                const lastOutput = chatOutput[chatOutput.length - 1];
-                const isCurrentResponse = isLast && lastOutput?.type === 'assistant';
-                return (
-                  <ChatBubble
-                    key={i}
-                    role="assistant"
-                    content={msg.text}
-                    variant="mother"
-                    isStreaming={isProcessing && isCurrentResponse}
-                  />
-                );
-              }
-              if (msg.type === 'cancelled') {
-                const text = msg.i18nKey
-                  ? t(msg.i18nKey as import('../../i18n/types').TKey)
-                  : msg.text;
-                return (
-                  <div key={i} className="flex justify-center my-4">
-                    <span className="text-cyber-text-muted/35 text-xs font-mono">{text}</span>
-                  </div>
-                );
-              }
-              if (msg.type === 'error') {
-                const text = msg.i18nKey
-                  ? t(msg.i18nKey as import('../../i18n/types').TKey)
-                  : msg.text;
-                return <ChatBubble key={i} role="error" content={text} variant="mother" />;
-              }
-              return null;
-            })}
-            {/* Typing indicator — show when processing and no new assistant response has started */}
-            {isProcessing &&
-              (chatOutput.length === 0 ||
-                chatOutput[chatOutput.length - 1]?.type !== 'assistant') && (
-                <ChatBubble role="assistant" content="" variant="mother" isStreaming={true} />
-              )}
-            <div ref={chatEndRef} />
-          </div>
+          {showWelcome ? (
+            <div className="flex min-h-full flex-col items-center justify-center gap-7">
+              <div className="flex items-center gap-3">
+                <img
+                  src="/brand/bird.png"
+                  alt=""
+                  aria-hidden="true"
+                  draggable={false}
+                  className="h-12 w-12 select-none"
+                />
+                <span className="brand-mark text-cyber-text" style={{ fontSize: 36 }}>
+                  {t('app.name')}
+                </span>
+              </div>
+              <div className="w-full">
+                <QuickCommandChips />
+              </div>
+            </div>
+          ) : (
+            /* Chat messages — markdown stream */
+            <div className="pt-2 pb-2">
+              {/* Skeleton placeholders — shown briefly when lazy-loading older messages */}
+              {showSkeleton &&
+                [0, 1, 2].map((i) => (
+                  <ChatBubble key={`sk-${i}`} role="skeleton" content="" variant="mother" />
+                ))}
+              {chatOutput.slice(-displayCount).map((msg, i, arr) => {
+                if (msg.type === 'user') {
+                  return (
+                    <ChatBubble
+                      key={i}
+                      role="user"
+                      content={msg.text}
+                      variant="mother"
+                      chips={msg.chips}
+                    />
+                  );
+                }
+                if (msg.type === 'tool_call') {
+                  return (
+                    <ToolCallCard
+                      key={`${i}-${msg.id}`}
+                      name={msg.name}
+                      args={msg.args}
+                      status={msg.status}
+                      output={msg.output}
+                    />
+                  );
+                }
+                if (msg.type === 'assistant') {
+                  const isLast = arr.slice(i + 1).every((m) => m.type !== 'assistant');
+                  const lastOutput = chatOutput[chatOutput.length - 1];
+                  const isCurrentResponse = isLast && lastOutput?.type === 'assistant';
+                  return (
+                    <ChatBubble
+                      key={i}
+                      role="assistant"
+                      content={msg.text}
+                      variant="mother"
+                      isStreaming={isProcessing && isCurrentResponse}
+                    />
+                  );
+                }
+                if (msg.type === 'cancelled') {
+                  const text = msg.i18nKey
+                    ? t(msg.i18nKey as import('../../i18n/types').TKey)
+                    : msg.text;
+                  return (
+                    <div key={i} className="flex justify-center my-4">
+                      <span className="text-cyber-text-muted/35 text-xs font-mono">{text}</span>
+                    </div>
+                  );
+                }
+                if (msg.type === 'error') {
+                  const text = msg.i18nKey
+                    ? t(msg.i18nKey as import('../../i18n/types').TKey)
+                    : msg.text;
+                  return <ChatBubble key={i} role="error" content={text} variant="mother" />;
+                }
+                return null;
+              })}
+              {/* Typing indicator — show when processing and no new assistant response has started */}
+              {isProcessing &&
+                (chatOutput.length === 0 ||
+                  chatOutput[chatOutput.length - 1]?.type !== 'assistant') && (
+                  <ChatBubble role="assistant" content="" variant="mother" isStreaming={true} />
+                )}
+              <div ref={chatEndRef} />
+            </div>
+          )}
         </div>
         {/* Scroll to bottom button */}
         {showScrollBtn && (

@@ -4,7 +4,7 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
 import { useMotherAgent } from './context';
-import { QuickCommandChips } from './QuickCommandChips';
+import { ConversationList } from './ConversationList';
 
 // ===== Right Panel (aside area) — SERVERS =====
 export function MotherAgentPanel() {
@@ -28,7 +28,7 @@ export function MotherAgentPanel() {
   // "disabled" without needing an explanatory banner.
   const parasiteLocked = parasiteAgent === 'claudecode';
 
-  const [panelTab, setPanelTab] = useState<'commands' | 'servers' | 'guide'>('commands');
+  const [panelTab, setPanelTab] = useState<'conversations' | 'servers' | 'guide'>('conversations');
   const [showSSHModal, setShowSSHModal] = useState(false);
   const [sshForm, setSSHForm] = useState({
     host: '',
@@ -75,14 +75,14 @@ export function MotherAgentPanel() {
       <div className="h-10 px-2 flex items-center justify-between bg-transparent">
         <div className="flex gap-1">
           <button
-            onClick={() => setPanelTab('commands')}
+            onClick={() => setPanelTab('conversations')}
             className={`px-2.5 py-2 text-[14px] font-semibold whitespace-nowrap rounded transition-colors ${
-              panelTab === 'commands'
+              panelTab === 'conversations'
                 ? 'bg-cyber-elevated text-cyber-text'
                 : 'text-cyber-text-secondary hover:text-cyber-text'
             }`}
           >
-            {t('mother.quickCommands')}
+            {t('mother.conversations')}
           </button>
           <button
             onClick={() => setPanelTab('servers')}
@@ -357,8 +357,8 @@ export function MotherAgentPanel() {
 
       {/* Content */}
       <div className="flex-1 p-2 overflow-y-auto slim-scroll">
-        {panelTab === 'commands' ? (
-          <QuickCommandChips />
+        {panelTab === 'conversations' ? (
+          <ConversationList />
         ) : panelTab === 'servers' ? (
           /* ── SERVERS tab ── */
           /* Server list — wrapped so we can gray + disable as a unit

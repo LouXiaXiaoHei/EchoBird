@@ -1,5 +1,6 @@
 import type { ModelConfig } from '../../api/types';
 import type { BubbleChip } from '../../components/chat/ChatBubble';
+import type { ChatConversation } from '../../hooks/useChatPersistence';
 
 // ===== Types =====
 
@@ -36,6 +37,10 @@ export interface MotherAgentCtx {
   chatInput: string;
   setChatInput: (v: string) => void;
   chatOutput: ChatMessage[];
+  conversations: ChatConversation<ChatMessage>[];
+  activeConversationId: string;
+  createConversation: () => void;
+  selectConversation: (id: string) => void;
   agentState: string;
   isProcessing: boolean;
   agentModelData: ModelConfig | undefined;
