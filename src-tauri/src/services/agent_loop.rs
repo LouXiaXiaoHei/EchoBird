@@ -216,6 +216,12 @@ pub fn create_session_map() -> SharedSessionMap {
 
 // ── Session Persistence ──
 
+pub(crate) fn session_file(server_key: &str) -> std::path::PathBuf {
+    let safe_key = server_key.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+    crate::utils::platform::echobird_dir()
+        .join("config/agent_sessions")
+        .join(format!("{}.json", safe_key))
+}
 fn save_checkpoint(server_key: &str, session: &AgentSession) -> Result<(), String> {
     HistoryStore::standard()
         .save(server_key, &session.snapshot())
@@ -461,8 +467,7 @@ pub async fn run_agent(
         let mut text_accumulator = String::new();
         // Thinking-mode round-trip: must be saved on the assistant message so
         // the next turn can echo it back. Empty when the model isn't a thinker.
-        let mut thinking_accumulator = String::new();
-        let mut thinking_signature = String::new();
+        let mut thinking_blocks: Vec<ContentBlock> = Vec::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut tool_args_map: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
@@ -496,6 +501,9 @@ pub async fn run_agent(
                 }
             };
 
+            if let Ok(Some(event)) = &recv_result {
+                record_thinking_event(&mut thinking_blocks, event);
+            }
             match recv_result {
                 // Timeout: no token received within the window
                 Err(_elapsed) => {
@@ -556,9 +564,11 @@ pub async fn run_agent(
                             AgentEvent::TextDelta { text },
                         );
                     }
+                    LlmEvent::ThinkingBlockStart { .. } | LlmEvent::RedactedThinking(_) => {
+                        received_any_token = true;
+                    }
                     LlmEvent::Thinking(text) => {
                         received_any_token = true;
-                        thinking_accumulator.push_str(&text);
                         emit_event(
                             &app,
                             request.conversation_id.as_deref(),
@@ -566,10 +576,7 @@ pub async fn run_agent(
                             AgentEvent::Thinking { text },
                         );
                     }
-                    LlmEvent::ThinkingSignature(sig) => {
-                        // Anthropic streams signature separately; keep latest.
-                        thinking_signature = sig;
-                    }
+                    LlmEvent::ThinkingSignature(_) => {}
                     LlmEvent::ToolCallStart { id, name } => {
                         received_any_token = true;
                         emit_event(
@@ -721,8 +728,7 @@ pub async fn run_agent(
                 .or_insert_with(AgentSession::new);
             sess.messages.push(build_assistant_message(
                 &text_accumulator,
-                &thinking_accumulator,
-                &thinking_signature,
+                &thinking_blocks,
                 &tool_calls,
                 Some(&thinking_origin),
             ));
@@ -1188,6 +1194,42 @@ fn truncate_for_log(s: &str) -> String {
     }
 }
 
+fn record_thinking_event(blocks: &mut Vec<ContentBlock>, event: &LlmEvent) {
+    match event {
+        LlmEvent::ThinkingBlockStart {
+            thinking,
+            signature,
+        } => blocks.push(ContentBlock::Thinking {
+            thinking: thinking.clone(),
+            signature: signature.clone(),
+            origin: None,
+        }),
+        LlmEvent::RedactedThinking(data) => blocks.push(ContentBlock::RedactedThinking {
+            data: data.clone(),
+            origin: None,
+        }),
+        LlmEvent::Thinking(text) => match blocks.last_mut() {
+            Some(ContentBlock::Thinking { thinking, .. }) => thinking.push_str(text),
+            _ if !text.is_empty() => blocks.push(ContentBlock::Thinking {
+                thinking: text.clone(),
+                signature: String::new(),
+                origin: None,
+            }),
+            _ => {}
+        },
+        LlmEvent::ThinkingSignature(value) => match blocks.last_mut() {
+            Some(ContentBlock::Thinking { signature, .. }) => signature.clone_from(value),
+            _ if !value.is_empty() => blocks.push(ContentBlock::Thinking {
+                thinking: String::new(),
+                signature: value.clone(),
+                origin: None,
+            }),
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
 /// Build a bounded handoff without executing any archived instruction.
 async fn summarize_history(
     client: &LlmClient,
@@ -1242,28 +1284,34 @@ fn rollback_failed_request(messages: &mut Vec<Message>) {
     }
 }
 
-/// Build the saved assistant response. Thinking must precede tool calls.
+/// Build the assistant `Message` to append to session history from the
+/// accumulators that filled during streaming. Pure data transformation —
+/// kept as a free function so `run_agent` doesn't carry the inline 40-line
+/// block-building chain.
+///
+/// Block order matters for Anthropic: thinking must precede tool_use, and
+/// text (if any) sits between them. The simple `Text` variant is reserved
+/// for pure-text responses (no thinking, no tool_use) so trivial assistant
+/// turns don't get gratuitous Blocks wrapping.
 fn build_assistant_message(
     text_accumulator: &str,
-    thinking_accumulator: &str,
-    thinking_signature: &str,
+    thinking_blocks: &[ContentBlock],
     tool_calls: &[ToolCall],
     origin: Option<&ThinkingOrigin>,
 ) -> Message {
-    let has_thinking = !thinking_accumulator.is_empty();
-    if tool_calls.is_empty() && !has_thinking {
+    if tool_calls.is_empty() && thinking_blocks.is_empty() {
         return Message {
             role: "assistant".into(),
             content: MessageContent::Text(text_accumulator.to_string()),
         };
     }
-    let mut blocks: Vec<ContentBlock> = Vec::new();
-    if has_thinking {
-        blocks.push(ContentBlock::Thinking {
-            thinking: thinking_accumulator.to_string(),
-            signature: thinking_signature.to_string(),
-            origin: origin.cloned(),
-        });
+    let mut blocks = thinking_blocks.to_vec();
+    for block in &mut blocks {
+        if let ContentBlock::Thinking { origin: stored, .. }
+        | ContentBlock::RedactedThinking { origin: stored, .. } = block
+        {
+            *stored = origin.cloned();
+        }
     }
     if !text_accumulator.is_empty() {
         blocks.push(ContentBlock::Text {
@@ -1942,6 +1990,226 @@ fn is_legacy_opencode_install(command: &str) -> bool {
 }
 
 #[cfg(test)]
+mod thinking_history_tests {
+    use super::*;
+    use axum::{extract::State, routing::post, Json, Router};
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn plain_assistant_history_keeps_its_existing_text_representation() {
+        let message = build_assistant_message("fixture answer", &[], &[], None);
+        assert!(matches!(message.content, MessageContent::Text(text) if text == "fixture answer"));
+    }
+
+    #[test]
+    fn openai_reasoning_deltas_keep_their_single_unsigned_block() {
+        let mut blocks = Vec::new();
+        for text in ["", "first", " second"] {
+            record_thinking_event(&mut blocks, &LlmEvent::Thinking(text.into()));
+        }
+        let assistant = build_assistant_message("fixture answer", &blocks, &[], None);
+        assert_eq!(
+            serde_json::to_value(assistant.content).unwrap(),
+            json!([
+                {"type":"thinking","thinking":"first second"},
+                {"type":"text","text":"fixture answer"},
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn omitted_thinking_blocks_survive_saved_history_and_tool_result_http_replay() {
+        async fn capture(
+            State(tx): State<mpsc::UnboundedSender<Value>>,
+            Json(body): Json<Value>,
+        ) -> impl axum::response::IntoResponse {
+            let initial = body["messages"].as_array().unwrap().len() == 1;
+            tx.send(body).unwrap();
+            let events = if initial {
+                vec![
+                    (
+                        "content_block_start",
+                        json!({"index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":0,"delta":{"type":"thinking_delta","thinking":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":0,"delta":{"type":"signature_delta","signature":"provisional-a"}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":0,"delta":{"type":"signature_delta","signature":"sig-a"}}),
+                    ),
+                    ("content_block_stop", json!({"index":0})),
+                    (
+                        "content_block_start",
+                        json!({"index":1,"content_block":{"type":"redacted_thinking","data":"fixture-encrypted"}}),
+                    ),
+                    ("content_block_stop", json!({"index":1})),
+                    (
+                        "content_block_start",
+                        json!({"index":2,"content_block":{"type":"thinking","thinking":"","signature":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":2,"delta":{"type":"thinking_delta","thinking":""}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":2,"delta":{"type":"signature_delta","signature":"sig-b"}}),
+                    ),
+                    ("content_block_stop", json!({"index":2})),
+                    (
+                        "content_block_start",
+                        json!({"index":3,"content_block":{"type":"tool_use","id":"fixture-call","name":"fixture_tool","input":{}}}),
+                    ),
+                    (
+                        "content_block_delta",
+                        json!({"index":3,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"fixture\"}"}}),
+                    ),
+                    ("content_block_stop", json!({"index":3})),
+                    ("message_delta", json!({"delta":{"stop_reason":"tool_use"}})),
+                ]
+            } else {
+                vec![(
+                    "content_block_delta",
+                    json!({"index":0,"delta":{"type":"text_delta","text":"fixture answer"}}),
+                )]
+            };
+            let mut data = events
+                .into_iter()
+                .map(|(event, payload)| format!("event: {event}\ndata: {payload}\n\n"))
+                .collect::<String>();
+            data.push_str("event: message_stop\ndata: {}\n\n");
+            ([("content-type", "text/event-stream")], data)
+        }
+
+        let (tx, mut captured) = mpsc::unbounded_channel();
+        let router = Router::new()
+            .route("/v1/messages", post(capture))
+            .with_state(tx);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = LlmClient::new(LlmConfig {
+            provider: LlmProvider::Anthropic,
+            base_url: format!("http://{}/v1", listener.local_addr().unwrap()),
+            api_key: "fixture-key".into(),
+            model: "claude-opus-4-7".into(),
+            reasoning_effort: Some("high".into()),
+        })
+        .unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let tools = vec![ToolDef {
+            name: "fixture_tool".into(),
+            description: "fixture".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }];
+        let mut messages = vec![Message {
+            role: "user".into(),
+            content: MessageContent::Text("fixture prompt".into()),
+        }];
+        let mut stream = client
+            .chat_stream(&messages, &tools, "fixture system")
+            .await
+            .unwrap();
+        let mut thinking_blocks: Vec<ContentBlock> = Vec::new();
+        let mut calls: Vec<ToolCall> = Vec::new();
+        while let Some(event) = stream.recv().await {
+            record_thinking_event(&mut thinking_blocks, &event);
+            match event {
+                LlmEvent::ToolCallStart { id, name } => calls.push(ToolCall {
+                    id,
+                    name,
+                    arguments: String::new(),
+                }),
+                LlmEvent::ToolCallDelta { id, args_chunk } => calls
+                    .iter_mut()
+                    .find(|call| call.id == id)
+                    .unwrap()
+                    .arguments
+                    .push_str(&args_chunk),
+                LlmEvent::Error(error) => panic!("fixture stream failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            serde_json::to_value(&thinking_blocks).unwrap(),
+            json!([
+                {"type":"thinking","thinking":"","signature":"sig-a"},
+                {"type":"redacted_thinking","data":"fixture-encrypted"},
+                {"type":"thinking","thinking":"","signature":"sig-b"},
+            ])
+        );
+        assert_eq!(calls.len(), 1);
+        let first = captured.recv().await.unwrap();
+        assert_eq!(first["thinking"]["type"], "adaptive");
+        assert_eq!(first["output_config"]["effort"], "high");
+
+        let origin = client.thinking_origin();
+        let assistant = build_assistant_message("", &thinking_blocks, &calls, Some(&origin));
+        if let MessageContent::Blocks(blocks) = &assistant.content {
+            let thinking = blocks
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Thinking { origin, .. }
+                    | ContentBlock::RedactedThinking { origin, .. } => Some(origin),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(thinking.len(), 3);
+            assert!(thinking
+                .into_iter()
+                .all(|stored| stored.as_ref() == Some(&origin)));
+        } else {
+            panic!("multi-block fixture response must retain its content blocks");
+        }
+        let saved = serde_json::to_vec(&assistant).unwrap();
+        messages.push(serde_json::from_slice(&saved).unwrap());
+        messages.push(Message {
+            role: "user".into(),
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "fixture-call".into(),
+                content: "fixture result".into(),
+            }]),
+        });
+        let mut stream = client
+            .chat_stream(&messages, &tools, "fixture system")
+            .await
+            .unwrap();
+        let mut answer = String::new();
+        while let Some(event) = stream.recv().await {
+            match event {
+                LlmEvent::TextDelta(text) => answer.push_str(&text),
+                LlmEvent::Error(error) => panic!("fixture replay failed: {error}"),
+                _ => {}
+            }
+        }
+        assert_eq!(answer, "fixture answer");
+        let replay = captured.recv().await.unwrap();
+        assert_eq!(
+            replay["messages"][1]["content"],
+            json!([
+                {"type":"thinking","thinking":"","signature":"sig-a"},
+                {"type":"redacted_thinking","data":"fixture-encrypted"},
+                {"type":"thinking","thinking":"","signature":"sig-b"},
+                {"type":"tool_use","id":"fixture-call","name":"fixture_tool","input":{"path":"fixture"}},
+            ])
+        );
+        assert_eq!(
+            replay["messages"][2]["content"],
+            json!([
+                {"type":"tool_result","tool_use_id":"fixture-call","content":"fixture result"},
+            ])
+        );
+        assert_eq!(replay["output_config"]["effort"], "high");
+        server.abort();
+    }
+}
+
+#[cfg(test)]
 mod conversation_tests {
     use super::*;
 
@@ -2178,9 +2446,8 @@ mod conversation_tests {
 
     #[test]
     fn clearing_persisted_history_handles_missing_files_and_reports_deletion_failure() {
-        let directory = std::fs::canonicalize(std::env::temp_dir())
-            .unwrap()
-            .join(format!("echobird-agent-reset-{}", uuid::Uuid::new_v4()));
+        let directory =
+            std::env::temp_dir().join(format!("echobird-agent-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("session.json");
         let histories = HistoryStore::new(directory.clone());

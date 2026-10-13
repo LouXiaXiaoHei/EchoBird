@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { AccountModelFields } from './AccountModelFields';
 import type { NewModelForm } from './context';
+import type { AccountProvider } from '../../api/types';
 import * as api from '../../api/accountProxy';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 
@@ -24,10 +25,12 @@ function Harness({
   accountId = '',
   modelId = '',
   active = true,
+  provider = 'codex',
 }: {
   accountId?: string;
   modelId?: string;
   active?: boolean;
+  provider?: AccountProvider;
 }) {
   const [form, setForm] = useState<NewModelForm>({
     name: 'Codex',
@@ -35,7 +38,7 @@ function Harness({
     anthropicUrl: '',
     apiKey: '',
     modelId,
-    accountSource: { provider: 'codex', accountId },
+    accountSource: { provider, accountId },
   });
   useLayoutEffect(() => {
     current = form;
@@ -50,9 +53,9 @@ function Harness({
     />
   );
 }
-async function open(accountId = '', modelId = '') {
+async function open(accountId = '', modelId = '', provider: AccountProvider = 'codex') {
   await act(async () => {
-    renderer = create(<Harness accountId={accountId} modelId={modelId} />);
+    renderer = create(<Harness accountId={accountId} modelId={modelId} provider={provider} />);
   });
 }
 function field(label: string) {
@@ -98,6 +101,64 @@ it('defaults to the first saved account and automatically reads and caches its m
     selectOnly: true,
     refreshLabel: 'btn.refresh',
   });
+});
+
+it.each(['trae', 'traecn'] as const)(
+  'defaults to the first saved %s identity and plan, then caches its model directory',
+  async (provider) => {
+    const source = { provider, accountId: 'first' };
+    const savedLabel = provider === 'trae' ? 'Global identity' : 'CN identity';
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+      { source, label: savedLabel, plan: 'pro' },
+      { source: { provider, accountId: 'second' }, label: 'Other identity', plan: 'free' },
+    ]);
+    vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce([`${provider}-model`]);
+    await open('', '', provider);
+    expect(api.listProxyAccounts).toHaveBeenCalledExactlyOnceWith(provider);
+    expect(current.accountSource).toEqual(source);
+    expect(current.name).toBe(savedLabel);
+    expect(current.apiKey).toBe('');
+    expect(field('accountProxy.account').props).toMatchObject({
+      value: 'first',
+      optionLabels: { first: `${savedLabel} · Pro`, second: 'Other identity · Free' },
+    });
+    expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+    expect(current.modelIdOptions).toEqual([`${provider}-model`]);
+    expect(current.modelId).toBe(`${provider}-model`);
+    expect(api.getCachedAccountProxyModels(source)).toEqual([`${provider}-model`]);
+  }
+);
+
+it('ignores a late global directory after switching to CN with the same saved account ID', async () => {
+  let resolve!: (models: string[]) => void;
+  vi.mocked(api.listProxyAccounts).mockImplementation(async (provider) => [
+    { source: { provider, accountId: 'shared-id' }, label: `${provider} identity`, plan: 'free' },
+  ]);
+  vi.mocked(api.getAccountProxyModels)
+    .mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    )
+    .mockResolvedValueOnce(['cn-model']);
+  await open('', '', 'trae');
+  expect(current.accountSource).toEqual({ provider: 'trae', accountId: 'shared-id' });
+  expect(field('model.modelId').props.disabled).toBe(true);
+  await act(async () => field('accountProxy.provider').props.onChange('traecn'));
+  expect(current.accountSource).toEqual({ provider: 'traecn', accountId: 'shared-id' });
+  expect(current.name).toBe('traecn identity');
+  expect(current.modelIdOptions).toEqual(['cn-model']);
+  expect(current.modelId).toBe('cn-model');
+  await act(async () => resolve(['stale-global-model']));
+  expect(current.modelIdOptions).toEqual(['cn-model']);
+  expect(
+    api.getCachedAccountProxyModels({ provider: 'trae', accountId: 'shared-id' })
+  ).toBeUndefined();
+  expect(api.getCachedAccountProxyModels({ provider: 'traecn', accountId: 'shared-id' })).toEqual([
+    'cn-model',
+  ]);
+  expect(api.getAccountProxyModels).toHaveBeenCalledTimes(2);
+  expect(showToast).not.toHaveBeenCalled();
 });
 
 it('uses the first saved account cache without another directory request', async () => {

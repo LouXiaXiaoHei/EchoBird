@@ -129,7 +129,11 @@ export function AccountProxyPanel({
           <span className="shrink-0 text-xs text-cyber-text-secondary tabular-nums whitespace-nowrap">
             {accountCounts[provider.id] === undefined
               ? '—'
-              : `${accountCounts[provider.id]} 个账号`}
+              : t(
+                  accountCounts[provider.id] === 1
+                    ? 'accountProxy.accountCountOne'
+                    : 'accountProxy.accountCountOther'
+                ).replace('{count}', String(accountCounts[provider.id]))}
           </span>
         </button>
       ))}

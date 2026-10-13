@@ -132,6 +132,17 @@ struct AppState {
     route_memory_path: Option<PathBuf>,
     #[cfg(test)]
     fixture_responses: Option<Arc<Mutex<HashMap<String, Response>>>>,
+    #[cfg(test)]
+    fixture_authentication: Option<Arc<Mutex<AuthenticationFixture>>>,
+}
+
+#[cfg(test)]
+struct AuthenticationFixture {
+    result: Result<Value, String>,
+    delay: Duration,
+    rejections: Vec<(crate::models::model::AccountSource, Value)>,
+    retry_responses: std::collections::VecDeque<Response>,
+    sent_credentials: Vec<Value>,
 }
 
 impl AppState {
@@ -147,6 +158,8 @@ impl AppState {
             route_memory_path: Some(route_memory_path()),
             #[cfg(test)]
             fixture_responses: None,
+            #[cfg(test)]
+            fixture_authentication: None,
         })
     }
 
@@ -162,6 +175,7 @@ impl AppState {
             route_memory: Arc::new(Mutex::new(RouteMemory::default())),
             route_memory_path: None,
             fixture_responses: None,
+            fixture_authentication: None,
         })
     }
 }
@@ -367,20 +381,13 @@ pub(crate) fn forget_candidate_memory(candidate_id: &str) {
     let Ok(mut memory) = memory.lock() else {
         return;
     };
-    let removed = memory.candidates.remove(candidate_id).is_some();
-    let account = model_manager::get_user_models()
-        .into_iter()
-        .find(|model| model.internal_id == candidate_id)
-        .and_then(|model| model.account_source);
-    let removed_account = account.is_some_and(|source| {
-        memory
-            .accounts
-            .remove(&source_health_key(&source))
-            .is_some()
-    });
-    if removed || removed_account {
+    if clear_candidate_health(&mut memory, candidate_id) {
         save_route_memory(&route_memory_path(), &memory);
     }
+}
+
+fn clear_candidate_health(memory: &mut RouteMemory, candidate_id: &str) -> bool {
+    memory.candidates.remove(candidate_id).is_some()
 }
 
 fn now_ms() -> u64 {
@@ -650,6 +657,14 @@ pub(crate) async fn route_live_account_probe(
     body: Value,
 ) -> Result<Response, String> {
     let state = AppState::for_tests()?;
+    let mut policy = RoutePolicy::default();
+    if let Some(seconds) = std::env::var("ECHOBIRD_LIVE_PROXY_BUDGET_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| (45..=180).contains(seconds))
+    {
+        policy.time_budget = Duration::from_secs(seconds);
+    }
     let source_json = serde_json::to_string(&source).map_err(|_| "Invalid account source")?;
     let candidate = Candidate {
         attempt: None,
@@ -661,7 +676,7 @@ pub(crate) async fn route_live_account_probe(
         account_source: Some(source),
     };
     // Use production routing without changing the user's candidates or health file.
-    Ok(route_chat_with_candidates(&state, &HeaderMap::new(), body, vec![candidate]).await)
+    Ok(route_chat_with_policy(&state, &HeaderMap::new(), body, vec![candidate], policy).await)
 }
 
 async fn send_candidate(
@@ -670,24 +685,47 @@ async fn send_candidate(
     candidate: &Candidate,
     mut body: Value,
     protocol: RouteProtocol,
+    refreshed_credentials: Option<Value>,
 ) -> Result<Response, String> {
     #[cfg(test)]
     if let Some(responses) = &state.fixture_responses {
-        return responses
+        if let Some(credentials) = refreshed_credentials {
+            let mut fixture = state
+                .fixture_authentication
+                .as_ref()
+                .expect("Refresh fixture is missing")
+                .lock()
+                .unwrap();
+            fixture.sent_credentials.push(credentials.clone());
+            bind_attempt_credentials(state, candidate, &credentials);
+            return fixture
+                .retry_responses
+                .pop_front()
+                .ok_or_else(|| "Fixture retry response is missing".into());
+        }
+        let response = responses
             .lock()
             .map_err(|_| "Fixture response lock poisoned".to_string())?
             .remove(&candidate.internal_id)
-            .ok_or_else(|| "Fixture response is missing".to_string());
+            .ok_or_else(|| "Fixture response is missing".to_string())?;
+        if let Some(credentials) = response.extensions().get::<RejectedAccountCredentials>() {
+            bind_attempt_credentials(state, candidate, &credentials.0);
+        }
+        return Ok(response);
     }
     if let Some(source) = &candidate.account_source {
-        let credentials = match crate::services::account_model_sources::credentials(source, false)
-            .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(
-                    crate::services::account_model_sources::credential_error(error).into_response(),
-                )
+        let credentials = match refreshed_credentials {
+            Some(credentials) => credentials,
+            None => {
+                match crate::services::account_model_sources::credentials(source, false).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Ok(
+                            crate::services::account_model_sources::credential_error(error)
+                                .into_response(),
+                        )
+                    }
+                }
             }
         };
         bind_attempt_credentials(state, candidate, &credentials);
@@ -701,44 +739,13 @@ async fn send_candidate(
             protocol,
         )
         .await;
-        let response = match result {
+        let mut response = match result {
             Ok(response) => response,
             Err(error) => error.into_response(),
         };
-        if response.status() == StatusCode::UNAUTHORIZED {
-            // One refresh of the bound account only; never switch or log in a native client.
-            let credentials =
-                match crate::services::account_model_sources::credentials_after_rejection(
-                    source,
-                    &rejected_credentials,
-                )
-                .await
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return Ok(
-                            crate::services::account_model_sources::credential_error(error)
-                                .into_response(),
-                        )
-                    }
-                };
-            bind_attempt_credentials(state, candidate, &credentials);
-            return Ok(
-                match send_account_request(
-                    state,
-                    source,
-                    credentials,
-                    &candidate.model_id,
-                    body,
-                    protocol,
-                )
-                .await
-                {
-                    Ok(response) => response,
-                    Err(error) => error.into_response(),
-                },
-            );
-        }
+        response
+            .extensions_mut()
+            .insert(RejectedAccountCredentials(rejected_credentials));
         return Ok(response);
     }
     if protocol == RouteProtocol::Responses {
@@ -777,6 +784,57 @@ async fn send_candidate(
     }
     crate::services::account_proxy::strip_response_metadata(&mut body);
     send_api_request(state, headers, candidate, &body, protocol).await
+}
+
+#[derive(Clone)]
+struct RejectedAccountCredentials(Value);
+
+async fn refresh_rejected_account(
+    _state: &AppState,
+    candidate: &Candidate,
+    rejected: &RejectedAccountCredentials,
+    started: Instant,
+    policy: RoutePolicy,
+) -> Result<Value, crate::services::account_proxy::ProxyError> {
+    let refresh = async {
+        #[cfg(test)]
+        if let Some(fixture) = &_state.fixture_authentication {
+            let (delay, result) = {
+                let mut fixture = fixture.lock().unwrap();
+                fixture.rejections.push((
+                    candidate.account_source.clone().unwrap(),
+                    rejected.0.clone(),
+                ));
+                (fixture.delay, fixture.result.clone())
+            };
+            tokio::time::sleep(delay).await;
+            return result;
+        }
+        crate::services::account_model_sources::credentials_after_rejection(
+            candidate
+                .account_source
+                .as_ref()
+                .expect("Only account requests bind credentials"),
+            &rejected.0,
+        )
+        .await
+    };
+    let timeout = remaining_timeout(started, policy.time_budget, policy.header_timeout)
+        .ok_or_else(|| {
+            crate::services::account_proxy::ProxyError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Account refresh exceeded the routing budget",
+            )
+        })?;
+    tokio::time::timeout(timeout, refresh)
+        .await
+        .map_err(|_| {
+            crate::services::account_proxy::ProxyError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Account refresh exceeded the routing budget",
+            )
+        })?
+        .map_err(crate::services::account_model_sources::credential_error)
 }
 
 #[derive(Clone, Copy)]
@@ -978,7 +1036,12 @@ async fn route_with_policy(
     let mut incompatible_response = None;
     let routing_started = Instant::now();
 
-    for mut candidate in available {
+    let mut available = available.into_iter();
+    let mut authentication_retry: Option<(Candidate, Option<Value>)> = None;
+    while let Some((mut candidate, refreshed_credentials)) = authentication_retry
+        .take()
+        .or_else(|| available.next().map(|candidate| (candidate, None)))
+    {
         if candidate_is_cooling_down(state, &candidate) {
             continue;
         }
@@ -1001,15 +1064,25 @@ async fn route_with_policy(
             break;
         };
         let mut upstream_body = body.clone();
-        begin_attempt(state, &mut candidate);
+        let authentication_retried = refreshed_credentials.is_some();
+        if !authentication_retried {
+            begin_attempt(state, &mut candidate);
+        }
         upstream_body["model"] = Value::String(candidate.model_id.clone());
         let activity_guard = RouteActivityGuard::begin(&candidate.internal_id);
         let sent = tokio::time::timeout(
             header_timeout,
-            send_candidate(state, inbound_headers, &candidate, upstream_body, protocol),
+            send_candidate(
+                state,
+                inbound_headers,
+                &candidate,
+                upstream_body,
+                protocol,
+                refreshed_credentials,
+            ),
         )
         .await;
-        let response = match sent {
+        let mut response = match sent {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 mark_failure(state, &candidate, FailureClass::Transient, None);
@@ -1042,6 +1115,27 @@ async fn route_with_policy(
             }
         };
 
+        let rejected_credentials = (!authentication_retried)
+            .then(|| {
+                response
+                    .extensions()
+                    .get::<RejectedAccountCredentials>()
+                    .cloned()
+            })
+            .flatten();
+        if response.status() == StatusCode::UNAUTHORIZED {
+            if let Some(rejected) = &rejected_credentials {
+                match refresh_rejected_account(state, &candidate, rejected, routing_started, policy)
+                    .await
+                {
+                    Ok(credentials) => {
+                        authentication_retry = Some((candidate, Some(credentials)));
+                        continue;
+                    }
+                    Err(error) => response = error.into_response(),
+                }
+            }
+        }
         let status = response.status();
         let content_type = response.headers().get(header::CONTENT_TYPE).cloned();
         let cache_control = response.headers().get(header::CACHE_CONTROL).cloned();
@@ -1279,7 +1373,28 @@ async fn route_with_policy(
                     }
                     return result;
                 }
-                Ok(Some(Err(error))) => {
+                Ok(Some(Err(mut error))) => {
+                    if proxy_error_from_chain(&error)
+                        .is_some_and(|error| error.status == StatusCode::UNAUTHORIZED)
+                    {
+                        if let Some(rejected) = &rejected_credentials {
+                            match refresh_rejected_account(
+                                state,
+                                &candidate,
+                                rejected,
+                                routing_started,
+                                policy,
+                            )
+                            .await
+                            {
+                                Ok(credentials) => {
+                                    authentication_retry = Some((candidate, Some(credentials)));
+                                    continue;
+                                }
+                                Err(refresh_error) => error = axum::Error::new(refresh_error),
+                            }
+                        }
+                    }
                     let Some(failure) =
                         mark_response_failure(state, &candidate, &error, bound_continuation)
                     else {
@@ -1288,6 +1403,16 @@ async fn route_with_policy(
                             .clone()
                             .into_response();
                     };
+                    if bound_continuation {
+                        return proxy_error_from_chain(&error)
+                            .map(|error| error.clone().into_response())
+                            .unwrap_or_else(|| {
+                                openai_error(
+                                    StatusCode::BAD_GATEWAY,
+                                    "The bound Responses stream failed",
+                                )
+                            });
+                    }
                     attempts.push(AttemptRecord {
                         candidate_id: candidate.internal_id.clone(),
                         model_id: candidate.model_id.clone(),
@@ -1374,7 +1499,28 @@ async fn route_with_policy(
                 mark_success(state, &candidate);
                 return upstream_response(status, content_type, cache_control, bytes, &candidate);
             }
-            Ok(Err(error)) => {
+            Ok(Err(mut error)) => {
+                if proxy_error_from_chain(&error)
+                    .is_some_and(|error| error.status == StatusCode::UNAUTHORIZED)
+                {
+                    if let Some(rejected) = &rejected_credentials {
+                        match refresh_rejected_account(
+                            state,
+                            &candidate,
+                            rejected,
+                            routing_started,
+                            policy,
+                        )
+                        .await
+                        {
+                            Ok(credentials) => {
+                                authentication_retry = Some((candidate, Some(credentials)));
+                                continue;
+                            }
+                            Err(refresh_error) => error = axum::Error::new(refresh_error),
+                        }
+                    }
+                }
                 let Some(failure) =
                     mark_response_failure(state, &candidate, &error, bound_continuation)
                 else {
@@ -2345,6 +2491,7 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
         "images are not supported",
         "vision is not supported",
         "responses_conversion_unsupported",
+        "unsupported_parameter",
     ]
     .iter()
     .any(|pattern| message.contains(pattern))
@@ -3182,6 +3329,7 @@ mod tests {
         let restored: RouteMemory = serde_json::from_str(&serialized).unwrap();
         let restored_state = AppState {
             fixture_responses: None,
+            fixture_authentication: None,
             http_client: state.http_client.clone(),
             route_memory: Arc::new(Mutex::new(restored)),
             route_memory_path: None,
@@ -4154,6 +4302,67 @@ mod tests {
         assert!(!memory.accounts.contains_key(&key));
     }
 
+    #[tokio::test]
+    async fn unsupported_parameters_try_the_backup_without_cooling_down_the_account() {
+        for streaming in [false, true] {
+            let mut error = crate::services::account_proxy::ProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "The selected model does not advertise this output limit",
+            );
+            error.error_code = Some("unsupported_parameter".into());
+            error.model_scope = true;
+            let backup = if streaming {
+                Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            } else {
+                crate::services::account_proxy::json_response(
+                    &json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                )
+            };
+            let responses = Arc::new(Mutex::new(HashMap::from([
+                ("unsupported-limit".to_string(), error.into_response()),
+                ("limit-backup".to_string(), backup),
+            ])));
+            let mut state = AppState::for_tests().unwrap();
+            state.fixture_responses = Some(responses.clone());
+            let candidates = vec![
+                bound_health_candidate("unsupported-limit"),
+                bound_health_candidate("limit-backup"),
+            ];
+            let response = route_chat_with_candidates(
+                &state,
+                &inbound_headers(),
+                json!({"messages":[],"max_tokens":1,"stream":streaming}),
+                candidates.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "limit-backup/limit-backup-model"
+            );
+            response.into_body().collect().await.unwrap();
+            assert!(responses.lock().unwrap().is_empty());
+            {
+                let memory = state.route_memory.lock().unwrap();
+                assert!(memory.candidates.is_empty());
+                assert!(memory.accounts.is_empty());
+            }
+            responses.lock().unwrap().insert("unsupported-limit".into(), crate::services::account_proxy::json_response(&json!({"choices":[{"message":{"role":"assistant","content":"plain text"},"finish_reason":"stop"}]})));
+            let response = route_chat_with_candidates(
+                &state,
+                &inbound_headers(),
+                json!({"messages":[],"stream":false}),
+                candidates,
+            )
+            .await;
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "unsupported-limit/unsupported-limit-model"
+            );
+            response.into_body().collect().await.unwrap();
+        }
+    }
+
     #[test]
     fn short_rate_limit_cannot_shorten_existing_candidate_or_account_deadline() {
         let state = AppState::for_tests().unwrap();
@@ -4481,6 +4690,385 @@ mod tests {
         }
     }
 
+    fn authentication_fixture(initial: Response, retried: Response) -> AppState {
+        let mut initial = initial;
+        initial
+            .extensions_mut()
+            .insert(RejectedAccountCredentials(json!({"accessToken":"T0"})));
+        let mut state = AppState::for_tests().unwrap();
+        state.fixture_responses = Some(Arc::new(Mutex::new(HashMap::from([
+            ("refresh-account".into(), initial),
+            ("refresh-backup".into(), Response::new(Body::from("backup"))),
+        ]))));
+        state.fixture_authentication = Some(Arc::new(Mutex::new(AuthenticationFixture {
+            result: Ok(json!({"accessToken":"T1"})),
+            delay: Duration::ZERO,
+            rejections: Vec::new(),
+            retry_responses: std::collections::VecDeque::from([retried]),
+            sent_credentials: Vec::new(),
+        })));
+        state
+    }
+
+    fn unauthorized_body() -> Response {
+        typed_body_failure(crate::services::account_proxy::ProxyError::new(
+            StatusCode::UNAUTHORIZED,
+            "Expired account credential",
+        ))
+    }
+
+    #[tokio::test]
+    async fn early_authentication_failure_refreshes_once_before_any_output() {
+        for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+            for streaming in [false, true] {
+                for http_unauthorized in [false, true] {
+                    let initial = if http_unauthorized {
+                        crate::services::account_proxy::ProxyError::new(
+                            StatusCode::UNAUTHORIZED,
+                            "Expired account credential",
+                        )
+                        .into_response()
+                    } else {
+                        unauthorized_body()
+                    };
+                    let successful = if protocol == RouteProtocol::Responses {
+                        if streaming {
+                            Response::new(Body::from("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\"}}\n\n"))
+                        } else {
+                            Response::new(Body::from("{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\"}"))
+                        }
+                    } else if streaming {
+                        Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"fresh output\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                    } else {
+                        Response::new(Body::from("fresh output"))
+                    };
+                    let state = authentication_fixture(initial, successful);
+                    let account = bound_health_candidate("refresh-account");
+                    let source = account.account_source.clone().unwrap();
+                    let response = route_with_policy(
+                        &state,
+                        &HeaderMap::new(),
+                        json!({"stream":streaming,"input":"hello","messages":[]}),
+                        vec![
+                            account,
+                            candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup"),
+                        ],
+                        RoutePolicy::default(),
+                        protocol,
+                    )
+                    .await;
+                    assert_eq!(response.status(), StatusCode::OK);
+                    assert_eq!(
+                        response.headers()["X-EchoBird-Routed-Via"],
+                        "refresh-account/refresh-account-model"
+                    );
+                    response.into_body().collect().await.unwrap();
+                    let fixture = state
+                        .fixture_authentication
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap();
+                    assert_eq!(
+                        fixture.rejections,
+                        vec![(source, json!({"accessToken":"T0"}))]
+                    );
+                    assert_eq!(fixture.sent_credentials, vec![json!({"accessToken":"T1"})]);
+                    assert!(fixture.retry_responses.is_empty());
+                    assert!(state
+                        .fixture_responses
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .contains_key("refresh-backup"));
+                    let memory = state.route_memory.lock().unwrap();
+                    assert!(memory.candidates.is_empty());
+                    assert!(memory.accounts.is_empty());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_early_unauthorized_does_not_refresh_again() {
+        for streaming in [false, true] {
+            let state = authentication_fixture(unauthorized_body(), unauthorized_body());
+            let mut backup = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup");
+            // The backup has independent credentials and must remain eligible.
+            backup.account_source = None;
+            let response = route_chat_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"stream":streaming,"messages":[]}),
+                vec![bound_health_candidate("refresh-account"), backup],
+            )
+            .await;
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "refresh-backup/refresh-backup-model"
+            );
+            assert_eq!(
+                state
+                    .fixture_authentication
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .rejections
+                    .len(),
+                1
+            );
+            let memory = state.route_memory.lock().unwrap();
+            assert_eq!(
+                memory.candidates["refresh-account"].failure,
+                Some(FailureClass::Authentication)
+            );
+            assert_eq!(memory.accounts.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_failure_after_delivered_output_is_never_replayed() {
+        let partial = Response::new(Body::from_stream(stream::iter([
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )),
+            Err(std::io::Error::other(
+                crate::services::account_proxy::ProxyError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "Expired account credential",
+                ),
+            )),
+        ])));
+        let state = authentication_fixture(partial, Response::new(Body::from("unused")));
+        let response = route_chat_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"stream":true,"messages":[]}),
+            vec![
+                bound_health_candidate("refresh-account"),
+                candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup"),
+            ],
+        )
+        .await;
+        let mut output = response.into_body().into_data_stream();
+        assert!(
+            String::from_utf8_lossy(&output.next().await.unwrap().unwrap()).contains("partial")
+        );
+        assert!(output.next().await.unwrap().is_err());
+        assert!(output.next().await.is_none());
+        let fixture = state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert!(fixture.rejections.is_empty());
+        assert_eq!(fixture.retry_responses.len(), 1);
+        assert!(state
+            .fixture_responses
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .contains_key("refresh-backup"));
+    }
+
+    #[tokio::test]
+    async fn refresh_preserves_original_budget_and_can_be_cancelled() {
+        let state =
+            authentication_fixture(unauthorized_body(), Response::new(Body::from("unused")));
+        state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .delay = Duration::from_secs(1);
+        let account = bound_health_candidate("refresh-account");
+        let policy = RoutePolicy {
+            time_budget: Duration::from_millis(20),
+            ..RoutePolicy::default()
+        };
+        let response = route_chat_with_policy(
+            &state,
+            &HeaderMap::new(),
+            json!({"stream":true,"messages":[]}),
+            vec![account],
+            policy,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        {
+            let fixture = state
+                .fixture_authentication
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap();
+            assert_eq!(fixture.rejections.len(), 1);
+            assert!(fixture.sent_credentials.is_empty());
+            assert_eq!(fixture.retry_responses.len(), 1);
+        }
+        assert_eq!(
+            state.route_memory.lock().unwrap().candidates["refresh-account"].failure,
+            Some(FailureClass::Transient)
+        );
+
+        let state =
+            authentication_fixture(unauthorized_body(), Response::new(Body::from("unused")));
+        state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .delay = Duration::from_secs(1);
+        let headers = HeaderMap::new();
+        let request = route_chat_with_candidates(
+            &state,
+            &headers,
+            json!({"stream":true,"messages":[]}),
+            vec![bound_health_candidate("refresh-account")],
+        );
+        assert!(tokio::time::timeout(Duration::from_millis(20), request)
+            .await
+            .is_err());
+        let fixture = state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_eq!(fixture.rejections.len(), 1);
+        assert!(fixture.sent_credentials.is_empty());
+        assert_eq!(fixture.retry_responses.len(), 1);
+        let memory = state.route_memory.lock().unwrap();
+        assert!(memory.candidates.is_empty());
+        assert!(memory.accounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_continuation_refreshes_same_account_without_switching() {
+        for streaming in [false, true] {
+            let state = authentication_fixture(unauthorized_body(), unauthorized_body());
+            let account = bound_health_candidate("refresh-account");
+            remember_response(&state, &account, Some("resp-bound"));
+            let response = route_responses_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"stream":streaming,"input":"continue","previous_response_id":"resp-bound"}),
+                vec![
+                    account,
+                    candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup"),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                state
+                    .fixture_authentication
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .rejections
+                    .len(),
+                1
+            );
+            assert!(state
+                .fixture_responses
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .contains_key("refresh-backup"));
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_failure_keeps_its_rate_limit_classification() {
+        let state =
+            authentication_fixture(unauthorized_body(), Response::new(Body::from("unused")));
+        state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .result = Err("accountError.rateLimited|HTTP 429".into());
+        let response = route_chat_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"stream":true,"messages":[]}),
+            vec![
+                bound_health_candidate("refresh-account"),
+                candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "refresh-backup/refresh-backup-model"
+        );
+        let fixture = state
+            .fixture_authentication
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap();
+        assert_eq!(fixture.rejections.len(), 1);
+        assert!(fixture.sent_credentials.is_empty());
+        assert_eq!(fixture.retry_responses.len(), 1);
+        let memory = state.route_memory.lock().unwrap();
+        assert_eq!(
+            memory.candidates["refresh-account"].failure,
+            Some(FailureClass::RateLimit)
+        );
+        assert_eq!(
+            memory.accounts.values().next().unwrap().failure,
+            Some(FailureClass::RateLimit)
+        );
+    }
+
+    #[test]
+    fn changing_model_clears_candidate_health_without_clearing_account_cooldown() {
+        for failure in [
+            FailureClass::RateLimit,
+            FailureClass::Billing,
+            FailureClass::Authentication,
+        ] {
+            let state = AppState::for_tests().unwrap();
+            let account = bound_health_candidate("edited-account-model");
+            mark_failure(&state, &account, failure, Some(Duration::from_secs(600)));
+            let key = account_health_key(&account).unwrap();
+            let deadline = state.route_memory.lock().unwrap().accounts[&key].cooldown_until_ms;
+            assert!(clear_candidate_health(
+                &mut state.route_memory.lock().unwrap(),
+                &account.internal_id
+            ));
+            assert!(candidate_is_cooling_down(
+                &state,
+                &bound_health_candidate("sibling-account-model")
+            ));
+            let memory = state.route_memory.lock().unwrap();
+            assert!(!memory.candidates.contains_key(&account.internal_id));
+            assert_eq!(memory.accounts[&key].failure, Some(failure));
+            assert_eq!(memory.accounts[&key].cooldown_until_ms, deadline);
+        }
+        for failure in [FailureClass::Transient, FailureClass::ModelUnavailable] {
+            let state = AppState::for_tests().unwrap();
+            let account = bound_health_candidate("edited-model-local");
+            mark_failure(&state, &account, failure, None);
+            clear_candidate_health(
+                &mut state.route_memory.lock().unwrap(),
+                &account.internal_id,
+            );
+            assert!(!candidate_is_cooling_down(&state, &account));
+        }
+    }
+
     #[tokio::test]
     async fn delivered_stream_request_rejection_ends_without_health_or_backup() {
         let error = crate::services::account_proxy::ProxyError::new(
@@ -4522,5 +5110,66 @@ mod tests {
         let memory = state.route_memory.lock().unwrap();
         assert!(memory.candidates.is_empty());
         assert!(memory.accounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn converted_responses_try_backup_before_creation_and_preserve_account_limit() {
+        for streaming in [false, true] {
+            let request = json!({"model":SMART_ROUTER_MODEL_ID,"input":"hello","stream":streaming});
+            let chat = responses_chat_request(&request).unwrap();
+            let mut error = crate::services::account_proxy::ProxyError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Trae account is rate limited",
+            );
+            error.error_code = Some("trae_4011".into());
+            error.retry_after = Some(HeaderValue::from_static("120"));
+            let first = responses_from_chat(typed_body_failure(error), &chat)
+                .await
+                .unwrap();
+            let backup_chat = Response::builder().header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"backup output\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")).unwrap();
+            let backup = responses_from_chat(backup_chat, &chat).await.unwrap();
+            let fixtures = Arc::new(Mutex::new(HashMap::from([
+                ("responses-early".into(), first),
+                ("responses-backup".into(), backup),
+            ])));
+            let mut state = AppState::for_tests().unwrap();
+            state.fixture_responses = Some(fixtures.clone());
+            let mut limited = bound_health_candidate("responses-early");
+            limited.account_source.as_mut().unwrap().provider =
+                crate::models::model::AccountProvider::Traecn;
+            let key = account_health_key(&limited).unwrap();
+            let started = now_ms();
+            let response = route_responses_with_candidates(
+                &state,
+                &inbound_headers(),
+                request,
+                vec![
+                    limited,
+                    candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "responses-backup"),
+                ],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "responses-backup/responses-backup-model"
+            );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(text.contains("backup output"));
+            assert!(!text.contains("response.failed"));
+            if streaming {
+                assert_eq!(text.matches("event: response.created").count(), 1);
+                assert!(text.contains("response.completed"));
+            } else {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["status"], "completed");
+            }
+            assert!(fixtures.lock().unwrap().is_empty());
+            let memory = state.route_memory.lock().unwrap();
+            assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
+            assert!(memory.accounts[&key].cooldown_until_ms.unwrap() >= started + 120_000);
+        }
     }
 }

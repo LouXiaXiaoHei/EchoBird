@@ -147,6 +147,60 @@ describe('Account Center display data', () => {
       resetAt: 1794132901,
     });
   });
+  it.each(['device claimed', 'no device claim', 'ignored response'] as const)(
+    'uses the actual TRAE claim result before a render snapshot updates (%s)',
+    async (result) => {
+      const state = context();
+      const first = {
+        id: 'first',
+        edition: 'traecn' as const,
+        name: 'First',
+        plan: 'Free',
+        active: true,
+      };
+      const second = { ...first, id: 'second', name: 'Second', active: false };
+      state.detectedTools = [
+        { id: 'traecn', name: 'TRAE CN', category: 'Desktop', installed: true },
+      ];
+      state.traeAccountGroups.traecn.accounts = [first, second];
+      const claim = vi.fn().mockResolvedValueOnce(
+        result === 'ignored response'
+          ? undefined
+          : {
+              ...first,
+              dailyClaimedAt: Date.now() / 1000,
+              deviceClaimedAt: result === 'device claimed' ? Date.now() / 1000 : undefined,
+            }
+      );
+      state.traeAccountGroups.traecn.claimDaily = claim;
+      useNavigationStore.getState().setActivePage('accounts');
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        act(() => {
+          renderer = create(
+            <AppManagerContext.Provider value={state}>
+              <AccountCenterTitleActions />
+            </AppManagerContext.Provider>
+          );
+        });
+        expect(claim).not.toHaveBeenCalled();
+        await act(async () => {
+          await renderer!.root
+            .findByProps({ 'aria-label': 'accountCenter.claimAll' })
+            .props.onClick();
+        });
+        expect(claim).toHaveBeenCalledTimes(result === 'device claimed' ? 1 : 2);
+        expect(claim).toHaveBeenNthCalledWith(1, first);
+        if (result !== 'device claimed') expect(claim).toHaveBeenNthCalledWith(2, second);
+        expect(state.traeAccountGroups.traecn.accounts).toEqual([first, second]);
+        expect(state.traeAccountGroups.traecn.refresh).not.toHaveBeenCalled();
+      } finally {
+        act(() => renderer?.unmount());
+        useNavigationStore.getState().setActivePage('apps');
+      }
+    }
+  );
+
   it.each(['pro', 'free', 'Free'])(
     'keeps Manus %s subscription expiry separate from its credit balance and refresh time',
     (plan) => {

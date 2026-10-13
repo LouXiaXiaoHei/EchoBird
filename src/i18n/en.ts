@@ -104,6 +104,8 @@ const en: Translations = {
   'freeModels.tab.account': 'Proxy Pool',
   'accountProxy.provider': 'Provider',
   'accountProxy.account': 'Account',
+  'accountProxy.accountCountOne': '{count} account',
+  'accountProxy.accountCountOther': '{count} accounts',
   'accountProxy.selectRequired': 'Select an account and a model.',
   'accountProxy.riskReadPrefix': 'I have read the ',
   'accountProxy.riskNotice': 'risk notice',

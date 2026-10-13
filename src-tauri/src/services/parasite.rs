@@ -159,6 +159,10 @@ fn session_file_in(directory: &Path, key: &str) -> PathBuf {
     directory.join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
 }
 
+pub(crate) fn session_file(key: &str) -> PathBuf {
+    session_file_in(&sessions_dir(), key)
+}
+
 fn load_session_from_file(path: &Path) -> Option<String> {
     std::fs::read(path)
         .ok()

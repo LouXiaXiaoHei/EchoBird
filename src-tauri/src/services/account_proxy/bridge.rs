@@ -893,6 +893,7 @@ pub(super) async fn route(
     model: &str,
     body: Value,
 ) -> Result<Response, ProxyError> {
+    super::protocol::reject_structured_output(&body)?;
     let owner = owner(&credentials)?;
     let policy = ToolPolicy::from_request(&body)?;
     let (tx, mut rx) = mpsc::channel(16);
@@ -1058,6 +1059,28 @@ pub(super) async fn route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unsupported_structured_output_is_rejected_without_starting_cli() {
+        let credentials = json!({"accessToken":"fixture","accountId":"fixture-owner"});
+        for format in [
+            json!({"type":"json_object"}),
+            json!({"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"},"strict":true}}),
+        ] {
+            let error = route(
+                credentials.clone(),
+                "claude-test",
+                json!({"messages":[{"role":"user","content":"Answer"}],"response_format":format}),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.error_code.as_deref(), Some("unsupported_parameter"));
+            assert!(error.model_scope);
+        }
+        let error = route(credentials, "claude-test", json!({"messages":[{"role":"user","content":"Answer"}],"response_format":{"type":"text"}})).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     #[cfg(windows)]
     #[tokio::test]

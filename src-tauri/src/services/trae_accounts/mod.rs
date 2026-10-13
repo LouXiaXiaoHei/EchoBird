@@ -111,11 +111,14 @@ fn store_path(edition: Edition) -> Result<PathBuf, String> {
 }
 
 fn load(edition: Edition) -> Result<Store, String> {
-    let path = store_path(edition)?;
+    load_at(&store_path(edition)?)
+}
+
+fn load_at(path: &Path) -> Result<Store, String> {
     if !path.exists() {
         return Ok(Store::new());
     }
-    super::cursor_auth::read(&path)
+    super::cursor_auth::read(path)
 }
 
 fn save(edition: Edition, accounts: &Store) -> Result<(), String> {
@@ -278,6 +281,165 @@ fn installed(edition: Edition) -> bool {
     super::tool_manager::get_tool_exe_path(edition.tool()).is_some()
 }
 
+pub(crate) async fn list_saved_accounts(edition: Edition) -> Result<Vec<Account>, String> {
+    let _guard = ACCOUNT_LOCK.lock().await;
+    list_saved_accounts_at(edition, &store_path(edition)?)
+}
+
+fn list_saved_accounts_at(edition: Edition, path: &Path) -> Result<Vec<Account>, String> {
+    Ok(load_at(path)?
+        .into_values()
+        .filter(|saved| saved.account.edition == edition)
+        .map(|mut saved| {
+            saved.account.active = false;
+            saved.account
+        })
+        .collect())
+}
+
+fn proxy_saved_at(edition: Edition, id: &str, path: &Path) -> Result<Saved, String> {
+    load_at(path)?
+        .remove(id)
+        .filter(|saved| saved.account.edition == edition && saved.account.id == id)
+        .ok_or_else(|| "accountError.invalidAccount".into())
+}
+
+pub(crate) async fn proxy_credentials(
+    edition: Edition,
+    id: &str,
+    force_refresh: bool,
+) -> Result<Value, String> {
+    let path = store_path(edition)?;
+    let rejected = if force_refresh {
+        let _guard = ACCOUNT_LOCK.lock().await;
+        let credentials = unprotect(&proxy_saved_at(edition, id, &path)?)?;
+        Some(native::access(&credentials.auth)?.to_owned())
+    } else {
+        None
+    };
+    proxy_credentials_at(edition, id, &path, rejected.as_deref()).await
+}
+
+pub(crate) async fn proxy_credentials_after_rejection(
+    edition: Edition,
+    id: &str,
+    rejected: &Value,
+) -> Result<Value, String> {
+    let token = native::text(rejected, "accessToken").ok_or("accountError.invalidAccount")?;
+    proxy_credentials_at(edition, id, &store_path(edition)?, Some(token)).await
+}
+
+async fn proxy_credentials_at(
+    edition: Edition,
+    id: &str,
+    path: &Path,
+    rejected: Option<&str>,
+) -> Result<Value, String> {
+    let _request = REQUEST_LOCK.lock().await;
+    let previous = {
+        let _guard = ACCOUNT_LOCK.lock().await;
+        unprotect(&proxy_saved_at(edition, id, path)?)?
+    };
+    let mut incoming = previous.clone();
+    let force = rejected_token_is_current(&previous.auth, rejected);
+    let refreshed = oauth::ensure_fresh_with_force(edition, &mut incoming, force).await?;
+    let _guard = ACCOUNT_LOCK.lock().await;
+    let mut accounts = load_at(path)?;
+    let saved = accounts
+        .get_mut(id)
+        .filter(|saved| saved.account.edition == edition && saved.account.id == id)
+        .ok_or("accountError.invalidAccount")?;
+    let mut current = unprotect(saved)?;
+    if refreshed && apply_proxy_refresh(&mut current, &previous, &incoming) {
+        saved.credential = protect(&current)?;
+        super::cursor_auth::write(path, &accounts)?;
+    }
+    proxy_value(edition, &current)
+}
+
+fn apply_proxy_refresh(
+    current: &mut Credentials,
+    previous: &Credentials,
+    incoming: &Credentials,
+) -> bool {
+    if !same_credential_revision(current, previous) {
+        return false;
+    }
+    for field in [
+        "token",
+        "accessToken",
+        "refreshToken",
+        "expiredAt",
+        "refreshExpiredAt",
+        "tokenReleaseAt",
+    ] {
+        if let Some(value) = incoming.auth.get(field) {
+            current.auth[field] = value.clone();
+        }
+    }
+    true
+}
+
+fn same_credential_revision(current: &Credentials, previous: &Credentials) -> bool {
+    native::validate_identity(&current.identity, &previous.identity).is_ok()
+        && current.identity.key_pair.is_some() == previous.identity.key_pair.is_some()
+        && native::access(&current.auth).ok() == native::access(&previous.auth).ok()
+        && native::text(&current.auth, "refreshToken")
+            == native::text(&previous.auth, "refreshToken")
+        && native::timestamp_ms(&current.auth["expiredAt"])
+            == native::timestamp_ms(&previous.auth["expiredAt"])
+        && native::timestamp_ms(&current.auth["refreshExpiredAt"])
+            == native::timestamp_ms(&previous.auth["refreshExpiredAt"])
+        && native::timestamp_ms(&current.auth["tokenReleaseAt"])
+            == native::timestamp_ms(&previous.auth["tokenReleaseAt"])
+        && ["host", "loginHost", "userRegion"]
+            .into_iter()
+            .all(|field| current.auth.get(field) == previous.auth.get(field))
+}
+
+fn forget_authentication(edition: Edition, id: &str) {
+    super::smart_router::forget_account_authentication(
+        match edition {
+            Edition::Trae => crate::models::model::AccountProvider::Trae,
+            Edition::Traecn => crate::models::model::AccountProvider::Traecn,
+        },
+        id,
+    );
+}
+
+fn rejected_token_is_current(auth: &Value, rejected: Option<&str>) -> bool {
+    rejected.is_some_and(|token| native::access(auth).ok() == Some(token))
+}
+
+fn proxy_value(edition: Edition, credentials: &Credentials) -> Result<Value, String> {
+    summary(edition, credentials, false)?;
+    let fallback_region = if edition == Edition::Traecn {
+        "CN"
+    } else {
+        let host = oauth::host(edition, &credentials.auth)?;
+        if host.ends_with(".traeapi.us") {
+            "USTTP"
+        } else if host == "https://growva-normal.trae.ai" {
+            "US"
+        } else {
+            "SG"
+        }
+    };
+    let region = native::text(&credentials.auth["userRegion"], "region")
+        .or_else(|| credentials.auth["userRegion"].as_str())
+        .unwrap_or(fallback_region);
+    let value = serde_json::json!({
+        "accessToken": native::access(&credentials.auth)?,
+        "userId": native::text(&credentials.auth, "userId").ok_or("accountError.invalidAccount")?,
+        "deviceId": credentials.identity.device_id,
+        "machineId": credentials.identity.machine_id,
+        "appVersion": credentials.identity.app_version,
+        "region": region.to_ascii_uppercase(),
+        "edition": edition,
+    });
+    Ok(value)
+}
+
 pub async fn list_accounts(edition: Edition) -> Result<Vec<Account>, String> {
     let _guard = ACCOUNT_LOCK.lock().await;
     let dir = installed(edition)
@@ -342,6 +504,7 @@ pub async fn poll_login(id: &str) -> Result<Option<Account>, String> {
         let mut accounts = load(edition)?;
         let account = capture(edition, &credentials, &mut accounts)?;
         save(edition, &accounts)?;
+        forget_authentication(edition, &account.id);
         Ok(Some(account))
     })
 }
@@ -413,13 +576,19 @@ async fn persist(edition: Edition, mut saved: Saved) -> Result<Account, String> 
         .ok_or("accountError.cancelled")?;
     let existing_credentials = unprotect(existing)?;
     let incoming_credentials = unprotect(&saved)?;
-    if !accept_incoming(&existing_credentials, &incoming_credentials)? {
+    let accepted = accept_incoming(&existing_credentials, &incoming_credentials)?;
+    let changed =
+        accepted && !same_credential_revision(&existing_credentials, &incoming_credentials);
+    if !accepted {
         saved.credential = existing.credential.clone();
         saved.account.name = existing.account.name.clone();
     }
     let account = saved.account.clone();
     accounts.insert(account.id.clone(), saved);
     save(edition, &accounts)?;
+    if changed {
+        forget_authentication(edition, &account.id);
+    }
     Ok(account)
 }
 
@@ -497,6 +666,7 @@ pub async fn activate_account(edition: Edition, id: &str) -> Result<(), String> 
         save(edition, &accounts)?;
     }
     let mut credentials = unprotect(accounts.get(id).ok_or("accountError.cancelled")?)?;
+    let previous = credentials.clone();
     let current_identity = native::login_identity(&dir, edition)?;
     native::validate_identity(&current_identity, &credentials.identity)?;
     credentials.identity.app_version = current_identity.app_version;
@@ -506,6 +676,9 @@ pub async fn activate_account(edition: Edition, id: &str) -> Result<(), String> 
         .ok_or("accountError.cancelled")?
         .credential = protect(&credentials)?;
     save(edition, &accounts)?;
+    if !same_credential_revision(&previous, &credentials) {
+        forget_authentication(edition, id);
+    }
     native::apply(&dir, &credentials)
 }
 
@@ -559,6 +732,153 @@ fn business_error(code: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn proxy_saved_directory_reads_only_saved_metadata_and_keeps_regions_separate() {
+        let dir =
+            std::env::temp_dir().join(format!("echobird-trae-proxy-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("accounts.json");
+        assert!(list_saved_accounts_at(Edition::Trae, &path)
+            .unwrap()
+            .is_empty());
+        assert!(!dir.exists());
+        let mut cn = summary(Edition::Traecn, &credentials("CN"), true).unwrap();
+        cn.plan = Some("Free".into());
+        cn.remaining = Some(150.0);
+        let global = summary(Edition::Trae, &credentials("SG"), true).unwrap();
+        let accounts = Store::from([
+            (
+                cn.id.clone(),
+                Saved {
+                    account: cn.clone(),
+                    credential: "not-decrypted".into(),
+                },
+            ),
+            (
+                global.id.clone(),
+                Saved {
+                    account: global.clone(),
+                    credential: "not-decrypted".into(),
+                },
+            ),
+        ]);
+        super::super::cursor_auth::write(&path, &accounts).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let rows = list_saved_accounts_at(Edition::Traecn, &path).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, cn.id);
+        assert_eq!(rows[0].plan, cn.plan);
+        assert_eq!(rows[0].remaining, cn.remaining);
+        assert!(!rows[0].active);
+        assert_eq!(
+            list_saved_accounts_at(Edition::Trae, &path).unwrap()[0].id,
+            global.id
+        );
+        assert!(proxy_saved_at(Edition::Trae, &cn.id, &path).is_err());
+        assert!(proxy_saved_at(Edition::Traecn, &cn.id, &path).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        super::super::cursor_auth::write(&path, &Store::new()).unwrap();
+        assert!(proxy_saved_at(Edition::Traecn, &cn.id, &path).is_err());
+        assert!(list_saved_accounts_at(Edition::Traecn, &path)
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn proxy_values_restrict_secrets_and_derive_the_saved_region() {
+        let mut current = credentials("CN");
+        current.identity.key_pair = Some(native::KeyPair {
+            private_key: "fixture-private".into(),
+            public_key: "fixture-public".into(),
+        });
+        let value = proxy_value(Edition::Traecn, &current).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        assert_eq!(value["accessToken"], "fixture-token");
+        assert_eq!(value["edition"], "traecn");
+        assert_eq!(value["region"], "CN");
+        assert!(!value.to_string().contains("fixture-refresh"));
+        assert!(!value.to_string().contains("fixture-private"));
+        assert!(!value.to_string().contains("fixture-public"));
+        assert!(proxy_value(Edition::Trae, &current).is_err());
+        current.auth.as_object_mut().unwrap().remove("userRegion");
+        current.auth["host"] = "https://grow-normal.traeapi.us".into();
+        assert_eq!(
+            proxy_value(Edition::Trae, &current).unwrap()["region"],
+            "USTTP"
+        );
+        current.auth["host"] = "https://growva-normal.trae.ai".into();
+        assert_eq!(
+            proxy_value(Edition::Trae, &current).unwrap()["region"],
+            "US"
+        );
+        current.auth["userRegion"] = json!({"region":"SG"});
+        assert_eq!(
+            proxy_value(Edition::Trae, &current).unwrap()["region"],
+            "SG"
+        );
+        assert!(proxy_value(Edition::Traecn, &current).is_err());
+    }
+
+    #[test]
+    fn proxy_rejection_refresh_skips_an_already_rotated_token() {
+        let mut current = credentials("CN");
+        assert!(!rejected_token_is_current(&current.auth, None));
+        assert!(rejected_token_is_current(
+            &current.auth,
+            Some("fixture-token")
+        ));
+        current.auth["token"] = "rotated-token".into();
+        assert!(!rejected_token_is_current(
+            &current.auth,
+            Some("fixture-token")
+        ));
+        assert!(rejected_token_is_current(
+            &current.auth,
+            Some("rotated-token")
+        ));
+    }
+
+    #[test]
+    fn proxy_refresh_preserves_newer_tokens_and_current_profile_fields() {
+        let mut previous = credentials("CN");
+        previous.auth["expiredAt"] = "2030-01-01T00:00:00Z".into();
+        let mut incoming = previous.clone();
+        incoming.auth["token"] = "rotated-access".into();
+        incoming.auth["refreshToken"] = "rotated-refresh".into();
+        incoming.auth["expiredAt"] = "2030-02-01T00:00:00Z".into();
+        let mut current = previous.clone();
+        current.auth["account"]["username"] = "current-name".into();
+        current.identity.app_version = "current-version".into();
+        assert!(same_credential_revision(&current, &previous));
+        assert!(!same_credential_revision(&incoming, &previous));
+        assert!(apply_proxy_refresh(&mut current, &previous, &incoming));
+        assert_eq!(current.auth["token"], "rotated-access");
+        assert_eq!(current.auth["account"]["username"], "current-name");
+        assert_eq!(current.identity.app_version, "current-version");
+        for (field, value) in [
+            ("token", incoming.auth["token"].clone()),
+            ("refreshToken", incoming.auth["refreshToken"].clone()),
+            ("expiredAt", incoming.auth["expiredAt"].clone()),
+            ("host", json!("https://grow-normal.traeapi.us")),
+            ("loginHost", json!("https://growva-normal.trae.ai")),
+            ("userRegion", json!({"region":"US"})),
+        ] {
+            let mut newer = previous.clone();
+            newer.auth[field] = value;
+            let before = serde_json::to_value(&newer).unwrap();
+            assert!(!same_credential_revision(&newer, &previous));
+            assert!(!apply_proxy_refresh(&mut newer, &previous, &incoming));
+            assert_eq!(serde_json::to_value(newer).unwrap(), before);
+        }
+        let mut other_device = previous.clone();
+        other_device.identity.device_id = "new-device".into();
+        assert!(!apply_proxy_refresh(
+            &mut other_device,
+            &previous,
+            &incoming
+        ));
+    }
 
     fn credentials(region: &str) -> Credentials {
         Credentials {

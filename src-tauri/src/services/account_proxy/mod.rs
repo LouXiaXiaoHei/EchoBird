@@ -5,6 +5,7 @@ mod protocol;
 mod providers;
 mod responses;
 mod tools;
+mod trae;
 
 use axum::{
     body::Body,
@@ -115,7 +116,9 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if provider == AccountProvider::ClaudeCode {
+    if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
+        trae::route(provider, credentials, model, body, client).await
+    } else if provider == AccountProvider::ClaudeCode {
         bridge::route(credentials, model, body).await
     } else {
         providers::route(provider, credentials, model, body, client).await
@@ -137,7 +140,9 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if provider == AccountProvider::ClaudeCode {
+    if matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
+        trae::list_models(provider, credentials, client).await
+    } else if provider == AccountProvider::ClaudeCode {
         bridge::list_models(credentials).await
     } else {
         providers::list_models(provider, credentials, client).await

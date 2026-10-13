@@ -1,6 +1,6 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -61,7 +61,20 @@ pub(super) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .ok_or_else(|| io::Error::other("cache has no parent"))?;
     std::fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".ai-career-{}.tmp", uuid::Uuid::new_v4()));
-    let result = std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
     }
@@ -94,6 +107,45 @@ mod tests {
         assert_eq!(std::fs::read(&blocked).unwrap(), b"old cache");
         assert_eq!(read::<u64>(&path), entries);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_replacement_preserves_existing_path_and_removes_temporary_file() {
+        let dir = std::env::temp_dir().join(format!("echobird-cache-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("cache.json");
+        std::fs::create_dir_all(&path).unwrap();
+        let previous = path.join("previous.json");
+        std::fs::write(&previous, b"previous cache").unwrap();
+
+        assert!(replace(&path, b"new cache").is_err());
+        assert_eq!(std::fs::read(previous).unwrap(), b"previous cache");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_replacement_is_private_even_when_previous_cache_was_public() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("echobird-cache-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cache.json");
+        std::fs::write(&path, b"old cache").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        replace(&path, b"private cache").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"private cache");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

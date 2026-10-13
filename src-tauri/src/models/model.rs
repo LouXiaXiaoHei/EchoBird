@@ -36,6 +36,8 @@ pub enum AccountProvider {
     Antigravity,
     Copilot,
     Kilo,
+    Trae,
+    Traecn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

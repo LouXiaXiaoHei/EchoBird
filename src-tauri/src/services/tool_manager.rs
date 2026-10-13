@@ -2618,6 +2618,80 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn trae_registry_detection_keeps_regional_editions_separate() {
+        for (catalog, display_name, other_name) in [
+            (
+                include_str!("../../../tools/trae/paths.json"),
+                "trae",
+                "trae cn",
+            ),
+            (
+                include_str!("../../../tools/traecn/paths.json"),
+                "trae cn",
+                "trae",
+            ),
+        ] {
+            let definition: PathsConfig = serde_json::from_str(catalog).unwrap();
+            let hints = definition.install_hints.unwrap();
+            let names: Vec<_> = hints
+                .windows_display_names
+                .iter()
+                .map(|name| name.to_lowercase())
+                .collect();
+            assert!(registry_display_name_matches(display_name, &names, &[]));
+            assert!(!registry_display_name_matches(other_name, &names, &[]));
+            assert!(!registry_display_name_matches("trae solo", &names, &[]));
+            assert!(!registry_display_name_matches("traework", &names, &[]));
+        }
+    }
+
+    #[tokio::test]
+    async fn trae_bundle_detection_uses_native_metadata_and_rejects_leftover_data() {
+        let root = std::env::temp_dir().join(format!("trae-bundle-{}", uuid::Uuid::new_v4()));
+        for catalog in [
+            include_str!("../../../tools/trae/paths.json"),
+            include_str!("../../../tools/traecn/paths.json"),
+        ] {
+            let mut definition: PathsConfig = serde_json::from_str(catalog).unwrap();
+            assert_eq!(
+                super::parse_category(&definition.category),
+                ToolCategory::Desktop
+            );
+            assert!(definition.command.is_empty());
+            let bundle = root.join(format!("User Applications/{}.app", definition.name));
+            let executable = bundle.join("Contents/MacOS").join("Electron");
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(&executable, b"fixture").unwrap();
+            let mut info = plist::Dictionary::new();
+            info.insert("CFBundleExecutable".into(), "Electron".into());
+            plist::Value::Dictionary(info)
+                .to_file_binary(bundle.join("Contents/Info.plist"))
+                .unwrap();
+            assert_eq!(
+                super::resolve_install_directory(
+                    &bundle,
+                    definition.paths.darwin.as_ref().unwrap()
+                ),
+                Some(executable.to_string_lossy().into_owned())
+            );
+            let paths = vec![bundle.to_string_lossy().into_owned()];
+            definition.paths.win32 = Some(paths.clone());
+            definition.paths.darwin = Some(paths.clone());
+            definition.paths.linux = Some(paths);
+            definition.install_hints = None;
+            definition.config_dir = root.join("saved-data").to_string_lossy().into_owned();
+            std::fs::create_dir_all(&definition.config_dir).unwrap();
+            let expected = Some(executable.to_string_lossy().into_owned());
+            assert_eq!(super::find_tool_executable(&definition, false), expected);
+            assert_eq!(super::detect_tool(&definition).await, expected);
+            std::fs::remove_file(executable).unwrap();
+            assert!(super::find_tool_executable(&definition, true).is_none());
+            assert!(super::detect_tool(&definition).await.is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn workbuddy_bundle_metadata_drives_detection_and_launch() {
         let root = std::env::temp_dir().join(format!("workbuddy-bundle-{}", uuid::Uuid::new_v4()));

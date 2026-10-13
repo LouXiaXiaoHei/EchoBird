@@ -638,11 +638,12 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         });
         if (!ok) return;
         await deleteStoredConversation(id, async () => {
-          await api.resetAgent(conversation.sessionKey);
           const legacy = conversation.id.startsWith('legacy-');
-          if (!legacy || conversation.serverId === 'local') {
-            await api.parasiteReset('claudecode', legacy ? undefined : conversation.sessionKey);
-          }
+          await api.resetConversationContext(
+            conversation.sessionKey,
+            !legacy || conversation.serverId === 'local',
+            legacy ? undefined : conversation.sessionKey
+          );
         });
         if (id === activeConversationId) setChatInput('');
       } catch (e) {

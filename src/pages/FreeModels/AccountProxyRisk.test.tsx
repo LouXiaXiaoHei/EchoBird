@@ -100,13 +100,13 @@ async function acknowledge(checked: boolean) {
 }
 function expectLocked() {
   expect(checkbox().props.checked).toBe(false);
-  expect(rows()).toHaveLength(7);
+  expect(rows()).toHaveLength(accountApi.accountProxyProviders.length);
   expect(rows().every((row) => row.props.disabled === true)).toBe(true);
   expect(plus().props.disabled).toBe(true);
 }
 function expectUnlocked() {
   expect(checkbox().props.checked).toBe(true);
-  expect(rows()).toHaveLength(7);
+  expect(rows()).toHaveLength(accountApi.accountProxyProviders.length);
   expect(rows().every((row) => !row.props.disabled)).toBe(true);
   expect(plus().props.disabled).toBeFalsy();
 }

@@ -155,6 +155,38 @@ describe('daily activity chart', () => {
     expect(columns[29].props['aria-label']).toBe('Mar 2, 2028 · 0 messages');
   });
 
+  it('advances the local calendar on a post-midnight render even when buckets keep their identity', () => {
+    vi.setSystemTime(new Date(2026, 2, 2, 23, 59));
+    const data = buckets([
+      ['2026-03-02', 4],
+      ['2026-03-03', 7],
+    ]);
+    render(data);
+    expect(renderer.root.findAllByProps({ role: 'img' })[29].props['aria-label']).toBe(
+      'Mar 2, 2026 · 4 messages'
+    );
+    const reads = vi.mocked(api.aiCareerDailyTokens).mock.calls.length;
+    vi.setSystemTime(new Date(2026, 2, 3, 0, 1));
+    act(() =>
+      renderer.update(
+        <DailyActivityChart
+          {...chartProps(data, {
+            metric: 'tokens',
+            tokenDays: new Map([['2026-03-03', { input: 20, output: 5 }]]),
+          })}
+        />
+      )
+    );
+    const columns = renderer.root.findAllByProps({ role: 'img' });
+    expect(columns[0].props['aria-label']).toContain('Feb 2, 2026');
+    expect(columns[29].props['aria-label']).toBe('Mar 3, 2026 · Input 20 · Output 5 · Total 25');
+    act(() => renderer.update(<DailyActivityChart {...chartProps(data)} />));
+    expect(renderer.root.findAllByProps({ role: 'img' })[29].props['aria-label']).toBe(
+      'Mar 3, 2026 · 7 messages'
+    );
+    expect(api.aiCareerDailyTokens).toHaveBeenCalledTimes(reads);
+  });
+
   it('keeps zero days focusable and uses zero counts without data', () => {
     const columns = render(buckets());
     expect(columns.every((column) => column.props['aria-label'].endsWith('0 messages'))).toBe(true);

@@ -40,7 +40,9 @@ export type AccountProvider =
   | 'workBuddyAi'
   | 'antigravity'
   | 'copilot'
-  | 'kilo';
+  | 'kilo'
+  | 'trae'
+  | 'traecn';
 
 export interface AccountSource {
   provider: AccountProvider;

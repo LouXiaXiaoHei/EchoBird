@@ -216,6 +216,8 @@ export type TKey =
   | 'freeModels.tab.account'
   | 'accountProxy.provider'
   | 'accountProxy.account'
+  | 'accountProxy.accountCountOne'
+  | 'accountProxy.accountCountOther'
   | 'accountProxy.selectRequired'
   | 'accountProxy.riskReadPrefix'
   | 'accountProxy.riskNotice'

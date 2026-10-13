@@ -7,8 +7,7 @@ import { localDayKey, type DayBuckets } from './heatmapData';
 const CHART_DAYS = 30;
 const LABEL_DAYS = new Set([0, 7, 14, 21, CHART_DAYS - 1]);
 
-function chartDays(buckets: DayBuckets) {
-  const today = new Date();
+function chartDays(buckets: DayBuckets, today: Date) {
   today.setHours(0, 0, 0, 0);
   return Array.from({ length: CHART_DAYS }, (_, i) => {
     const date = new Date(today);
@@ -41,7 +40,8 @@ export function DailyActivityChart({
 }) {
   const { t, locale } = useI18n();
   const chartId = useId();
-  const days = useMemo(() => chartDays(buckets), [buckets]);
+  const today = localDayKey(new Date());
+  const days = useMemo(() => chartDays(buckets, new Date(`${today}T00:00:00`)), [buckets, today]);
   const max = Math.max(
     1,
     ...days.map((day) => {

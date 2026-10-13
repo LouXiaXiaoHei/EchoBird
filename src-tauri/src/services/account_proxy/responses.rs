@@ -45,7 +45,7 @@ pub fn responses_to_chat(input: &Value) -> Result<Value, ProxyError> {
                             parts.push(match part["type"].as_str().unwrap_or_default() {
                                 "input_text"|"output_text"|"text"=>json!({"type":"text","text":part["text"]}),
                                 "input_image"=>json!({"type":"image_url","image_url":{"url":part["image_url"],"detail":part.get("detail").cloned().unwrap_or(json!("auto"))}}),
-                                "input_file"=>part.clone(),
+                                "input_file"=>return Err(ProxyError::new(StatusCode::BAD_REQUEST,"File inputs require a native Responses model")),
                                 _=>return Err(ProxyError::new(StatusCode::BAD_REQUEST,"Unsupported Responses content type")),
                             });
                         }
@@ -63,11 +63,39 @@ pub fn responses_to_chat(input: &Value) -> Result<Value, ProxyError> {
                     } else {
                         item["arguments"].as_str().unwrap_or_default().to_string()
                     };
-                    messages.push(json!({"role":"assistant","content":null,"tool_calls":[{"id":item["call_id"],"type":"function","function":{"name":name,"arguments":arguments}}]}));
+                    let call = json!({"id":item["call_id"],"type":"function","function":{"name":name,"arguments":arguments}});
+                    if let Some(message) = messages
+                        .last_mut()
+                        .filter(|message| message["role"] == "assistant")
+                    {
+                        let calls = message
+                            .as_object_mut()
+                            .expect("constructed message")
+                            .entry("tool_calls")
+                            .or_insert_with(|| json!([]));
+                        calls
+                            .as_array_mut()
+                            .expect("constructed tool calls")
+                            .push(call);
+                    } else {
+                        messages
+                            .push(json!({"role":"assistant","content":null,"tool_calls":[call]}));
+                    }
                 }
-                "function_call_output" | "custom_tool_call_output" => messages.push(
-                    json!({"role":"tool","tool_call_id":item["call_id"],"content":item["output"]}),
-                ),
+                "function_call_output" | "custom_tool_call_output" => {
+                    if item["output"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|part| part["type"] == "input_file")
+                    {
+                        return Err(ProxyError::new(
+                            StatusCode::BAD_REQUEST,
+                            "File inputs require a native Responses model",
+                        ));
+                    }
+                    messages.push(json!({"role":"tool","tool_call_id":item["call_id"],"content":item["output"]}));
+                }
                 "reasoning" | "additional_tools" => {}
                 _ => {
                     return Err(ProxyError::new(
@@ -86,15 +114,42 @@ pub fn responses_to_chat(input: &Value) -> Result<Value, ProxyError> {
     let tools = tools::chat_tools(&catalog);
     let mut output = json!({"model":input["model"],"messages":messages,"tools":tools,"stream":input["stream"].as_bool().unwrap_or(false)});
     output[RESPONSES_REQUEST] = input.clone();
-    for key in [
-        "temperature",
-        "top_p",
-        "parallel_tool_calls",
-        "reasoning",
-        "text",
-    ] {
+    for key in ["temperature", "top_p", "parallel_tool_calls", "reasoning"] {
         if let Some(value) = input.get(key) {
             output[key] = value.clone();
+        }
+    }
+    if let Some(text) = input.get("text").filter(|text| !text.is_null()) {
+        let text = text.as_object().ok_or_else(|| {
+            ProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "Responses text options must be an object",
+            )
+        })?;
+        if text
+            .iter()
+            .any(|(key, value)| key != "format" && !value.is_null())
+        {
+            return Err(ProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "These Responses text options require a native Responses model",
+            ));
+        }
+        if let Some(format) = text.get("format").filter(|format| !format.is_null()) {
+            output["response_format"] = match format["type"].as_str() {
+                Some("text" | "json_object") => format.clone(),
+                Some("json_schema") => {
+                    let mut schema = format.as_object().expect("format type field").clone();
+                    schema.remove("type");
+                    json!({"type":"json_schema","json_schema":schema})
+                }
+                _ => {
+                    return Err(ProxyError::new(
+                        StatusCode::BAD_REQUEST,
+                        "Unsupported Responses text format",
+                    ))
+                }
+            };
         }
     }
     if let Some(value) = input.get("max_output_tokens") {
@@ -477,6 +532,18 @@ fn stream_failure(error: &(dyn std::error::Error + 'static)) -> ProxyError {
     ProxyError::new(StatusCode::BAD_GATEWAY, error.to_string())
 }
 
+fn failure_chunk(
+    encoder: &mut Encoder,
+    started: bool,
+    error: ProxyError,
+) -> Result<Bytes, std::io::Error> {
+    if started {
+        Ok(encoder.failed(&error))
+    } else {
+        Err(std::io::Error::other(error))
+    }
+}
+
 /// Convert router output for native Responses clients without losing function calls.
 pub async fn chat_to_responses(response: Response, stream: bool) -> Response {
     chat_to_responses_with_tools(response, stream, &Value::Null).await
@@ -497,7 +564,7 @@ pub async fn chat_to_responses_with_tools(
         let bytes = match to_bytes(body, 32 * 1024 * 1024).await {
             Ok(bytes) => bytes,
             Err(error) => {
-                return routed_headers(conversion_error(&error.to_string()), &parts.headers)
+                return routed_headers(stream_failure(&error).into_response(), &parts.headers)
             }
         };
         let data = match serde_json::from_slice::<Value>(&bytes) {
@@ -530,27 +597,40 @@ pub async fn chat_to_responses_with_tools(
     tokio::spawn(async move {
         let mut upstream = body.into_data_stream();
         let mut parser = SseParser::default();
-        if tx.send(Ok(encoder.created())).await.is_err() {
-            return;
-        }
+        let mut created = Some(encoder.created());
         loop {
             let next = tokio::select! { _=tx.closed()=>return,next=upstream.next()=>next };
             let eof = next.is_none();
             let frames = match next {
                 Some(Ok(bytes)) => parser.push(&bytes),
                 Some(Err(error)) => {
-                    let _ = tx.send(Ok(encoder.failed(&stream_failure(&error)))).await;
+                    let _ = tx
+                        .send(failure_chunk(
+                            &mut encoder,
+                            created.is_none(),
+                            stream_failure(&error),
+                        ))
+                        .await;
                     return;
                 }
                 None => parser.finish(),
             };
             for (event, data) in frames {
                 if let Some(error) = super::stream_error(&event, &data, &response_headers) {
-                    let _ = tx.send(Ok(encoder.failed(&error))).await;
+                    let _ = tx
+                        .send(failure_chunk(&mut encoder, created.is_none(), error))
+                        .await;
                     return;
                 }
                 match encoder.decode(&data) {
                     Ok(chunks) => {
+                        if !chunks.is_empty() {
+                            if let Some(created) = created.take() {
+                                if tx.send(Ok(created)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
                         for chunk in chunks {
                             if tx.send(Ok(chunk)).await.is_err() {
                                 return;
@@ -559,7 +639,9 @@ pub async fn chat_to_responses_with_tools(
                     }
                     Err(error) => {
                         let error = ProxyError::new(StatusCode::BAD_GATEWAY, error);
-                        let _ = tx.send(Ok(encoder.failed(&error))).await;
+                        let _ = tx
+                            .send(failure_chunk(&mut encoder, created.is_none(), error))
+                            .await;
                         return;
                     }
                 }
@@ -569,10 +651,14 @@ pub async fn chat_to_responses_with_tools(
             }
             if eof {
                 let _ = tx
-                    .send(Ok(encoder.failed(&ProxyError::new(
-                        StatusCode::BAD_GATEWAY,
-                        "Router stream ended before completion",
-                    ))))
+                    .send(failure_chunk(
+                        &mut encoder,
+                        created.is_none(),
+                        ProxyError::new(
+                            StatusCode::BAD_GATEWAY,
+                            "Router stream ended before completion",
+                        ),
+                    ))
                     .await;
                 return;
             }
@@ -610,6 +696,95 @@ mod tests {
         json!({"model":"auto","stream":true,"tools":[{"type":"custom","name":"apply_patch","description":"Patch files","format":{"type":"grammar","syntax":"lark","definition":"start: patch\npatch: PATCH\nPATCH: /[\\s\\S]+/"}},
             {"type":"namespace","name":"mcp__pad","tools":[{"type":"custom","name":"write","format":{"type":"text"}}]}],
             "input":[{"type":"custom_tool_call","call_id":"old","name":"apply_patch","input":"*** Begin Patch\n*** End Patch"},{"type":"custom_tool_call_output","call_id":"old","output":"ok"}]})
+    }
+
+    #[test]
+    fn parallel_function_and_custom_history_share_one_assistant_tool_round() {
+        let input = json!({"model":"auto","tools":[{"type":"function","name":"read","parameters":{"type":"object"}},{"type":"custom","name":"write","format":{"type":"text"}}],
+            "input":[{"role":"assistant","content":"Checking both files"},
+                {"type":"function_call","call_id":"a","name":"read","arguments":"{}"},
+                {"type":"reasoning","summary":[]},
+                {"type":"custom_tool_call","call_id":"b","name":"write","input":"patch"},
+                {"type":"function_call_output","call_id":"a","output":"read-result"},
+                {"type":"custom_tool_call_output","call_id":"b","output":"write-result"},
+                {"role":"user","content":"Continue"},
+                {"type":"function_call","call_id":"c","name":"read","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c","output":"last-result"}]});
+        let chat = responses_to_chat(&input).unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 6);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "Checking both files");
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "a");
+        assert_eq!(calls[1]["id"], "b");
+        assert_eq!(calls[1]["function"]["arguments"], "{\"input\":\"patch\"}");
+        assert_eq!(messages[1]["tool_call_id"], "a");
+        assert_eq!(messages[2]["tool_call_id"], "b");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[4]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[4]["tool_calls"][0]["id"], "c");
+        assert_eq!(messages[5]["tool_call_id"], "c");
+        assert_eq!(
+            super::super::protocol::chat_to_responses(&chat, "native")["input"],
+            input["input"]
+        );
+    }
+
+    #[test]
+    fn structured_text_formats_map_to_chat_without_losing_schema_constraints() {
+        for (format, expected) in [
+            (json!({"type":"text"}), json!({"type":"text"})),
+            (json!({"type":"json_object"}), json!({"type":"json_object"})),
+            (
+                json!({"type":"json_schema","name":"answer","description":"Answer schema","schema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false},"strict":true}),
+                json!({"type":"json_schema","json_schema":{"name":"answer","description":"Answer schema","schema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false},"strict":true}}),
+            ),
+        ] {
+            let input = json!({"model":"auto","input":"Answer","text":{"format":format}});
+            let chat = responses_to_chat(&input).unwrap();
+            assert_eq!(chat["response_format"], expected);
+            assert!(chat.get("text").is_none());
+            assert_eq!(
+                super::super::protocol::chat_to_responses(&chat, "native")["text"],
+                input["text"]
+            );
+        }
+        for text in [
+            json!({"format":{"type":"unsupported"}}),
+            json!({"format":{"type":"text"},"verbosity":"low"}),
+            json!("invalid"),
+        ] {
+            let error = responses_to_chat(&json!({"input":"Answer","text":text})).unwrap_err();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+        let plain = responses_to_chat(&json!({"input":"Answer"})).unwrap();
+        assert!(plain.get("response_format").is_none());
+    }
+
+    #[test]
+    fn compatibility_conversion_rejects_file_inputs_and_file_tool_outputs() {
+        for part in [
+            json!({"type":"input_file","file_id":"file_fixture"}),
+            json!({"type":"input_file","file_url":"https://example.com/file.pdf"}),
+            json!({"type":"input_file","filename":"file.pdf","file_data":"data:application/pdf;base64,fixture"}),
+        ] {
+            for item in [
+                json!({"role":"user","content":[{"type":"input_text","text":"Summarize"},part]}),
+                json!({"type":"function_call_output","call_id":"call_fixture","output":[part]}),
+                json!({"type":"custom_tool_call_output","call_id":"call_fixture","output":[part]}),
+            ] {
+                let error = responses_to_chat(&json!({"input":[item]})).unwrap_err();
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    error.message,
+                    "File inputs require a native Responses model"
+                );
+            }
+        }
+        let image = responses_to_chat(&json!({"input":[{"role":"user","content":[{"type":"input_text","text":"Describe"},{"type":"input_image","image_url":"data:image/png;base64,fixture"}]}]})).unwrap();
+        assert_eq!(image["messages"][0]["content"][1]["type"], "image_url");
     }
 
     #[test]
@@ -863,24 +1038,111 @@ mod tests {
                     StatusCode::BAD_GATEWAY
                 }
             );
-            let bytes = to_bytes(converted.into_body(), 1024 * 1024).await.unwrap();
             if stream {
-                let mut parser = SseParser::default();
-                let events = parser.push(&bytes);
-                assert!(!events
-                    .iter()
-                    .any(|(event, _)| event == "response.completed"));
-                let failed = events
-                    .iter()
-                    .find(|(event, _)| event == "response.failed")
-                    .unwrap();
-                let value: Value = serde_json::from_str(&failed.1).unwrap();
-                assert_eq!(value["response"]["error"]["message"], "Quota exhausted");
+                let mut upstream = converted.into_body().into_data_stream();
+                let error = stream_failure(&upstream.next().await.unwrap().unwrap_err());
+                assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(error.error_code.as_deref(), Some("rate_limit_exceeded"));
+                assert_eq!(error.message, "Quota exhausted");
+                assert!(upstream.next().await.is_none());
             } else {
+                let bytes = to_bytes(converted.into_body(), 1024 * 1024).await.unwrap();
                 let value: Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(value["error"]["message"], "Quota exhausted");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn early_body_failures_preserve_typed_status_scope_and_retry_without_creation() {
+        for stream in [false, true] {
+            for status in [
+                StatusCode::UNAUTHORIZED,
+                StatusCode::PAYMENT_REQUIRED,
+                StatusCode::TOO_MANY_REQUESTS,
+            ] {
+                let mut error = ProxyError::new(status, "fixture refusal");
+                error.error_code = Some("fixture_code".into());
+                error.error_type = Some("fixture_type".into());
+                error.model_scope = status == StatusCode::PAYMENT_REQUIRED;
+                error.retry_after = Some(axum::http::HeaderValue::from_static("17"));
+                let body = Body::from_stream(futures_util::stream::iter([
+                    Ok(Bytes::from_static(
+                        b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1}}\n\n",
+                    )),
+                    Err(std::io::Error::other(error.clone())),
+                ]));
+                let response = Response::builder()
+                    .header("X-EchoBird-Routed-Via", "fixture-account")
+                    .body(body)
+                    .unwrap();
+                let converted = chat_to_responses(response, stream).await;
+                assert_eq!(
+                    converted.headers()["X-EchoBird-Routed-Via"],
+                    "fixture-account"
+                );
+                if stream {
+                    let mut output = converted.into_body().into_data_stream();
+                    let recovered = stream_failure(&output.next().await.unwrap().unwrap_err());
+                    assert_eq!(recovered.status, status);
+                    assert_eq!(recovered.error_code, error.error_code);
+                    assert_eq!(recovered.error_type, error.error_type);
+                    assert_eq!(recovered.model_scope, error.model_scope);
+                    assert_eq!(recovered.retry_after, error.retry_after);
+                    assert!(output.next().await.is_none());
+                } else {
+                    assert_eq!(converted.status(), status);
+                    assert_eq!(converted.headers()["retry-after"], "17");
+                    assert_eq!(
+                        converted
+                            .extensions()
+                            .get::<super::super::ProxyFailureMetadata>()
+                            .unwrap()
+                            .model_scope,
+                        error.model_scope
+                    );
+                    let bytes = to_bytes(converted.into_body(), 1024 * 1024).await.unwrap();
+                    let value: Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(value["error"]["code"], "fixture_code");
+                    assert_eq!(value["error"]["type"], "fixture_type");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn body_failure_after_output_emits_failed_with_typed_details_and_ordered_events() {
+        let mut error = ProxyError::new(StatusCode::PAYMENT_REQUIRED, "fixture plan refusal");
+        error.error_code = Some("fixture_plan".into());
+        error.error_type = Some("plan_required".into());
+        error.model_scope = true;
+        error.retry_after = Some(axum::http::HeaderValue::from_static("19"));
+        let body = Body::from_stream(futures_util::stream::iter([
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n",
+            )),
+            Err(std::io::Error::other(error)),
+        ]));
+        let converted = chat_to_responses(Response::new(body), true).await;
+        let bytes = to_bytes(converted.into_body(), 1024 * 1024).await.unwrap();
+        let frames = SseParser::default().push(&bytes);
+        assert_eq!(frames.first().unwrap().0, "response.created");
+        assert!(frames
+            .iter()
+            .any(|(event, _)| event == "response.output_text.delta"));
+        assert!(!frames
+            .iter()
+            .any(|(event, _)| event == "response.completed"));
+        for (sequence, (_, data)) in frames.iter().enumerate() {
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(value["sequence_number"], sequence as u64);
+        }
+        let failed: Value = serde_json::from_str(&frames.last().unwrap().1).unwrap();
+        assert_eq!(failed["type"], "response.failed");
+        assert_eq!(
+            failed["response"]["error"],
+            json!({"code":"fixture_plan","type":"plan_required","message":"fixture plan refusal","status":402,"scope":"model","retry_after":"19"})
+        );
     }
 
     #[tokio::test]

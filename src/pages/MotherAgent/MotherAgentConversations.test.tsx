@@ -20,6 +20,7 @@ vi.mock('../../api/tauri', () => ({
   sendAgentMessage: vi.fn(),
   abortAgent: vi.fn(),
   resetAgent: vi.fn(),
+  resetConversationContext: vi.fn(),
   parasiteSendMessage: vi.fn(),
   parasiteAbort: vi.fn(),
   parasiteReset: vi.fn(),
@@ -133,6 +134,7 @@ beforeEach(() => {
   vi.mocked(api.sendAgentMessage).mockResolvedValue('ok');
   vi.mocked(api.abortAgent).mockResolvedValue(true);
   vi.mocked(api.resetAgent).mockResolvedValue('ok');
+  vi.mocked(api.resetConversationContext).mockResolvedValue('ok');
   vi.mocked(api.parasiteSendMessage).mockResolvedValue(undefined);
   vi.mocked(api.parasiteAbort).mockResolvedValue(true);
   vi.mocked(api.parasiteReset).mockResolvedValue(undefined);
@@ -262,7 +264,7 @@ describe('Mother Agent reasoning workflow', () => {
     await mount();
     act(() => state.setReasoningEffort('max'));
     const reset = deferred<string>();
-    vi.mocked(api.resetAgent).mockReturnValueOnce(reset.promise);
+    vi.mocked(api.resetConversationContext).mockReturnValueOnce(reset.promise);
     await act(async () => {
       void state.deleteConversation(state.activeConversationId);
     });
@@ -353,8 +355,13 @@ describe('Mother Agent saved conversation workflow', () => {
       await state.deleteConversation(deleted);
     });
     expect(confirm).toHaveBeenCalledOnce();
-    expect(api.resetAgent).toHaveBeenCalledExactlyOnceWith(deletedKey);
-    expect(api.parasiteReset).toHaveBeenCalledExactlyOnceWith('claudecode', deletedKey);
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith(
+      deletedKey,
+      true,
+      deletedKey
+    );
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
     expect(state.activeConversationId).toBe(current);
     expect(state.chatOutput).toEqual(messages);
     expect(state.chatInput).toBe('Keep current draft');
@@ -386,6 +393,7 @@ describe('Mother Agent saved conversation workflow', () => {
     expect(state.isProcessing).toBe(false);
     expect(state.conversations).toHaveLength(1);
     expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.resetConversationContext).not.toHaveBeenCalled();
     expect(api.parasiteReset).not.toHaveBeenCalled();
     expect(api.sendAgentMessage).not.toHaveBeenCalled();
   });
@@ -393,7 +401,9 @@ describe('Mother Agent saved conversation workflow', () => {
   it('preserves saved records and shows an error when deletion cleanup fails', async () => {
     await mount();
     const current = state.activeConversationId;
-    vi.mocked(api.resetAgent).mockRejectedValueOnce(new Error('Cannot delete saved context'));
+    vi.mocked(api.resetConversationContext).mockRejectedValueOnce(
+      new Error('Cannot delete saved context')
+    );
     await act(async () => {
       await state.deleteConversation(current);
     });
@@ -427,6 +437,86 @@ describe('Mother Agent saved conversation workflow', () => {
     expect(state.conversations).toHaveLength(1);
   });
 
+  it('preserves the transcript after a composite delete failure and can continue the same conversation', async () => {
+    await mount();
+    const current = state.activeConversationId;
+    const session = activeSession();
+    await send('Keep original context');
+    emitAgent({ type: 'text_delta', text: 'Original reply', conversation_id: session });
+    emitAgent({ type: 'done', conversation_id: session });
+    const transcript = state.chatOutput;
+    vi.mocked(api.resetConversationContext).mockRejectedValueOnce(
+      new Error('Cannot stage second context')
+    );
+    await act(async () => {
+      await state.deleteConversation(current);
+    });
+    expect(state.activeConversationId).toBe(current);
+    expect(state.chatOutput).toEqual(transcript);
+    expect(state.conversations).toHaveLength(1);
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+    await send('Continue remembered context');
+    expect(api.sendAgentMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        conversation_id: session,
+        message: 'Continue remembered context',
+      })
+    );
+  });
+
+  it('leaves the shared legacy local CLI context out of a migrated remote conversation deletion', async () => {
+    stored.set(
+      'echobird:chat:agent_remote',
+      JSON.stringify([{ role: 'user', content: 'Remote history' }])
+    );
+    await mount();
+    act(() => state.selectServer('remote'));
+    expect(state.activeConversationId).toBe('legacy-remote');
+    await act(async () => {
+      await state.deleteConversation('legacy-remote');
+    });
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith(
+      'remote',
+      false,
+      undefined
+    );
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+  });
+
+  it('uses one composite reset for Connect and preserves history when its cleanup fails', async () => {
+    stored.set('echobird_parasite_agent', 'claudecode');
+    await mount();
+    const current = state.activeConversationId;
+    const session = activeSession();
+    await send('Keep Connect context');
+    emitParasite({ type: 'text_delta', text: 'Connect reply', conversation_id: session });
+    emitParasite({ type: 'done', conversation_id: session });
+    vi.mocked(api.resetConversationContext).mockRejectedValueOnce(
+      new Error('Cannot stage second context')
+    );
+    await act(async () => {
+      await state.deleteConversation(current);
+    });
+    expect(state.activeConversationId).toBe(current);
+    expect(state.chatOutput.slice(0, 2)).toEqual([
+      { type: 'user', text: 'Keep Connect context', chips: undefined },
+      { type: 'assistant', text: 'Connect reply' },
+    ]);
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith(session, true, session);
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+    expect(state.isProcessing).toBe(false);
+    await send('Continue Connect context');
+    expect(api.parasiteSendMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        conversationId: session,
+        message: 'Continue Connect context',
+      })
+    );
+  });
+
   it('keeps mount, page navigation, new conversations, and selection free of execution or resets', async () => {
     await mount();
     const first = state.activeConversationId;
@@ -445,6 +535,7 @@ describe('Mother Agent saved conversation workflow', () => {
       api.sendAgentMessage,
       api.abortAgent,
       api.resetAgent,
+      api.resetConversationContext,
       api.parasiteSendMessage,
       api.parasiteAbort,
       api.parasiteReset,
@@ -489,7 +580,7 @@ describe('Mother Agent saved conversation workflow', () => {
     await act(async () => {
       await state.deleteConversation(firstId);
     });
-    expect(api.resetAgent).toHaveBeenLastCalledWith(firstKey);
+    expect(api.resetConversationContext).toHaveBeenLastCalledWith(firstKey, true, firstKey);
     expect(state.conversations.some((c) => c.id === firstId)).toBe(false);
     expect(state.chatOutput).toEqual([
       { type: 'user', text: 'Second prompt', chips: undefined },
@@ -624,7 +715,7 @@ describe('Mother Agent saved conversation workflow', () => {
     emitAgent({ type: 'text_delta', text: 'Saved reply', conversation_id: session });
     emitAgent({ type: 'done', conversation_id: session });
     const pending = deferred<string>();
-    vi.mocked(api.resetAgent).mockReturnValueOnce(pending.promise);
+    vi.mocked(api.resetConversationContext).mockReturnValueOnce(pending.promise);
     const callbacks = state;
     await act(async () => {
       void callbacks.deleteConversation(current);
@@ -637,7 +728,7 @@ describe('Mother Agent saved conversation workflow', () => {
     expect(state.activeConversationId).toBe(current);
     expect(state.chatOutput).toHaveLength(2);
     expect(state.isProcessing).toBe(true);
-    expect(api.resetAgent).toHaveBeenCalledExactlyOnceWith(session);
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith(session, true, session);
     expect(api.sendAgentMessage).toHaveBeenCalledTimes(1);
     await act(async () => pending.resolve('ok'));
     expect(state.chatOutput).toEqual([]);
@@ -654,7 +745,9 @@ describe('Mother Agent saved conversation workflow', () => {
     emitAgent({ type: 'text_delta', text: 'Keep this reply', conversation_id: session });
     emitAgent({ type: 'done', conversation_id: session });
     act(() => state.setChatInput('Keep this draft'));
-    vi.mocked(api.resetAgent).mockRejectedValueOnce(new Error('Cannot reset a running session'));
+    vi.mocked(api.resetConversationContext).mockRejectedValueOnce(
+      new Error('Cannot reset a running session')
+    );
     await act(async () => {
       await state.deleteConversation(current);
     });
@@ -741,7 +834,9 @@ describe('Mother Agent saved conversation workflow', () => {
     await act(async () => {
       await state.deleteConversation(state.activeConversationId);
     });
-    expect(api.parasiteReset).toHaveBeenCalledExactlyOnceWith('claudecode', firstKey);
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith(firstKey, true, firstKey);
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
     const secondKey = activeSession();
     await send('Another Connect prompt');
     emitParasite({ type: 'done', conversation_id: firstKey });
@@ -781,7 +876,9 @@ describe('Mother Agent saved conversation workflow', () => {
     await act(async () => {
       await state.deleteConversation('legacy-local');
     });
-    expect(api.parasiteReset).toHaveBeenCalledExactlyOnceWith('claudecode', undefined);
+    expect(api.resetConversationContext).toHaveBeenCalledExactlyOnceWith('local', true, undefined);
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
     const scopedKey = activeSession();
     await send('New independent session');
     expect(api.parasiteSendMessage).toHaveBeenLastCalledWith({

@@ -345,13 +345,14 @@ async fn converted_account_body_errors_preserve_auth_rate_limits_and_model_scope
         let converted = responses_from_chat(chat, &json!({"_echobird_responses":request}))
             .await
             .unwrap();
+        let backup_reply =
+            responses_from_chat(chat_ok("backup"), &json!({"_echobird_responses":request}))
+                .await
+                .unwrap();
         let mut state = AppState::for_tests().unwrap();
         state.fixture_responses = Some(Arc::new(Mutex::new(HashMap::from([
             (candidate.internal_id.clone(), converted),
-            (
-                backup.internal_id.clone(),
-                native_ok("resp_unused", "backup"),
-            ),
+            (backup.internal_id.clone(), backup_reply),
         ]))));
         let started = now_ms();
         let response = route_responses_with_candidates(
@@ -362,21 +363,15 @@ async fn converted_account_body_errors_preserve_auth_rate_limits_and_model_scope
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "unused-converted-backup/unused-converted-backup-model"
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let events = crate::services::account_proxy::SseParser::default().push(&bytes);
-        let failed = events
-            .iter()
-            .find(|(event, _)| event == "response.failed")
-            .unwrap();
-        let failure: Value = serde_json::from_str(&failed.1).unwrap();
-        assert_eq!(failure["response"]["status"], "failed");
-        assert_eq!(failure["response"]["error"]["code"], code);
-        assert_eq!(failure["response"]["error"]["status"], status.as_u16());
-        assert_eq!(
-            failure["response"]["error"]["retry_after"],
-            json!(retry_after)
-        );
-        assert!(!events
+        assert!(String::from_utf8_lossy(&bytes).contains("backup"));
+        assert!(!events.iter().any(|(event, _)| event == "response.failed"));
+        assert!(events
             .iter()
             .any(|(event, _)| event == "response.completed"));
         let memory = state.route_memory.lock().unwrap();
@@ -398,7 +393,7 @@ async fn converted_account_body_errors_preserve_auth_rate_limits_and_model_scope
         );
         assert!(memory.response_bindings.is_empty());
         drop(memory);
-        assert!(state
+        assert!(!state
             .fixture_responses
             .as_ref()
             .unwrap()
@@ -428,11 +423,9 @@ async fn chat_fallback_sse_errors_keep_header_and_usage_limit_recovery() {
         }
         let first =
             MockServer::new(vec![endpoint_missing(StatusCode::NOT_FOUND)], vec![reply]).await;
-        let backup = MockServer::new(
-            vec![native_ok("resp_unused_error_backup", "backup")],
-            vec![],
-        )
-        .await;
+        let backup_reply = Response::builder().header(header::CONTENT_TYPE, "text/event-stream")
+            .body(Body::from(sse("response.completed", &json!({"type":"response.completed","response":native_json("resp_error_backup","backup")})))).unwrap();
+        let backup = MockServer::new(vec![backup_reply], vec![]).await;
         let state = AppState::for_tests().unwrap();
         let candidate = first.candidate("chat-sse-limit");
         let started = now_ms();
@@ -446,27 +439,26 @@ async fn chat_fallback_sse_errors_keep_header_and_usage_limit_recovery() {
             ],
         )
         .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "chat-sse-unused-backup/chat-sse-unused-backup-model"
+        );
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
         let events = crate::services::account_proxy::SseParser::default().push(&bytes);
-        let failed = events
+        assert!(String::from_utf8_lossy(&bytes).contains("backup"));
+        assert!(events
             .iter()
-            .find(|(event, _)| event == "response.failed")
-            .unwrap();
-        let failure: Value = serde_json::from_str(&failed.1).unwrap();
-        assert_eq!(failure["response"]["error"]["status"], 429);
-        assert_eq!(failure["response"]["error"]["type"], "usage_limit_reached");
+            .any(|(event, _)| event == "response.completed"));
+        assert!(!events.iter().any(|(event, _)| event == "response.failed"));
         let seconds = if retry_after.is_some() { 120 } else { 210 };
-        assert_eq!(
-            failure["response"]["error"]["retry_after"],
-            seconds.to_string()
-        );
         let memory = state.route_memory.lock().unwrap();
         let health = memory.candidates.get(&candidate.internal_id).unwrap();
         assert_eq!(health.failure, Some(FailureClass::RateLimit));
         assert!(health.cooldown_until_ms.unwrap() >= started + (seconds - 1) * 1000);
-        assert!(memory.response_bindings.is_empty());
+        assert!(memory.response_bindings.contains_key("resp_error_backup"));
         assert_eq!(first.calls().len(), 2);
-        assert!(backup.calls().is_empty());
+        assert_eq!(backup.calls().len(), 1);
     }
 }
 

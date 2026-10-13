@@ -381,6 +381,7 @@ pub(super) fn host(edition: Edition, auth: &Value) -> Result<String, String> {
         Edition::Trae => [
             "grow-normal.trae.ai",
             "growsg-normal.trae.ai",
+            "growva-normal.trae.ai",
             "grow-normal.traeapi.us",
         ]
         .contains(&hostname),
@@ -421,13 +422,26 @@ pub(super) async fn ensure_fresh(
     edition: Edition,
     credentials: &mut Credentials,
 ) -> Result<(), String> {
-    let expiry = native::timestamp(&credentials.auth["expiredAt"]);
-    if expiry.is_some_and(|expiry| expiry > chrono::Utc::now().timestamp() + 60) {
-        return Ok(());
+    ensure_fresh_with_force(edition, credentials, false)
+        .await
+        .map(|_| ())
+}
+
+fn refresh_required(auth: &Value, force: bool, now: i64) -> bool {
+    force || !native::timestamp(&auth["expiredAt"]).is_some_and(|expiry| expiry > now + 60)
+}
+
+pub(super) async fn ensure_fresh_with_force(
+    edition: Edition,
+    credentials: &mut Credentials,
+    force: bool,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    if !refresh_required(&credentials.auth, force, now) {
+        return Ok(false);
     }
     let refresh =
         native::text(&credentials.auth, "refreshToken").ok_or("accountError.invalidAccount")?;
-    let now = chrono::Utc::now().timestamp();
     if native::timestamp(&credentials.auth["refreshExpiredAt"]).is_some_and(|expiry| expiry <= now)
     {
         return Err("accountError.expired".into());
@@ -468,12 +482,27 @@ pub(super) async fn ensure_fresh(
         credentials.auth["refreshExpiredAt"] = token["RefreshExpireAt"].clone();
     }
     credentials.auth["tokenReleaseAt"] = chrono::Utc::now().to_rfc3339().into();
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_refresh_respects_expiry_and_forced_rejection_without_network() {
+        let now = 1791774000;
+        let valid = json!({"expiredAt": now + 3600});
+        assert!(!refresh_required(&valid, false, now));
+        assert!(refresh_required(&valid, true, now));
+        assert!(refresh_required(
+            &json!({"expiredAt": now + 60}),
+            false,
+            now
+        ));
+        assert!(refresh_required(&json!({"expiredAt": now - 1}), false, now));
+        assert!(refresh_required(&json!({}), false, now));
+    }
 
     fn identity() -> Identity {
         Identity {

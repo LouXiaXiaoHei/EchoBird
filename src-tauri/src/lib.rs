@@ -1227,6 +1227,7 @@ pub fn run() {
             agent_commands::agent_send_message,
             agent_commands::agent_abort,
             agent_commands::agent_reset,
+            agent_commands::agent_reset_conversation_context,
             parasite_commands::parasite_list_installed,
             parasite_commands::parasite_send_message,
             parasite_commands::parasite_abort,

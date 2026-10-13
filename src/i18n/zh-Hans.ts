@@ -96,6 +96,8 @@ const zhHans: Partial<Translations> = {
   'freeModels.tab.account': '反代号池',
   'accountProxy.provider': '提供方',
   'accountProxy.account': '账号',
+  'accountProxy.accountCountOne': '{count} 个账号',
+  'accountProxy.accountCountOther': '{count} 个账号',
   'accountProxy.selectRequired': '请选择账号和模型。',
   'accountProxy.riskReadPrefix': '我已阅读',
   'accountProxy.riskNotice': '风险须知',

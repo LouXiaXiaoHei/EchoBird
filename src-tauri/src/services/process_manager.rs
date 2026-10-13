@@ -1531,11 +1531,6 @@ impl OwnedDesktopConfigProcess {
         if self.stopped {
             return Ok(());
         }
-        let exited = self
-            .child
-            .try_wait()
-            .map_err(|_| "accountError.closeClient")?
-            .is_some();
         #[cfg(windows)]
         {
             // taskkill /T can terminate the parent while a native SDK child
@@ -1543,17 +1538,13 @@ impl OwnedDesktopConfigProcess {
             // retain creation times so a reused descendant PID is never targeted.
             let (created, ended) = owned_windows_process_times(&self.child)?;
             stop_owned_windows_tree(self.id(), created, ended)?;
-            let _ = exited;
         }
         #[cfg(unix)]
         {
-            if exited {
-                self.stopped = true;
-                return Ok(());
-            }
-            // The child starts a separate process group, so its helpers are owned too.
+            // Keep the leader unreaped until its owned helpers are stopped: an
+            // exited leader can leave helpers alive, and its PID must not be reused.
             if unsafe { libc::kill(-(self.id() as i32), libc::SIGKILL) } != 0
-                && self.child.try_wait().ok().flatten().is_none()
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
             {
                 return Err("accountError.closeClient".into());
             }
@@ -2055,6 +2046,74 @@ try {
         assert!(owned.child.try_wait().unwrap().is_some());
         assert!(unowned.child.try_wait().unwrap().is_none());
         unowned.stop().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temporary_cleanup_stops_owned_group_after_the_leader_exits() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+
+        let child = crate::utils::process::command("/bin/sh")
+            .args(["-c", "sleep 60 & printf '%s\\n' \"$!\"; exit 0"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut owned = super::OwnedDesktopConfigProcess {
+            child,
+            stopped: false,
+        };
+        let mut line = String::new();
+        std::io::BufReader::new(owned.child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let descendant: i32 = line.trim().parse().unwrap();
+        let mut status = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+        // Observe exit without freeing the leader's PID before group cleanup.
+        assert_eq!(
+            unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    owned.id(),
+                    &mut status,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            },
+            0
+        );
+        assert_eq!(unsafe { libc::kill(descendant, 0) }, 0);
+        let other = crate::utils::process::command("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut unowned = super::OwnedDesktopConfigProcess {
+            child: other,
+            stopped: false,
+        };
+
+        owned.stop().unwrap();
+        assert!(owned.child.try_wait().unwrap().is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let output = crate::utils::process::command("/bin/ps")
+                .args(["-o", "stat=", "-p", &descendant.to_string()])
+                .output()
+                .unwrap();
+            let state = String::from_utf8_lossy(&output.stdout);
+            if state.trim().is_empty() || state.trim_start().starts_with('Z') {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned helper survived"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(unowned.child.try_wait().unwrap().is_none());
+        unowned.stop().unwrap();
+        owned.stop().unwrap();
     }
 
     #[cfg(windows)]

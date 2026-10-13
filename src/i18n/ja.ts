@@ -105,6 +105,8 @@ const ja: Partial<Translations> = {
   'freeModels.tab.account': 'プロキシプール',
   'accountProxy.provider': 'プロバイダー',
   'accountProxy.account': 'アカウント',
+  'accountProxy.accountCountOne': '{count} アカウント',
+  'accountProxy.accountCountOther': '{count} アカウント',
   'accountProxy.selectRequired': 'アカウントとモデルを選択してください。',
   'accountProxy.riskReadPrefix': '「',
   'accountProxy.riskNotice': 'リスクに関する注意事項',

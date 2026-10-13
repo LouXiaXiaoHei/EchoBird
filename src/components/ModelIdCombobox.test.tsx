@@ -197,7 +197,7 @@ it('opens controlled compact choices from the card, focuses the trigger, and clo
   act(() => button('Open from card').props.onClick());
   expect(menus()[0]).toBe(openMenu);
   expect(focus).toHaveBeenCalledOnce();
-  act(() => options()[1].props.onMouseDown({ preventDefault: vi.fn() }));
+  act(() => options()[1].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith('two');
   expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   expect(blur).toHaveBeenCalledOnce();
@@ -207,6 +207,32 @@ it('opens controlled compact choices from the card, focuses the trigger, and clo
   expect(focus).toHaveBeenCalledTimes(2);
   expect(button('Route model').findByType('span').children).toEqual(['two']);
 });
+
+it.each([1, 2])(
+  'ignores mouse button %i on compact model options without selecting or closing',
+  (mouseButton) => {
+    mountControlled();
+    act(() => button('Open from card').props.onClick());
+    const preventDefault = vi.fn();
+    act(() => options()[1].props.onMouseDown({ button: mouseButton, preventDefault }));
+    expect(props.onChange).not.toHaveBeenCalled();
+    expect(props.onOpenChange).not.toHaveBeenCalled();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(button('Route model').props['aria-expanded']).toBe(true);
+    expect(options()).toHaveLength(2);
+    act(() => options()[1].props.onMouseDown({ button: 0, preventDefault }));
+    expect(props.onChange).toHaveBeenCalledExactlyOnceWith('two');
+    expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(menus()).toHaveLength(0);
+    act(() => button('Open from card').props.onClick());
+    act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault }));
+    act(() => button('Route model').props.onKeyDown({ key: 'Enter', preventDefault }));
+    expect(props.onChange).toHaveBeenCalledTimes(2);
+    expect(props.onChange).toHaveBeenLastCalledWith('one');
+    expect(props.onOpenChange).toHaveBeenCalledTimes(2);
+    expect(menus()).toHaveLength(0);
+  }
+);
 
 it('preserves external card and logo mousedown until click toggles the menu, while real outside clicks close it', () => {
   const cardTarget = {} as Node;
@@ -411,7 +437,7 @@ it('keeps all cached compact choices through display-label updates and viewport 
   expect(menu.props.style.maxHeight).toBe(360);
   expect(menu.props.style.bottom).toBeUndefined();
   expect(props.onChange).not.toHaveBeenCalled();
-  act(() => options()[39].props.onMouseDown({ preventDefault: vi.fn() }));
+  act(() => options()[39].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith(newId);
   expect(props.onOpenChange).toHaveBeenCalledExactlyOnceWith(false);
   expect(menus()).toHaveLength(0);
@@ -442,7 +468,7 @@ it('shows labels while select-only choices preserve distinct IDs with duplicate 
     'unlabelled-id',
   ]);
   const preventDefault = vi.fn();
-  act(() => options()[1].props.onMouseDown({ preventDefault }));
+  act(() => options()[1].props.onMouseDown({ button: 0, preventDefault }));
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith('second-id');
   expect(preventDefault).toHaveBeenCalledOnce();
   expect(paste).not.toHaveBeenCalled();
@@ -615,7 +641,7 @@ it('keeps compact route choices usable for short and long IDs, within the viewpo
   Object.assign(triggerBounds, { left: 740, top: 740, bottom: 764 });
   act(() => resize?.());
   const preventDefault = vi.fn();
-  act(() => options()[1].props.onMouseDown({ preventDefault }));
+  act(() => options()[1].props.onMouseDown({ button: 0, preventDefault }));
   expect(preventDefault).toHaveBeenCalledOnce();
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith(longId);
   expect(JSON.stringify(renderer.toJSON())).toContain(longId);

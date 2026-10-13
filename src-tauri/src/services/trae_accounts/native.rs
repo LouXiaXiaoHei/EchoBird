@@ -505,9 +505,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &launcher).unwrap();
         assert_eq!(
             product_path(&launcher, "linux").unwrap(),
-            std::fs::canonicalize(&dir)
-                .unwrap()
-                .join("usr/share/trae/resources/app/product.json")
+            dir.join("usr/share/trae/resources/app/product.json")
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

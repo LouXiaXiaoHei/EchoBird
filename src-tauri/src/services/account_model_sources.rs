@@ -1,7 +1,9 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{antigravity_accounts, claude_code_accounts, codex_accounts, workbuddy_accounts};
+use super::{
+    antigravity_accounts, claude_code_accounts, codex_accounts, trae_accounts, workbuddy_accounts,
+};
 use crate::models::model::{AccountProvider, AccountSource};
 
 #[derive(Serialize)]
@@ -61,6 +63,11 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
             .into_iter()
             .map(|a| option(provider, a.id, a.login, a.plan))
             .collect(),
+        Trae | Traecn => trae_accounts::list_saved_accounts(trae_edition(provider))
+            .await?
+            .into_iter()
+            .map(|a| option(provider, a.id, a.name, a.plan))
+            .collect(),
     })
 }
 
@@ -69,6 +76,14 @@ fn edition(provider: AccountProvider) -> workbuddy_accounts::Edition {
         workbuddy_accounts::Edition::Ai
     } else {
         workbuddy_accounts::Edition::Cn
+    }
+}
+
+fn trae_edition(provider: AccountProvider) -> trae_accounts::Edition {
+    if provider == AccountProvider::Traecn {
+        trae_accounts::Edition::Traecn
+    } else {
+        trae_accounts::Edition::Trae
     }
 }
 
@@ -113,6 +128,14 @@ pub(crate) async fn credentials(
         Copilot => {
             super::copilot_accounts::proxy_credentials(&source.account_id, force_refresh).await
         }
+        Trae | Traecn => {
+            trae_accounts::proxy_credentials(
+                trae_edition(source.provider),
+                &source.account_id,
+                force_refresh,
+            )
+            .await
+        }
     }
 }
 
@@ -152,6 +175,14 @@ pub(crate) async fn credentials_after_rejection(
             .await
         }
         Kilo | Copilot => credentials(source, true).await,
+        Trae | Traecn => {
+            trae_accounts::proxy_credentials_after_rejection(
+                trae_edition(source.provider),
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
     }
 }
 
@@ -167,6 +198,7 @@ pub(crate) fn credential_error(message: String) -> super::account_proxy::ProxyEr
         "accountError.invalidAccount"
         | "accountError.noAccount"
         | "accountError.loginRequired"
+        | "accountError.expired"
         | "accountError.invalidGrant" => StatusCode::UNAUTHORIZED,
         "accountError.rateLimited" => StatusCode::TOO_MANY_REQUESTS,
         "accountError.network" | "accountError.unavailable" => http_status
@@ -215,9 +247,20 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| "accountError.network")?;
-    super::account_proxy::list_models(source.provider, secret, &client)
-        .await
-        .map_err(|e| e.message)
+    let result = super::account_proxy::list_models(source.provider, secret.clone(), &client).await;
+    match result {
+        Err(error)
+            if matches!(
+                source.provider,
+                AccountProvider::Trae | AccountProvider::Traecn
+            ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
+        {
+            let refreshed = credentials_after_rejection(source, &secret).await?;
+            super::account_proxy::list_models(source.provider, refreshed, &client).await
+        }
+        result => result,
+    }
+    .map_err(|e| e.message)
 }
 
 #[cfg(test)]
@@ -254,7 +297,7 @@ mod tests {
             ),
             ("accountError.authResponse", StatusCode::BAD_REQUEST),
             ("accountError.format", StatusCode::BAD_REQUEST),
-            ("accountError.expired", StatusCode::BAD_GATEWAY),
+            ("accountError.expired", StatusCode::UNAUTHORIZED),
             ("unknown credential failure", StatusCode::BAD_GATEWAY),
         ] {
             let error = credential_error(message.into());
@@ -336,6 +379,46 @@ mod tests {
         let value = serde_json::to_value(&saved).unwrap();
         assert_eq!(value[0]["source"]["accountId"], "saved-id");
         assert!(value[0].get("accessToken").is_none());
+    }
+
+    #[test]
+    fn trae_sources_keep_region_and_saved_identity_separate() {
+        assert_eq!(
+            trae_edition(AccountProvider::Trae),
+            trae_accounts::Edition::Trae
+        );
+        assert_eq!(
+            trae_edition(AccountProvider::Traecn),
+            trae_accounts::Edition::Traecn
+        );
+        let saved = vec![option(
+            AccountProvider::Trae,
+            "saved-id".into(),
+            "Fixture".into(),
+            Some("Pro".into()),
+        )];
+        let source = AccountSource {
+            provider: AccountProvider::Trae,
+            account_id: "saved-id".into(),
+        };
+        assert!(validate_saved_source(&source, &saved).is_ok());
+        assert!(validate_saved_source(
+            &AccountSource {
+                provider: AccountProvider::Traecn,
+                ..source.clone()
+            },
+            &saved
+        )
+        .is_err());
+        let value = serde_json::to_value(&saved).unwrap();
+        assert_eq!(
+            value[0],
+            json!({"source":{"provider":"trae","accountId":"saved-id"},"label":"Fixture","plan":"Pro"})
+        );
+        assert_eq!(
+            serde_json::to_value(AccountProvider::Traecn).unwrap(),
+            "traecn"
+        );
     }
 
     #[tokio::test]
@@ -422,6 +505,155 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "explicit request to the current local router; ECHOBIRD_LIVE_RUNNING_ROUTER=1 required"]
+    async fn live_running_router_inference_probe() -> Result<(), String> {
+        if std::env::var("ECHOBIRD_LIVE_RUNNING_ROUTER").as_deref() != Ok("1") {
+            return Err("running router verification flag is required".into());
+        }
+        let port = std::env::var("ECHOBIRD_LIVE_ROUTER_PORT")
+            .ok()
+            .and_then(|port| port.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .ok_or("verified running router port is required")?;
+        let key = super::super::smart_router::api_key_for_use()
+            .map_err(|_| "local router credentials unavailable")?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(75))
+            .build()
+            .map_err(|_| "local router client unavailable")?;
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth(key)
+            .json(&json!({"model":"auto","stream":false,
+                "messages":[{"role":"user","content":"Reply with only OK."}]}))
+            .send()
+            .await
+            .map_err(|_| "local router request failed")?;
+        let status = response.status();
+        let routed = response.headers().get("X-EchoBird-Routed-Via").is_some();
+        let value: Value = response
+            .json()
+            .await
+            .map_err(|_| "local router JSON collection failed")?;
+        let safe_label = |value: &Value| {
+            value
+                .as_str()
+                .filter(|label| {
+                    label.len() <= 80
+                        && label
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+                })
+                .unwrap_or("other")
+                .to_string()
+        };
+        if !status.is_success() {
+            let attempts: Vec<_> = value["error"]["attempts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|attempt| {
+                    json!({"status":attempt["status"].as_u64(),
+                    "failure":safe_label(&attempt["failure"])})
+                })
+                .collect();
+            return Err(format!(
+                "local router status={} code={} type={} attempts={attempts:?}",
+                status.as_u16(),
+                safe_label(&value["error"]["code"]),
+                safe_label(&value["error"]["type"]),
+            ));
+        }
+        if !routed
+            || value["choices"][0]["message"]["content"]
+                .as_str()
+                .map_or(true, |text| text.trim().is_empty())
+        {
+            return Err("local router response lacked routing evidence or assistant text".into());
+        }
+        eprintln!(
+            "local router status={} routed=true text=true",
+            status.as_u16()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit saved Trae account output-limit verification; inference and native limit flags required"]
+    async fn live_trae_output_limit_probe() -> Result<(), String> {
+        if std::env::var("ECHOBIRD_LIVE_PROXY_INFERENCE").as_deref() != Ok("1") {
+            return Err("live inference flag is required".into());
+        }
+        let provider: AccountProvider =
+            serde_json::from_value(json!(std::env::var("ECHOBIRD_LIVE_PROXY_PROVIDER")
+                .map_err(|_| "provider is required")?))
+            .map_err(|_| "invalid provider")?;
+        if !matches!(provider, AccountProvider::Trae | AccountProvider::Traecn) {
+            return Err("Trae provider is required".into());
+        }
+        let model = std::env::var("ECHOBIRD_LIVE_PROXY_MODEL").map_err(|_| "model is required")?;
+        let limit = std::env::var("ECHOBIRD_LIVE_TRAE_MAX_TOKENS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| (1..=32).contains(value))
+            .ok_or("native output limit between 1 and 32 is required")?;
+        let source = list_accounts(provider)
+            .await?
+            .first()
+            .ok_or("no saved account")?
+            .source
+            .clone();
+        let secret = credentials(&source, false)
+            .await
+            .map_err(|_| "saved credentials unavailable")?;
+        let client = reqwest::Client::new();
+        for limited in [false, true] {
+            if limited {
+                std::env::set_var("ECHOBIRD_LIVE_TRAE_MAX_TOKENS", limit.to_string());
+            } else {
+                std::env::remove_var("ECHOBIRD_LIVE_TRAE_MAX_TOKENS");
+            }
+            let bytes = tokio::time::timeout(std::time::Duration::from_secs(75), async {
+                let response = super::super::account_proxy::route(
+                    provider,
+                    secret.clone(),
+                    &model,
+                    json!({"stream":false,"messages":[{"role":"user","content":
+                        "Write the integers 1 through 100, one number per line. No introduction or explanation."}]}),
+                    &client,
+                )
+                .await
+                .map_err(|error| format!("output-limit request status={}", error.status.as_u16()))?;
+                to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .map_err(|_| "output-limit response collection failed".to_owned())
+            })
+            .await
+            .map_err(|_| "output-limit request timed out")??;
+            let value: Value =
+                serde_json::from_slice(&bytes).map_err(|_| "output-limit response was not JSON")?;
+            let tokens = value["usage"]["completion_tokens"]
+                .as_u64()
+                .ok_or("output-limit response had no completion token count")?;
+            let text = value["choices"][0]["message"]["content"]
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .ok_or("output-limit response had no assistant text")?;
+            eprintln!("limited={limited} requested_limit={limit} completion_tokens={tokens} text_lines={}", text.lines().count());
+            if !limited && (tokens <= limit || text.lines().count() <= limit as usize) {
+                return Err(
+                    "output-limit positive control did not exceed the requested limit".into(),
+                );
+            }
+            if limited && tokens > limit {
+                return Err("native max_tokens was accepted but not enforced".into());
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore = "explicit inference against a saved account; requires provider, model, and ECHOBIRD_LIVE_PROXY_INFERENCE=1"]
     async fn live_saved_account_inference_probe() -> Result<(), String> {
         if std::env::var("ECHOBIRD_LIVE_PROXY_INFERENCE").as_deref() != Ok("1") {
@@ -452,12 +684,22 @@ mod tests {
         if !models.contains(&model) {
             return Err("selected model is absent from account catalog".into());
         }
-        let request = json!({"stream":false,"max_tokens":128,
+        let mut request = json!({"stream":false,"max_tokens":128,
             "messages":[{"role":"user","content":"Reply with only OK."}]});
+        let native_limits = matches!(provider, AccountProvider::Trae | AccountProvider::Traecn);
+        if native_limits {
+            request.as_object_mut().unwrap().remove("max_tokens");
+        }
         // Only the tool result contains this value, so ignoring it cannot pass.
         let result_marker = format!("probe-result-{}", uuid::Uuid::new_v4());
         let mut reply = Value::Null;
-        for phase in ["text", "stream", "tool", "continuation"] {
+        let phases: &[&str] =
+            if std::env::var("ECHOBIRD_LIVE_PROXY_TEXT_ONLY").as_deref() == Ok("1") {
+                &["text"]
+            } else {
+                &["text", "stream", "tool", "continuation"]
+            };
+        for &phase in phases {
             let mut body = request.clone();
             if phase == "stream" {
                 body["stream"] = json!(true);
@@ -469,8 +711,11 @@ mod tests {
                         "required":["marker"],"additionalProperties":false}}}]);
                 if phase == "tool" {
                     body["messages"][0]["content"] = json!("Call echo_probe with marker probe-ok.");
-                    body["tool_choice"] =
-                        json!({"type":"function","function":{"name":"echo_probe"}});
+                    body["tool_choice"] = if native_limits {
+                        json!("auto")
+                    } else {
+                        json!({"type":"function","function":{"name":"echo_probe"}})
+                    };
                 } else {
                     let call = &reply["tool_calls"][0];
                     body["messages"] = json!([
@@ -513,8 +758,14 @@ mod tests {
                 .into_iter()
                 .filter(|hint| message.contains(hint))
                 .collect();
+                let attempts: Vec<_> = value["error"]["attempts"]
+                    .as_array().into_iter().flatten()
+                    .map(|attempt| json!({"status":attempt["status"].as_u64(),
+                        "failure":attempt["failure"].as_str().filter(|label|
+                            label.len() <= 40 && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))}))
+                    .collect();
                 return Err(format!(
-                    "provider={provider:?} phase={phase} status={} hints={hints:?}",
+                    "provider={provider:?} phase={phase} status={} hints={hints:?} attempts={attempts:?}",
                     status.as_u16()
                 ));
             }

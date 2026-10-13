@@ -38,6 +38,9 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             AccountProvider::Copilot => "https://api.githubcopilot.com",
             AccountProvider::Kilo => "https://api.kilo.ai/api/openrouter",
             AccountProvider::ClaudeCode => unreachable!("Claude uses its CLI"),
+            AccountProvider::Trae | AccountProvider::Traecn => {
+                unreachable!("Trae uses its own gateway")
+            }
         })
         .trim_end_matches('/')
 }
@@ -118,6 +121,9 @@ fn signed(
                 .header("X-Title", "EchoBird");
         }
         AccountProvider::ClaudeCode => unreachable!("Claude uses its CLI"),
+        AccountProvider::Trae | AccountProvider::Traecn => {
+            unreachable!("Trae uses its own gateway")
+        }
     }
     if let Some(headers) = credentials["headers"].as_object() {
         let mut overrides = reqwest::header::HeaderMap::new();
@@ -419,6 +425,9 @@ pub(super) async fn list_models(
             .await?
         }
         AccountProvider::ClaudeCode => unreachable!("Claude uses its CLI"),
+        AccountProvider::Trae | AccountProvider::Traecn => {
+            unreachable!("Trae uses its own gateway")
+        }
     };
     let ids = if provider == AccountProvider::Antigravity {
         value["models"]
@@ -648,8 +657,12 @@ pub(super) async fn route(
 ) -> Result<Response, ProxyError> {
     let streaming = body["stream"].as_bool().unwrap_or(false);
     let (protocol, path) = wire(provider, &credentials, model, client).await?;
+    if matches!(protocol, WireProtocol::CodeAssist | WireProtocol::Anthropic) {
+        protocol::reject_structured_output(&body)?;
+    }
     let api = base(provider, &credentials);
     let request = match protocol {
+        WireProtocol::Trae => unreachable!("Trae uses its own gateway"),
         WireProtocol::Responses => protocol::chat_to_responses(&body, model),
         WireProtocol::CodeAssist => {
             let (project, _) = project(&credentials, client).await?;
@@ -700,7 +713,7 @@ pub(super) async fn route(
         let value = response.json::<Value>().await.unwrap_or(Value::Null);
         return Err(upstream_error(status, &headers, &value));
     }
-    converted(response, protocol, model, streaming).await
+    converted(response, protocol, model, streaming, true).await
 }
 
 pub(super) async fn route_responses(
@@ -942,11 +955,12 @@ pub fn responses_response(mut response: Response, streaming: bool) -> Result<Res
     ))
 }
 
-async fn converted(
+pub(super) async fn converted(
     response: reqwest::Response,
     protocol: WireProtocol,
     model: &str,
     streaming: bool,
+    tools_allowed: bool,
 ) -> Result<Response, ProxyError> {
     let response_headers = response.headers().clone();
     let content_type = response
@@ -969,18 +983,69 @@ async fn converted(
     // the upstream request, including while it is waiting for its next frame.
     let (tx, rx) = mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
     tokio::spawn(async move {
+        #[cfg(test)]
+        let diagnostics =
+            protocol == WireProtocol::Trae && super::trae::stream_diagnostics_enabled();
+        #[cfg(test)]
+        let started = std::time::Instant::now();
+        #[cfg(test)]
+        let mut event_count = 0usize;
         loop {
-            let next = tokio::select! { _=tx.closed()=>return, next=upstream.next()=>next };
+            let next = tokio::select! {
+                _=tx.closed()=>{
+                    #[cfg(test)]
+                    if diagnostics { eprintln!("Trae stream cancelled elapsed_ms={}", started.elapsed().as_millis()); }
+                    return;
+                },
+                next=upstream.next()=>next
+            };
             let eof = next.is_none();
             let frames = match next {
                 Some(Ok(bytes)) => parser.push(&bytes),
                 Some(Err(error)) => {
+                    #[cfg(test)]
+                    if diagnostics {
+                        eprintln!(
+                            "Trae stream transport_error timeout={} connect={} elapsed_ms={}",
+                            error.is_timeout(),
+                            error.is_connect(),
+                            started.elapsed().as_millis()
+                        );
+                    }
                     let _ = tx.send(Err(std::io::Error::other(error))).await;
                     return;
                 }
                 None => parser.finish(),
             };
             for (event, data) in frames {
+                #[cfg(test)]
+                if diagnostics && event_count < 24 {
+                    event_count += 1;
+                    eprintln!(
+                        "Trae stream event ordinal={event_count} elapsed_ms={} shape={}",
+                        started.elapsed().as_millis(),
+                        super::trae::stream_event_shape(&event, &data)
+                    );
+                }
+                if protocol == WireProtocol::Trae
+                    && !tools_allowed
+                    && serde_json::from_str::<Value>(&data)
+                        .ok()
+                        .is_some_and(|value| {
+                            value["tool_calls"]
+                                .as_array()
+                                .is_some_and(|calls| !calls.is_empty())
+                        })
+                {
+                    let mut error = ProxyError::new(
+                        StatusCode::BAD_REQUEST,
+                        "Trae returned a tool call while tool_choice=none",
+                    );
+                    error.error_code = Some("unsupported_parameter".into());
+                    error.model_scope = true;
+                    let _ = tx.send(Err(std::io::Error::other(error))).await;
+                    return;
+                }
                 match decoder.decode(&event, &data) {
                     Ok(chunks) => {
                         if streaming {
@@ -992,9 +1057,21 @@ async fn converted(
                         }
                     }
                     Err(error) => {
-                        let error = stream_error(&event, &data, &response_headers)
-                            .map(std::io::Error::other)
-                            .unwrap_or_else(|| std::io::Error::other(error));
+                        #[cfg(test)]
+                        if diagnostics {
+                            eprintln!(
+                                "Trae stream decoder_error elapsed_ms={} shape={}",
+                                started.elapsed().as_millis(),
+                                super::trae::stream_error_shape(&event, &data, &error)
+                            );
+                        }
+                        let error = if protocol == WireProtocol::Trae {
+                            super::trae::stream_error(&event, &data, &response_headers)
+                        } else {
+                            stream_error(&event, &data, &response_headers)
+                        }
+                        .map(std::io::Error::other)
+                        .unwrap_or_else(|| std::io::Error::other(error));
                         let _ = tx.send(Err(error)).await;
                         return;
                     }
@@ -1009,6 +1086,13 @@ async fn converted(
                 return;
             }
             if eof {
+                #[cfg(test)]
+                if diagnostics {
+                    eprintln!(
+                        "Trae stream eof completed=false elapsed_ms={}",
+                        started.elapsed().as_millis()
+                    );
+                }
                 let _ = tx
                     .send(Err(std::io::Error::other(
                         "Account stream ended before completion",
@@ -1138,6 +1222,92 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (base, requests, server)
+    }
+
+    #[tokio::test]
+    async fn chat_wire_preserves_structured_format_and_other_protocols_reject_before_inference() {
+        let (base, requests, server) = fixture().await;
+        let client = reqwest::Client::new();
+        let input = json!({"model":"auto","input":"Return an answer","text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false},"strict":true}}});
+        let chat = super::super::responses_to_chat(&input).unwrap();
+        let response = route(
+            AccountProvider::WorkBuddy,
+            json!({"accessToken":"fixture","uid":"fixture-user","baseUrl":base}),
+            "workbuddy-test",
+            chat.clone(),
+            &client,
+        )
+        .await
+        .unwrap();
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        {
+            let captured = requests.lock().await;
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].0, "/v2/chat/completions");
+            assert_eq!(captured[0].2["response_format"], chat["response_format"]);
+            assert!(captured[0].2.get("text").is_none());
+            assert!(captured[0]
+                .2
+                .get(super::super::tools::RESPONSES_REQUEST)
+                .is_none());
+        }
+        for provider in [AccountProvider::Antigravity, AccountProvider::Copilot] {
+            for format in [
+                json!({"type":"json_object"}),
+                chat["response_format"].clone(),
+            ] {
+                let mut request = chat.clone();
+                request["response_format"] = format;
+                let error = route(
+                    provider,
+                    json!({"accessToken":"fixture","baseUrl":base,"protocol":"messages"}),
+                    "model-fixture",
+                    request,
+                    &client,
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(error.error_code.as_deref(), Some("unsupported_parameter"));
+                assert!(error.model_scope);
+            }
+        }
+        assert_eq!(requests.lock().await.len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn native_responses_preserve_file_inputs_and_structured_format() {
+        let (base, requests, server) = fixture().await;
+        let client = reqwest::Client::new();
+        for provider in [AccountProvider::Codex, AccountProvider::Copilot] {
+            for stream in [false, true] {
+                let input = json!({"model":"auto","stream":stream,"input":[{"role":"user","content":[{"type":"input_text","text":"Summarize the file"},{"type":"input_file","file_id":"file_fixture"}]}],"text":{"format":{"type":"json_schema","name":"summary","schema":{"type":"object"},"strict":true}}});
+                let response = route_responses(
+                    provider,
+                    json!({"accessToken":"fixture","baseUrl":base,"protocol":"responses"}),
+                    "native-fixture",
+                    input.clone(),
+                    &client,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let captured = requests.lock().await;
+                let request = captured.last().unwrap();
+                assert_eq!(request.0, "/responses");
+                assert_eq!(request.2["input"], input["input"]);
+                assert_eq!(request.2["text"], input["text"]);
+                assert!(request.2.get("response_format").is_none());
+            }
+        }
+        assert_eq!(requests.lock().await.len(), 4);
+        server.abort();
     }
 
     #[tokio::test]

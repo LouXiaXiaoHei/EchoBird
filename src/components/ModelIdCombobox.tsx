@@ -358,6 +358,7 @@ export function ModelIdCombobox({
                 key={opt}
                 // mousedown (not click) so selection fires before the input blurs.
                 onMouseDown={(e) => {
+                  if (e.button !== 0) return;
                   e.preventDefault();
                   pick(opt);
                 }}
