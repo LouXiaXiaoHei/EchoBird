@@ -235,11 +235,6 @@ export function useChatPersistence<T>({
     [selectConversation, createConversation]
   );
 
-  const clearHistory = useCallback(() => {
-    setMessages([]);
-    flush();
-  }, [setMessages, flush]);
-
   const deleteConversation = useCallback(
     async (id: string, cleanup?: () => Promise<void>) => {
       const prev = stateRef.current;
@@ -290,7 +285,6 @@ export function useChatPersistence<T>({
     selectConversation,
     createConversation,
     selectServer,
-    clearHistory,
     deleteConversation,
   };
 }

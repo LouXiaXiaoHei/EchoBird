@@ -76,7 +76,6 @@ export interface MotherAgentCtx {
   removeSSHServer: (id: string) => void;
   selectedServerId: string;
   selectServer: (id: string) => void;
-  clearChat: () => void;
   abortAgent: () => void;
   maDiskTotal: number;
   loadOlderChat: () => Promise<ChatMessage[]>;

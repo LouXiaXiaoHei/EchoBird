@@ -130,6 +130,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     if (!initialMessage || activePage !== 'mother') return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setChatInput(initialMessage);
     // One-shot: consume the prefill so it doesn't linger in the store and
     // re-fire this effect on every later switch back to the Mother page —
@@ -269,7 +270,6 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     createConversation: createStoredConversation,
     selectConversation: selectStoredConversation,
     activeConversationId,
-    clearHistory: clearStoredHistory,
     deleteConversation: deleteStoredConversation,
     conversations,
   } = persistence;
@@ -559,7 +559,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         // endpoint for providers such as Grok. Anthropic is used only when the
         // model has no OpenAI-compatible baseUrl.
         //
-        // The backend runs one protocol per session and never switches
+        // The backend snapshots one protocol per request and never switches
         // mid-flight (auto-downgrade was removed in v5.2.0). So fabricating an
         // Anthropic URL from a "/v1" base — as we used to — routes every
         // OpenAI-only provider (OpenRouter, OpenAI, Grok, Groq, Together, …)
@@ -617,44 +617,6 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     setChatInput('');
     handleChatSendInternal(msg);
   }, [chatInput, isProcessing, handleChatSendInternal]);
-
-  const clearChat = useCallback(async () => {
-    if (resettingRef.current || runningRef.current || isProcessing) return;
-    resettingRef.current = true;
-    setIsResetting(true);
-    try {
-      await Promise.all([
-        api.resetAgent(sessionKey),
-        ...(parasiteAgent
-          ? [
-              api.parasiteReset(
-                parasiteAgent,
-                activeConversation.id.startsWith('legacy-') ? undefined : sessionKey
-              ),
-            ]
-          : []),
-      ]);
-      clearStoredHistory();
-    } catch (e) {
-      const key = errorToKey(String(e));
-      setChatOutput((prev) => [
-        ...prev,
-        key
-          ? { type: 'error', text: '', i18nKey: key }
-          : { type: 'error', text: String(e ?? '').slice(0, 500) },
-      ]);
-    } finally {
-      resettingRef.current = false;
-      setIsResetting(false);
-    }
-  }, [
-    isProcessing,
-    sessionKey,
-    parasiteAgent,
-    activeConversation.id,
-    clearStoredHistory,
-    setChatOutput,
-  ]);
 
   const deleteConversation = useCallback(
     async (id: string) => {
@@ -740,7 +702,6 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         parasiteAgent,
         setParasiteAgent,
         parasiteAvailable,
-        clearChat,
         abortAgent: () => {
           const run = runningRef.current;
           if (!run) return;

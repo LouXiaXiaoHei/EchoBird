@@ -132,7 +132,6 @@ export type TKey =
   | 'btn.addModel'
   | 'btn.refresh'
   | 'btn.editPaths'
-  | 'btn.clear'
   | 'btn.cancel'
   | 'btn.delete'
   | 'btn.edit'
@@ -402,6 +401,20 @@ export type TKey =
   | 'mother.sshGuide'
   | 'mother.quickCommands'
   | 'mother.conversations'
+  | 'mother.memory.tab'
+  | 'mother.memory.add'
+  | 'mother.memory.scope'
+  | 'mother.memory.user'
+  | 'mother.memory.target'
+  | 'mother.memory.text'
+  | 'mother.memory.placeholder'
+  | 'mother.memory.nextMessage'
+  | 'mother.memory.native'
+  | 'mother.memory.empty'
+  | 'mother.memory.tooLong'
+  | 'mother.memory.loadFailed'
+  | 'mother.memory.deleteTitle'
+  | 'mother.memory.deleteConfirm'
   | 'mother.newConversation'
   | 'mother.conversationMessageCount'
   | 'mother.justNow'
@@ -429,9 +442,6 @@ export type TKey =
   // Parasite "?" tooltip (next to model selector)
   | 'mother.parasiteTipInstalled'
   | 'mother.parasiteTipNotInstalled'
-  // Toast shown when user switches model or Claude Code mid-chat
-  | 'mother.switchEngineHint'
-  | 'mother.switchEngineHintReason'
   // Context-usage line in the "?" tooltip — {used}/{total}/{pct} placeholders
   | 'mother.contextUsage'
   // Terminal status bar

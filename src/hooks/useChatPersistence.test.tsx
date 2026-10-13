@@ -291,7 +291,7 @@ describe('Mother Agent conversation persistence', () => {
     ]);
   });
 
-  it('clears only the active conversation and never restores its old legacy messages', () => {
+  it('deletes the active legacy conversation without restoring it or changing other records', async () => {
     storage.set(
       'echobird:chat:agent_local',
       JSON.stringify([{ role: 'user', content: 'Legacy question' }])
@@ -302,16 +302,16 @@ describe('Mother Agent conversation persistence', () => {
     const secondId = state.activeConversationId;
     act(() => state.setMessages([{ role: 'user', content: 'Keep the other conversation' }]));
     act(() => state.selectConversation(firstId));
-    act(() => state.clearHistory());
-    expect(state.messages).toEqual([]);
-    expect(state.activeConversation.sessionKey).toBe('local');
-    expect(state.activeConversation.title).toBe('');
+    await act(async () => state.deleteConversation(firstId));
+    expect(state.conversations.some((conversation) => conversation.id === firstId)).toBe(false);
+    expect(state.activeConversationId).toBe(secondId);
     unmount();
     mount();
-    expect(state.activeConversationId).toBe(firstId);
-    expect(state.messages).toEqual([]);
-    act(() => state.selectConversation(secondId));
+    expect(state.activeConversationId).toBe(secondId);
+    expect(state.conversations.some((conversation) => conversation.id === firstId)).toBe(false);
     expect(state.messages).toEqual([{ role: 'user', content: 'Keep the other conversation' }]);
+    act(() => state.createConversation('local'));
+    expect(state.messages).toEqual([]);
   });
 
   it('round-trips mapper-supported tool and error records and attachment chips without transient activity', () => {

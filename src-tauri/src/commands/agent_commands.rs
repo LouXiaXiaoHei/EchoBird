@@ -2,6 +2,7 @@
 
 use crate::commands::ssh_commands::SSHPool;
 use crate::services::agent_loop::{self, AgentEvent, AgentRequest, SharedSessionMap};
+use crate::services::agent_memory::{MemoryRecord, MemoryScope, MemoryStore};
 use tauri::{AppHandle, State};
 
 /// Send a message to the agent. The agent will process asynchronously
@@ -21,11 +22,13 @@ pub async fn agent_send_message(
     // Reserve the session before spawning so abort/reset also see pending startup.
     let session_id = {
         let mut map = session_map.lock().await;
-        let sess = map.entry(server_key.clone()).or_insert_with(|| {
-            let mut s = agent_loop::AgentSession::new();
-            s.messages = agent_loop::load_session_from_disk(&server_key);
-            s
-        });
+        if !map.contains_key(&server_key) {
+            map.insert(
+                server_key.clone(),
+                agent_loop::AgentSession::restore(&server_key)?,
+            );
+        }
+        let sess = map.get_mut(&server_key).unwrap();
         sess.prepare_run()?;
         sess.id.clone()
     };
@@ -98,4 +101,34 @@ pub async fn agent_reset(
         sess.id
     );
     Ok(sess.id.clone())
+}
+
+#[tauri::command]
+pub fn agent_memory_list() -> Result<Vec<MemoryRecord>, String> {
+    MemoryStore::standard().list()
+}
+
+#[tauri::command]
+pub fn agent_memory_save(
+    scope: MemoryScope,
+    target: Option<String>,
+    text: String,
+    source_conversation_id: Option<String>,
+) -> Result<MemoryRecord, String> {
+    MemoryStore::standard().remember(
+        scope,
+        target.as_deref(),
+        &text,
+        source_conversation_id.as_deref(),
+    )
+}
+
+#[tauri::command]
+pub fn agent_memory_update(id: String, text: String) -> Result<MemoryRecord, String> {
+    MemoryStore::standard().update(&id, &text)
+}
+
+#[tauri::command]
+pub fn agent_memory_delete(id: String) -> Result<(), String> {
+    MemoryStore::standard().forget(&id)
 }

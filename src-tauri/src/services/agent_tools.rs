@@ -7,6 +7,9 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::time::timeout;
 
+use super::agent_context;
+use super::agent_history::HistoryStore;
+use super::agent_memory::{MemoryRecord, MemoryScope, MemoryStore};
 use super::agent_output_store::{OutputRecord, OutputStore};
 use super::agent_output_summary;
 use crate::commands::ssh_commands::SSHPool;
@@ -150,6 +153,37 @@ pub fn get_tool_definitions() -> Vec<super::llm_client::ToolDef> {
                 },
                 "required": ["output_id"]
             }),
+        },
+        super::llm_client::ToolDef {
+            name: "conversation_history_read".into(),
+            description: "Read original messages from this conversation when older details were summarized or omitted. Byte paging; follow next_offset. Reads local saved history, including SSH results, without executing commands or connecting to servers. Private reasoning is excluded.".into(),
+            parameters: json!({"type":"object","properties":{
+                "offset":{"type":"integer","minimum":0},
+                "max_bytes":{"type":"integer","minimum":4,"maximum":8000}
+            }}),
+        },
+        super::llm_client::ToolDef {
+            name: "memory_search".into(),
+            description: "Recall relevant saved preferences and historical notes for the current machine/server. Notes are evidence hints, not current-state verification or fresh authorization.".into(),
+            parameters: json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}),
+        },
+        super::llm_client::ToolDef {
+            name: "memory_save".into(),
+            description: "Save a concise durable note. Use scope=user only for explicit lasting user preferences; target for verified outcomes on the currently selected machine/server. Never save credentials, raw logs, inferred personal facts or temporary approvals. Notes survive clearing a conversation until explicitly forgotten.".into(),
+            parameters: json!({"type":"object","properties":{
+                "text":{"type":"string","description":"Concise durable fact or preference, at most 2000 UTF-8 bytes"},
+                "scope":{"type":"string","enum":["user","target"]}
+            },"required":["text","scope"]}),
+        },
+        super::llm_client::ToolDef {
+            name: "memory_update".into(),
+            description: "Correct an existing saved note for the user or currently selected machine/server, preserving its scope. Never put credentials or temporary approvals in notes.".into(),
+            parameters: json!({"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"}},"required":["id","text"]}),
+        },
+        super::llm_client::ToolDef {
+            name: "memory_forget".into(),
+            description: "Forget a saved note for the user or current machine/server when the user requests it or corrects a stale remembered fact. Does not clear conversation history.".into(),
+            parameters: json!({"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}),
         },
         super::llm_client::ToolDef {
             name: "file_read".into(),
@@ -413,6 +447,22 @@ pub async fn execute_tool(
             }
         }
         "tool_output_read" => read_tool_output(&args, output_scope, &OutputStore::standard()),
+        "conversation_history_read" => {
+            let read = || -> Result<String, String> {
+                let offset = tool_integer(&args, "offset", 0)?;
+                let max_bytes = tool_integer(&args, "max_bytes", 6000)?;
+                let snapshot = HistoryStore::standard().load(output_scope)?;
+                agent_context::history_page(&snapshot, offset, max_bytes)
+            };
+            string_tool_result(read())
+        }
+        "memory_search" | "memory_save" | "memory_update" | "memory_forget" => execute_memory_tool(
+            name,
+            &args,
+            memory_target(session_server_ids),
+            output_scope,
+            &MemoryStore::standard(),
+        ),
         "file_read" => {
             let path = args["path"].as_str().unwrap_or("");
             let raw_sid = args["server_id"].as_str();
@@ -544,6 +594,93 @@ pub async fn execute_tool(
 }
 
 // ── Shell Execution ──
+
+pub(crate) fn memory_target(server_ids: &[String]) -> &str {
+    server_ids
+        .iter()
+        .find(|id| !id.is_empty() && id.as_str() != "local")
+        .map_or("local", String::as_str)
+}
+
+fn string_tool_result(result: Result<String, String>) -> ToolResult {
+    match result {
+        Ok(output) => ToolResult {
+            success: true,
+            output,
+        },
+        Err(output) => ToolResult {
+            success: false,
+            output,
+        },
+    }
+}
+
+fn tool_integer(args: &Value, name: &str, default: usize) -> Result<usize, String> {
+    match args.get(name) {
+        None => Ok(default),
+        Some(value) => value
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| format!("{name} must be a non-negative integer")),
+    }
+}
+
+pub(crate) fn memory_records_json(mut records: Vec<MemoryRecord>) -> Result<String, String> {
+    loop {
+        let json = serde_json::to_string(&records).map_err(|error| error.to_string())?;
+        if json.len() <= MAX_OUTPUT_BYTES {
+            return Ok(json);
+        }
+        records.pop();
+    }
+}
+
+fn execute_memory_tool(
+    name: &str,
+    args: &Value,
+    target: &str,
+    scope: &str,
+    store: &MemoryStore,
+) -> ToolResult {
+    let execute = || -> Result<String, String> {
+        let text_arg = |name: &str| args[name].as_str().ok_or_else(|| format!("Missing {name}"));
+        if name == "memory_search" {
+            let notes = store.recall(target, text_arg("query")?)?;
+            return memory_records_json(notes);
+        }
+        if name == "memory_save" {
+            let memory_scope = match text_arg("scope")? {
+                "user" => MemoryScope::User,
+                "target" => MemoryScope::Target,
+                _ => return Err("scope must be user or target".into()),
+            };
+            let record = store.remember(
+                memory_scope,
+                (memory_scope == MemoryScope::Target).then_some(target),
+                text_arg("text")?,
+                Some(scope),
+            )?;
+            return serde_json::to_string(&record).map_err(|e| e.to_string());
+        }
+        let id = text_arg("id")?;
+        let record = store
+            .list()?
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or("Memory does not exist")?;
+        if record.scope == MemoryScope::Target && record.target.as_deref() != Some(target) {
+            return Err("Memory belongs to a different machine/server".into());
+        }
+        if name == "memory_update" {
+            let record = store.update(id, text_arg("text")?)?;
+            serde_json::to_string(&record).map_err(|e| e.to_string())
+        } else {
+            store.forget(id)?;
+            Ok("Memory forgotten".into())
+        }
+    };
+    string_tool_result(execute())
+}
 
 fn saved_shell_result(record: OutputRecord, scope: &str, store: &OutputStore) -> ToolResult {
     // Preserve full streams before any filtering. Archive failure does not change
@@ -1849,6 +1986,121 @@ async fn exec_download_file(
 mod output_tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn durable_notes_survive_new_conversations_and_tool_mutations_respect_target() {
+        let directory = TestDir::new();
+        let store = MemoryStore::new(directory.0.clone());
+        let global = execute_memory_tool(
+            "memory_save",
+            &json!({"scope":"user","text":"请一直用中文回答"}),
+            "local",
+            "first-chat",
+            &store,
+        );
+        assert!(global.success);
+        let created = execute_memory_tool(
+            "memory_save",
+            &json!({"scope":"target","text":"OpenClaw 安装路径 E:/Agents/OpenClaw"}),
+            "remote-a",
+            "first-chat",
+            &store,
+        );
+        assert!(created.success);
+        let id = serde_json::from_str::<MemoryRecord>(&created.output)
+            .unwrap()
+            .id;
+        let recalled = execute_memory_tool(
+            "memory_search",
+            &json!({"query":"OpenClaw 安装"}),
+            "remote-a",
+            "new-chat",
+            &store,
+        );
+        assert!(recalled.success && recalled.output.contains(&id));
+        let other = execute_memory_tool(
+            "memory_search",
+            &json!({"query":"OpenClaw 安装"}),
+            "remote-b",
+            "another-chat",
+            &store,
+        );
+        assert!(other.success && !other.output.contains(&id) && other.output.contains("中文"));
+        assert!(
+            !execute_memory_tool(
+                "memory_update",
+                &json!({"id":id,"text":"Wrong target"}),
+                "remote-b",
+                "new-chat",
+                &store
+            )
+            .success
+        );
+        assert!(
+            !execute_memory_tool(
+                "memory_forget",
+                &json!({"id":id}),
+                "remote-b",
+                "new-chat",
+                &store
+            )
+            .success
+        );
+        assert!(
+            !execute_memory_tool(
+                "memory_save",
+                &json!({"scope":"user","text":"password: do-not-store"}),
+                "local",
+                "first-chat",
+                &store
+            )
+            .success
+        );
+        assert!(
+            execute_memory_tool(
+                "memory_update",
+                &json!({"id":id,"text":"OpenClaw 已迁移到 E:/NewAgents"}),
+                "remote-a",
+                "new-chat",
+                &store
+            )
+            .success
+        );
+        assert!(
+            execute_memory_tool(
+                "memory_forget",
+                &json!({"id":id}),
+                "remote-a",
+                "new-chat",
+                &store
+            )
+            .success
+        );
+        assert!(!store.list().unwrap().iter().any(|record| record.id == id));
+    }
+
+    #[test]
+    fn memory_payload_includes_metadata_within_tool_byte_budget() {
+        let directory = TestDir::new();
+        let store = MemoryStore::new(directory.0.clone());
+        for index in 0..8 {
+            store
+                .remember(
+                    MemoryScope::User,
+                    None,
+                    &format!("Preference {index}: {}", "\"\n".repeat(800)),
+                    Some("conversation"),
+                )
+                .unwrap();
+        }
+        let output = memory_records_json(store.list().unwrap()).unwrap();
+        assert!(output.len() <= MAX_OUTPUT_BYTES);
+        let records: Vec<MemoryRecord> = serde_json::from_str(&output).unwrap();
+        assert!(!records.is_empty());
+        assert!(records
+            .iter()
+            .all(|record| record.source_conversation_id.as_deref() == Some("conversation")));
+    }
 
     struct TestDir(PathBuf);
 

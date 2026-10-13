@@ -6,7 +6,6 @@ import { PendingChipsRow } from '../../components/PendingChipsRow';
 import { ChatBubble, ToolCallCard } from '../../components/chat';
 import { buildPendingMessage } from '../../utils/buildPendingMessage';
 import { useI18n } from '../../hooks/useI18n';
-import { useToast } from '../../components/Toast';
 import * as api from '../../api/tauri';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
@@ -18,7 +17,6 @@ import { MA_PAGE_SIZE, type ChatMessage } from './types';
 // ===== Main Content (center area) — CHAT =====
 export function MotherAgentMain() {
   const { t } = useI18n();
-  const { showToast } = useToast();
   const {
     models,
     agentModel,
@@ -41,7 +39,6 @@ export function MotherAgentMain() {
     sshServers: _sshServers,
     selectedServerId,
     activeConversationId,
-    clearChat,
     abortAgent,
     maDiskTotal,
     loadOlderChat,
@@ -73,13 +70,6 @@ export function MotherAgentMain() {
     const id = setTimeout(() => setContextBytes(estimateContextBytes(chatOutput)), 300);
     return () => clearTimeout(id);
   }, [chatOutput]);
-
-  // Listen for clear-chat event from title bar
-  useEffect(() => {
-    const handler = () => clearChat();
-    window.addEventListener('clear-chat', handler);
-    return () => window.removeEventListener('clear-chat', handler);
-  }, [clearChat]);
 
   const [_serverModel, setServerModel] = useState<string | null>(null);
   const _fileInputRef = useRef<HTMLInputElement>(null!);
@@ -435,14 +425,6 @@ export function MotherAgentMain() {
               currentModelId={parasiteAgent || agentModel}
               loading={false}
               onSelect={(id) => {
-                const currentId = parasiteAgent || agentModel;
-                if (currentId && id && id !== currentId) {
-                  showToast(
-                    'success',
-                    t('mother.switchEngineHintReason'),
-                    t('mother.switchEngineHint')
-                  );
-                }
                 if (id === PARASITE_CLAUDE_ID) {
                   // Switch to parasite mode. Intentionally don't clear
                   // agentModel so the user can flip back to their previous

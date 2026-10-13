@@ -7,12 +7,14 @@ import { ConversationList } from './ConversationList';
 import { MotherAgentMain } from './MotherAgentMain';
 import { QuickCommandChips } from './QuickCommandChips';
 import { ChatBubble } from '../../components/chat';
+import { RemoteModelSelector } from '../../components/RemoteModelSelector';
 import type { MotherAgentCtx } from './types';
 
 let state: Partial<MotherAgentCtx>;
 let locale = 'en';
 let activePage = 'mother';
 let renderer: ReactTestRenderer | undefined;
+const showToast = vi.hoisted(() => vi.fn());
 
 vi.mock('./context', () => ({ useMotherAgent: () => state }));
 vi.mock('../../hooks/useI18n', () => ({
@@ -23,7 +25,7 @@ vi.mock('../../stores/navigationStore', () => ({
   useNavigationStore: (selector: (value: { activePage: string }) => unknown) =>
     selector({ activePage }),
 }));
-vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('../../components/RemoteModelSelector', () => ({ RemoteModelSelector: () => null }));
 vi.mock('../../components/chat', () => ({
   ChatBubble: ({ content }: { content: string }) => <span>{content}</span>,
@@ -89,7 +91,6 @@ beforeEach(() => {
     chatOutput: [],
     chatEndRef: { current: null },
     chatInputRef: { current: null },
-    clearChat: vi.fn(),
     parasiteAgent: 'claudecode',
     parasiteAvailable: [],
     maDiskTotal: 0,
@@ -97,6 +98,33 @@ beforeEach(() => {
     reasoningLevels: [],
     setReasoningEffort: vi.fn(),
   };
+});
+
+it('changes model selection without clear advice or a legacy clear-chat listener', () => {
+  const transcript = [{ type: 'user' as const, text: 'Continue this task' }];
+  state = {
+    ...state,
+    agentModel: 'openai-model',
+    parasiteAgent: null,
+    chatOutput: transcript,
+    setAgentModel: vi.fn(),
+    setParasiteAgent: vi.fn(),
+  };
+  act(() => {
+    renderer = create(<MotherAgentMain />);
+  });
+  const selector = renderer!.root.findByType(RemoteModelSelector);
+  act(() => selector.props.onSelect('anthropic-model'));
+  expect(state.setAgentModel).toHaveBeenCalledExactlyOnceWith('anthropic-model');
+  expect(state.setParasiteAgent).toHaveBeenCalledExactlyOnceWith(null);
+  act(() => selector.props.onSelect('claudecode'));
+  expect(state.setParasiteAgent).toHaveBeenLastCalledWith('claudecode');
+  expect(state.setAgentModel).toHaveBeenCalledTimes(1);
+  expect(showToast).not.toHaveBeenCalled();
+  expect(state.chatOutput).toEqual(transcript);
+  expect(
+    vi.mocked(window.addEventListener).mock.calls.some(([type]) => type === 'clear-chat')
+  ).toBe(false);
 });
 
 it('keeps the composer effort popup usable while running and closes it on reset, model changes, and page exit', () => {
