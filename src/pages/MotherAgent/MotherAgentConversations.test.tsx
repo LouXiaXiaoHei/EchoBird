@@ -26,6 +26,11 @@ vi.mock('../../api/tauri', () => ({
 vi.mock('../../hooks/useI18n', () => ({
   useI18n: () => ({ t: (key: string) => key, locale: 'en' }),
 }));
+vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
+vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
+
+const confirm = vi.fn();
+const showToast = vi.fn();
 
 const model: ModelConfig = {
   internalId: 'test-model',
@@ -92,6 +97,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-12T09:00:00Z'));
   vi.resetAllMocks();
+  confirm.mockResolvedValue(true);
   stored = new Map([['echobird_agent_model', model.internalId]]);
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => stored.get(key) ?? null,
@@ -139,6 +145,94 @@ afterEach(() => {
 });
 
 describe('Mother Agent saved conversation workflow', () => {
+  it('deletes only the confirmed record and preserves the active conversation and draft', async () => {
+    await mount();
+    const deleted = state.activeConversationId;
+    const deletedKey = activeSession();
+    act(() => state.createConversation());
+    const current = state.activeConversationId;
+    await send('Keep current content');
+    emitAgent({ type: 'done', conversation_id: activeSession() });
+    act(() => state.setChatInput('Keep current draft'));
+    const messages = state.chatOutput;
+    await act(async () => {
+      await state.deleteConversation(deleted);
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(api.resetAgent).toHaveBeenCalledExactlyOnceWith(deletedKey);
+    expect(api.parasiteReset).toHaveBeenCalledExactlyOnceWith('claudecode', deletedKey);
+    expect(state.activeConversationId).toBe(current);
+    expect(state.chatOutput).toEqual(messages);
+    expect(state.chatInput).toBe('Keep current draft');
+    expect(state.conversations.some((c) => c.id === deleted)).toBe(false);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('does nothing on a cancelled delete confirmation and blocks repeat actions while it is open', async () => {
+    await mount();
+    const current = state.activeConversationId;
+    const decision = deferred<boolean>();
+    confirm.mockReturnValueOnce(decision.promise);
+    const callbacks = state;
+    let task!: Promise<void>;
+    act(() => {
+      task = callbacks.deleteConversation(current);
+      void callbacks.deleteConversation(current);
+      callbacks.createConversation();
+      callbacks.selectServer('remote');
+      callbacks.sendMessage('Blocked');
+    });
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(state.isProcessing).toBe(true);
+    expect(state.activeConversationId).toBe(current);
+    await act(async () => {
+      decision.resolve(false);
+      await task;
+    });
+    expect(state.isProcessing).toBe(false);
+    expect(state.conversations).toHaveLength(1);
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserves saved records and shows an error when deletion cleanup fails', async () => {
+    await mount();
+    const current = state.activeConversationId;
+    vi.mocked(api.resetAgent).mockRejectedValueOnce(new Error('Cannot delete saved context'));
+    await act(async () => {
+      await state.deleteConversation(current);
+    });
+    expect(state.activeConversationId).toBe(current);
+    expect(state.conversations).toHaveLength(1);
+    expect(api.parasiteReset).not.toHaveBeenCalled();
+    expect(state.chatOutput).toEqual([]);
+    expect(showToast).toHaveBeenCalledExactlyOnceWith(
+      'error',
+      'Error: Cannot delete saved context'
+    );
+    expect(state.isProcessing).toBe(false);
+  });
+
+  it('blocks deletion during generation and clears the draft only when deleting the active conversation', async () => {
+    await mount();
+    const current = state.activeConversationId;
+    await send('Pending turn');
+    await act(async () => {
+      await state.deleteConversation(current);
+    });
+    expect(confirm).not.toHaveBeenCalled();
+    emitAgent({ type: 'done', conversation_id: activeSession() });
+    act(() => state.setChatInput('Old draft'));
+    await act(async () => {
+      await state.deleteConversation(current);
+    });
+    expect(state.activeConversationId).not.toBe(current);
+    expect(state.chatInput).toBe('');
+    expect(state.chatOutput).toEqual([]);
+    expect(state.conversations).toHaveLength(1);
+  });
+
   it('keeps mount, page navigation, new conversations, and selection free of execution or resets', async () => {
     await mount();
     const first = state.activeConversationId;

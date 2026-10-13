@@ -379,6 +379,8 @@ const zhHans: Partial<Translations> = {
   'mother.newConversation': '新建对话',
   'mother.conversationMessageCount': '{count} 条消息',
   'mother.justNow': '刚刚',
+  'mother.deleteConversationTitle': '删除对话',
+  'mother.deleteConversationConfirm': '确定删除“{title}”及其聊天记录？',
   'mother.local': '本机',
   'mother.addServer': '添加服务器',
   'mother.hostIp': '主机 / IP',

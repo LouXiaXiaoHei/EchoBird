@@ -41,6 +41,7 @@ export interface MotherAgentCtx {
   activeConversationId: string;
   createConversation: () => void;
   selectConversation: (id: string) => void;
+  deleteConversation: (id: string) => Promise<void>;
   agentState: string;
   isProcessing: boolean;
   agentModelData: ModelConfig | undefined;

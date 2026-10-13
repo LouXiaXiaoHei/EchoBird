@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus } from 'lucide-react';
+import { Plus, Trash2 } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -12,6 +12,7 @@ export function ConversationList() {
     activeConversationId,
     createConversation,
     selectConversation,
+    deleteConversation,
     isProcessing,
   } = useMotherAgent();
   const docVisible = useDocumentVisible();
@@ -58,25 +59,39 @@ export function ConversationList() {
             (message) => message.type === 'user' || message.type === 'assistant'
           ).length;
           return (
-            <button
+            <div
               key={conversation.id}
-              type="button"
-              onClick={() => !isProcessing && selectConversation(conversation.id)}
-              disabled={isProcessing}
-              aria-current={active ? 'true' : undefined}
-              className={`w-full p-3 rounded-card border bg-cyber-surface text-left transition-colors hover:bg-cyber-elevated disabled:opacity-40 ${
-                active ? 'border-cyber-border' : 'border-transparent'
-              }`}
+              className={`relative w-full p-3 pr-9 rounded-card border border-transparent text-left transition-colors ${active ? 'bg-cyber-elevated' : 'bg-cyber-surface hover:bg-cyber-elevated'} ${isProcessing ? 'opacity-40' : ''}`}
             >
-              <div className="text-sm font-semibold text-cyber-text truncate">
+              <button
+                type="button"
+                onClick={() => !isProcessing && selectConversation(conversation.id)}
+                disabled={isProcessing}
+                aria-current={active ? 'true' : undefined}
+                aria-label={conversation.title || t('mother.newConversation')}
+                className="absolute inset-0 rounded-card focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cyber-accent"
+              />
+              <div className="relative pointer-events-none text-sm font-semibold text-cyber-text truncate">
                 {conversation.title || t('mother.newConversation')}
               </div>
-              <div className="mt-1 text-xs text-cyber-text-secondary truncate">
+              <div className="relative pointer-events-none mt-1 text-xs text-cyber-text-secondary truncate">
                 {t('mother.conversationMessageCount').replace('{count}', String(messageCount))}
                 {' · '}
                 {formatUpdatedTime(conversation.updatedAt)}
               </div>
-            </button>
+              <button
+                type="button"
+                aria-label={`${t('btn.delete')} ${conversation.title || t('mother.newConversation')}`}
+                disabled={isProcessing}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!isProcessing) void deleteConversation(conversation.id);
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-cyber-text-muted/70 hover:text-red-500 transition-colors"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
           );
         })}
       </div>

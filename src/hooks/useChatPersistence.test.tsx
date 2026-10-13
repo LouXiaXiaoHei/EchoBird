@@ -332,4 +332,103 @@ describe('Mother Agent conversation persistence', () => {
     expect(state.messages).toEqual(messages.slice(0, -1));
     expect(state.activeConversation.title).toBe('Inspect this');
   });
+
+  it('deletes another conversation without changing the active record, its content, or recency', async () => {
+    const older = conversation('older', 'local', Date.now() - 60_000);
+    const active = conversation('active', 'local', Date.now());
+    storage.set(
+      CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        activeConversationId: active.id,
+        conversations: [older, active],
+      })
+    );
+    mount();
+    await act(async () => {
+      await state.deleteConversation(older.id);
+    });
+    expect(state.activeConversationId).toBe(active.id);
+    expect(state.activeConversation).toEqual(active);
+    expect(saved().conversations).toEqual([active]);
+    unmount();
+    mount();
+    expect(state.conversations).toEqual([active]);
+  });
+
+  it('selects the newest remaining record on the same server and replaces the last deleted record with an empty one', async () => {
+    const older = conversation('older', 'local', Date.now() - 60_000);
+    const newer = conversation('newer', 'local', Date.now());
+    const remote = conversation('remote', 'ssh-production', Date.now());
+    storage.set(
+      CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        activeConversationId: newer.id,
+        conversations: [older, newer, remote],
+      })
+    );
+    mount();
+    await act(async () => {
+      await state.deleteConversation(newer.id);
+    });
+    expect(state.activeConversationId).toBe(older.id);
+    expect(state.activeConversation).toEqual(older);
+    await act(async () => {
+      await state.deleteConversation(older.id);
+    });
+    expect(state.activeConversation.serverId).toBe('local');
+    expect(state.messages).toEqual([]);
+    expect(state.activeConversationId).not.toBe(older.id);
+    expect(saved().conversations).toContainEqual(remote);
+    unmount();
+    mount();
+    expect(state.conversations).toHaveLength(1);
+    expect(state.messages).toEqual([]);
+  });
+
+  it('keeps cached and persisted records when saving a deletion fails', async () => {
+    const active = conversation('active', 'local', Date.now());
+    storage.set(
+      CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify({ version: 1, activeConversationId: active.id, conversations: [active] })
+    );
+    mount();
+    setItem.mockImplementationOnce(() => {
+      throw new Error('Storage unavailable');
+    });
+    const cleanup = vi.fn(async () => {});
+    await act(async () => {
+      await expect(state.deleteConversation(active.id, cleanup)).rejects.toThrow(
+        'Storage unavailable'
+      );
+    });
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(state.activeConversation).toEqual(active);
+    expect(saved().conversations).toEqual([active]);
+  });
+
+  it('restores the persisted row when context cleanup fails after the deletion was saved', async () => {
+    const active = conversation('active', 'local', Date.now());
+    storage.set(
+      CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify({ version: 1, activeConversationId: active.id, conversations: [active] })
+    );
+    mount();
+    const cleanup = vi.fn(async () => {
+      expect(saved().conversations.some((c) => c.id === active.id)).toBe(false);
+      throw new Error('Context file locked');
+    });
+    await act(async () => {
+      await expect(state.deleteConversation(active.id, cleanup)).rejects.toThrow(
+        'Context file locked'
+      );
+    });
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(state.activeConversation).toEqual(active);
+    expect(saved().conversations).toEqual([active]);
+    unmount();
+    mount();
+    expect(state.activeConversation).toEqual(active);
+  });
 });

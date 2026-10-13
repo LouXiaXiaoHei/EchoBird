@@ -75,6 +75,7 @@ beforeEach(() => {
     activeConversationId: 'first',
     createConversation: vi.fn(),
     selectConversation: vi.fn(),
+    deleteConversation: vi.fn(async () => {}),
     isProcessing: false,
     setChatInput: vi.fn(),
     selectedServerId: 'local',
@@ -111,7 +112,7 @@ describe('Mother Agent conversation list', () => {
     expect(markup).toContain('1 day ago');
     expect(markup).toContain('0 messages');
     expect(markup).toContain('Just now');
-    expect(buttons[2].findAllByType('div')[0].children).toContain('New conversation');
+    expect(buttons[3].props['aria-label']).toBe('New conversation');
   });
 
   it('starts or selects only on explicit clicks and blocks both actions while processing', () => {
@@ -122,14 +123,14 @@ describe('Mother Agent conversation list', () => {
     expect(state.selectConversation).not.toHaveBeenCalled();
     let buttons = renderer!.root.findAllByType('button');
     act(() => buttons[0].props.onClick());
-    act(() => buttons[2].props.onClick());
+    act(() => buttons[3].props.onClick());
     expect(state.createConversation).toHaveBeenCalledTimes(1);
     expect(state.selectConversation).toHaveBeenCalledWith('second');
     state = { ...state, isProcessing: true };
     act(() => renderer!.update(<ConversationList />));
     buttons = renderer!.root.findAllByType('button');
     expect(buttons.every((button) => button.props.disabled)).toBe(true);
-    act(() => buttons.forEach((button) => button.props.onClick()));
+    act(() => buttons.forEach((button) => button.props.onClick({ stopPropagation: vi.fn() })));
     expect(state.createConversation).toHaveBeenCalledTimes(1);
     expect(state.selectConversation).toHaveBeenCalledTimes(1);
   });
@@ -146,6 +147,26 @@ describe('Mother Agent conversation list', () => {
       vi.advanceTimersByTime(60_000);
     });
     expect(JSON.stringify(renderer!.toJSON())).toContain('1分钟前');
+  });
+
+  it('deletes through a separate button without selecting the record and disables deletion while processing', () => {
+    act(() => {
+      renderer = create(<ConversationList />);
+    });
+    const deleteLabel = `${translate('btn.delete', locale)} ${translate('mother.newConversation', locale)}`;
+    const deletion = renderer!.root.findByProps({ 'aria-label': deleteLabel });
+    expect(deletion.parent?.type).toBe('div');
+    const event = { stopPropagation: vi.fn() };
+    act(() => deletion.props.onClick(event));
+    expect(event.stopPropagation).toHaveBeenCalled();
+    expect(state.deleteConversation).toHaveBeenCalledExactlyOnceWith('second');
+    expect(state.selectConversation).not.toHaveBeenCalled();
+    state = { ...state, isProcessing: true };
+    act(() => renderer!.update(<ConversationList />));
+    const disabled = renderer!.root.findByProps({ 'aria-label': deleteLabel });
+    expect(disabled.props.disabled).toBe(true);
+    act(() => disabled.props.onClick(event));
+    expect(state.deleteConversation).toHaveBeenCalledTimes(1);
   });
 });
 

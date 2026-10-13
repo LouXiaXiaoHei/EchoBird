@@ -128,27 +128,34 @@ export function useChatPersistence<T>({
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const flush = useCallback(() => {
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = null;
-    if (!dirtyRef.current) return;
-    try {
+  const writeStored = useCallback(
+    (value: ConversationState<T>) => {
       localStorage.setItem(
         CONVERSATIONS_STORAGE_KEY,
         JSON.stringify({
           version: 1,
-          ...stateRef.current,
-          conversations: stateRef.current.conversations.map((c) => ({
+          ...value,
+          conversations: value.conversations.map((c) => ({
             ...c,
             messages: c.messages.map(toDisk).filter((m) => m !== null),
           })),
         })
       );
+    },
+    [toDisk]
+  );
+
+  const flush = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    if (!dirtyRef.current) return;
+    try {
+      writeStored(stateRef.current);
       dirtyRef.current = false;
     } catch {
       // Preserve cached rows and retry on the next change; no blocking dialog.
     }
-  }, [toDisk]);
+  }, [writeStored]);
 
   const update = useCallback((next: ConversationState<T>) => {
     stateRef.current = next;
@@ -233,6 +240,44 @@ export function useChatPersistence<T>({
     flush();
   }, [setMessages, flush]);
 
+  const deleteConversation = useCallback(
+    async (id: string, cleanup?: () => Promise<void>) => {
+      const prev = stateRef.current;
+      const deleted = prev.conversations.find((c) => c.id === id);
+      if (!deleted) return;
+      flush();
+      const conversations = prev.conversations.filter((c) => c.id !== id);
+      let activeConversationId = prev.activeConversationId;
+      if (id === activeConversationId) {
+        let active = conversations
+          .filter((c) => c.serverId === deleted.serverId)
+          .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        if (!active) {
+          active = newConversation<T>(deleted.serverId);
+          conversations.unshift(active);
+        }
+        activeConversationId = active.id;
+      }
+      const next = { conversations, activeConversationId };
+      writeStored(next);
+      if (cleanup) {
+        try {
+          await cleanup();
+        } catch (error) {
+          try {
+            writeStored(prev);
+          } catch {
+            dirtyRef.current = true;
+          }
+          throw error;
+        }
+      }
+      update(next);
+      dirtyRef.current = false;
+    },
+    [flush, writeStored, update]
+  );
+
   const activeConversation = state.conversations.find((c) => c.id === state.activeConversationId)!;
   return {
     activeConversation,
@@ -246,5 +291,6 @@ export function useChatPersistence<T>({
     createConversation,
     selectServer,
     clearHistory,
+    deleteConversation,
   };
 }

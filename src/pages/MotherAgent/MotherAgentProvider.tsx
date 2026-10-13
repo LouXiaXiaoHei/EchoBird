@@ -10,6 +10,8 @@ import type { ChatMessage } from './types';
 import { MotherAgentContext } from './context';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useConfirm } from '../../components/ConfirmDialog';
+import { useToast } from '../../components/Toast';
 
 export function selectAgentProtocol(baseUrl: string, anthropicUrl?: string) {
   const useAnthropic = !baseUrl && !!anthropicUrl;
@@ -26,7 +28,9 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const { detectedTools: _detectedTools } = useToolsStore();
   const { activePage, motherPrefill: initialMessage, clearMotherPrefill } = useNavigationStore();
   const onAgentRunningChange = useNavigationStore((s) => s.setAgentRunning);
-  const { t: _t, locale } = useI18n(); // locale for agent hint; t for error messages
+  const { t, locale } = useI18n(); // locale for agent hint; t for error messages
+  const confirm = useConfirm();
+  const { showToast } = useToast();
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [agentModel, setAgentModelRaw] = useState<string | null>(() =>
     localStorage.getItem('echobird_agent_model')
@@ -240,6 +244,8 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     selectConversation: selectStoredConversation,
     activeConversationId,
     clearHistory: clearStoredHistory,
+    deleteConversation: deleteStoredConversation,
+    conversations,
   } = persistence;
   const selectedServerId = activeConversation.serverId;
   const sessionKey = activeConversation.sessionKey;
@@ -620,6 +626,52 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     setChatOutput,
   ]);
 
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      if (resettingRef.current || runningRef.current || isProcessing) return;
+      const conversation = conversations.find((c) => c.id === id);
+      if (!conversation) return;
+      resettingRef.current = true;
+      setIsResetting(true);
+      try {
+        const ok = await confirm({
+          title: t('mother.deleteConversationTitle'),
+          message: t('mother.deleteConversationConfirm').replace(
+            '{title}',
+            conversation.title || t('mother.newConversation')
+          ),
+          confirmText: t('btn.delete'),
+          cancelText: t('btn.cancel'),
+          type: 'danger',
+        });
+        if (!ok) return;
+        await deleteStoredConversation(id, async () => {
+          await api.resetAgent(conversation.sessionKey);
+          const legacy = conversation.id.startsWith('legacy-');
+          if (!legacy || conversation.serverId === 'local') {
+            await api.parasiteReset('claudecode', legacy ? undefined : conversation.sessionKey);
+          }
+        });
+        if (id === activeConversationId) setChatInput('');
+      } catch (e) {
+        const key = errorToKey(String(e));
+        showToast('error', key ? t(key) : String(e ?? '').slice(0, 500));
+      } finally {
+        resettingRef.current = false;
+        setIsResetting(false);
+      }
+    },
+    [
+      isProcessing,
+      conversations,
+      activeConversationId,
+      confirm,
+      t,
+      showToast,
+      deleteStoredConversation,
+    ]
+  );
+
   return (
     <MotherAgentContext.Provider
       value={{
@@ -633,6 +685,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
         activeConversationId: persistence.activeConversationId,
         createConversation,
         selectConversation,
+        deleteConversation,
         isProcessing: isProcessing || isResetting,
         agentModelData,
         agentState,

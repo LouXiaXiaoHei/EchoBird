@@ -398,6 +398,8 @@ export type TKey =
   | 'mother.newConversation'
   | 'mother.conversationMessageCount'
   | 'mother.justNow'
+  | 'mother.deleteConversationTitle'
+  | 'mother.deleteConversationConfirm'
   | 'mother.local'
   | 'mother.addServer'
   | 'mother.hostIp'

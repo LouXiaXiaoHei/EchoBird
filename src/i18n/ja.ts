@@ -414,6 +414,8 @@ const ja: Partial<Translations> = {
   'mother.newConversation': '新しい会話',
   'mother.conversationMessageCount': '{count} 件のメッセージ',
   'mother.justNow': 'たった今',
+  'mother.deleteConversationTitle': '会話を削除',
+  'mother.deleteConversationConfirm': '「{title}」とその会話履歴を削除しますか？',
   'mother.local': 'ローカル',
   'mother.addServer': 'サーバー追加',
   'mother.hostIp': 'ホスト / IP',

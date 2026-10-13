@@ -288,21 +288,23 @@ export function MotherAgentMain() {
           className={`absolute inset-0 overflow-y-auto slim-scroll ${showWelcome ? 'py-4' : 'p-4'}`}
         >
           {showWelcome ? (
-            <div className="flex min-h-full flex-col items-center justify-center gap-7">
-              <div className="flex items-center gap-3">
-                <img
-                  src="/brand/bird.png"
-                  alt=""
-                  aria-hidden="true"
-                  draggable={false}
-                  className="h-12 w-12 select-none"
-                />
-                <span className="brand-mark text-cyber-text" style={{ fontSize: 36 }}>
-                  {t('app.name')}
-                </span>
-              </div>
-              <div className="w-full">
-                <QuickCommandChips />
+            <div className="grid min-h-full grid-rows-[minmax(0,0.382fr)_auto_minmax(0,0.618fr)]">
+              <div className="row-start-2 flex flex-col items-center gap-7">
+                <div className="flex items-center gap-3">
+                  <img
+                    src="/brand/bird.png"
+                    alt=""
+                    aria-hidden="true"
+                    draggable={false}
+                    className="h-12 w-12 select-none"
+                  />
+                  <span className="brand-mark text-cyber-text" style={{ fontSize: 36 }}>
+                    {t('app.name')}
+                  </span>
+                </div>
+                <div className="w-full">
+                  <QuickCommandChips />
+                </div>
               </div>
             </div>
           ) : (

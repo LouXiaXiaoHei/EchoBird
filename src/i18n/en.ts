@@ -414,6 +414,8 @@ const en: Translations = {
   'mother.newConversation': 'New conversation',
   'mother.conversationMessageCount': '{count} messages',
   'mother.justNow': 'Just now',
+  'mother.deleteConversationTitle': 'Delete conversation',
+  'mother.deleteConversationConfirm': 'Delete “{title}” and its chat history?',
   'mother.local': 'LOCAL',
   'mother.addServer': 'ADD SERVER',
   'mother.hostIp': 'Host / IP',

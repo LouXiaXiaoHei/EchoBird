@@ -399,6 +399,8 @@ const zhHant: Partial<Translations> = {
   'mother.newConversation': '新增對話',
   'mother.conversationMessageCount': '{count} 則訊息',
   'mother.justNow': '剛剛',
+  'mother.deleteConversationTitle': '刪除對話',
+  'mother.deleteConversationConfirm': '確定刪除「{title}」及其聊天記錄？',
   'mother.local': '本機',
   'mother.addServer': '新增伺服器',
   'mother.hostIp': '主機 / IP',
