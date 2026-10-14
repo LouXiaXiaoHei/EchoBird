@@ -69,24 +69,47 @@ pub(crate) fn verified_appimage_pid(executable: &Path) -> Option<u32> {
 async fn verify_process(pid: u32, expected: &Path) -> Result<(), String> {
     #[cfg(windows)]
     let actual = {
-        let mut command = crate::utils::process::command("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new(); $copilotProcess=Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $env:ECHOBIRD_COPILOT_PID); if($copilotProcess){$copilotProcess.ExecutablePath}else{exit 1}"])
-            .env("ECHOBIRD_COPILOT_PID", pid.to_string());
-        let output = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio::process::Command::from(command).output(),
-        )
-        .await
-        .map_err(|_| "accountError.initializeClient")?
-        .map_err(|_| "accountError.initializeClient")?;
-        if !output.status.success() {
-            return Err("accountError.initializeClient".into());
+        use std::os::windows::ffi::OsStringExt;
+        use windows::{
+            core::PWSTR,
+            Win32::{
+                Foundation::{CloseHandle, WAIT_TIMEOUT},
+                System::Threading::{
+                    OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject,
+                    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+                },
+            },
+        };
+        unsafe {
+            let process = OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                pid,
+            )
+            .map_err(|_| "accountError.initializeClient")?;
+            let result = (|| -> Result<std::path::PathBuf, String> {
+                if WaitForSingleObject(process, 0) != WAIT_TIMEOUT {
+                    return Err("accountError.initializeClient".into());
+                }
+                let mut buffer = vec![0u16; 32_768];
+                let mut length = buffer.len() as u32;
+                QueryFullProcessImageNameW(
+                    process,
+                    PROCESS_NAME_WIN32,
+                    PWSTR(buffer.as_mut_ptr()),
+                    &mut length,
+                )
+                .map_err(|_| "accountError.initializeClient")?;
+                if WaitForSingleObject(process, 0) != WAIT_TIMEOUT {
+                    return Err("accountError.initializeClient".into());
+                }
+                Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+                    &buffer[..length as usize],
+                )))
+            })();
+            let _ = CloseHandle(process);
+            result?
         }
-        std::path::PathBuf::from(
-            String::from_utf8(output.stdout)
-                .map_err(|_| "accountError.format")?
-                .trim(),
-        )
     };
     #[cfg(target_os = "macos")]
     let actual = {
@@ -407,6 +430,48 @@ pub(crate) fn rollback_account(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_process_identity_requires_a_live_pid_and_matching_executable() {
+        let expected = std::env::current_exe().unwrap();
+        let pid = std::process::id();
+        verify_process(pid, &expected).await.unwrap();
+        for (pid, executable) in [(0, expected), (pid, "wrong-client.exe".into())] {
+            assert_eq!(
+                verify_process(pid, &executable).await.unwrap_err(),
+                "accountError.initializeClient"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_process_identity_rejects_retained_exited_pids_including_exit_code_259() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::HANDLE, System::Threading::GetExitCodeProcess};
+
+        let executable = std::path::PathBuf::from(std::env::var_os("ComSpec").unwrap());
+        for exit_code in [0, 259] {
+            let mut child = crate::utils::process::command(&executable)
+                .args(["/d", "/c", &format!("exit {exit_code}")])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            assert_eq!(child.wait().unwrap().code(), Some(exit_code));
+            let mut native_exit_code = 0;
+            unsafe {
+                GetExitCodeProcess(HANDLE(child.as_raw_handle()), &mut native_exit_code).unwrap();
+            }
+            assert_eq!(native_exit_code, exit_code as u32);
+            assert_eq!(
+                verify_process(child.id(), &executable).await.unwrap_err(),
+                "accountError.initializeClient"
+            );
+            drop(child);
+        }
+    }
 
     #[tokio::test]
     async fn authenticated_channel_has_live_pid_positive_control_and_redacts_native_errors() {
