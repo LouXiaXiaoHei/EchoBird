@@ -5,8 +5,9 @@ Strip blocklisted-host items from pulse JSON files in-place.
 The upstream ZH aggregator (SuYxh/ai-news-aggregator) wraps a lot of
 individual KOL X/Twitter posts as "news" items — roughly 8% of the 7d
 window. They're editorial / promotional rather than reporting, so we drop
-them at refresh time. This runs in the GHA workflow after curl-ing the
-upstream JSON and again from build_en_pulse.py for symmetry.
+them at refresh time. The GHA workflow filters both the downloaded ZH feed
+and the generated EN feed. Keep these rules aligned with the frontend's
+filterNewsItems, which also covers upstream mirrors and old archives.
 
 Schema-aware: rewrites `total_items` and `items`, leaves the rest of the
 payload (site_stats, archive_total, etc.) untouched.
@@ -19,12 +20,13 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-# Match the full host segment (incl. any subdomain). Three hosts:
+# Block each hostname and its subdomains. Three hosts:
 #   x.com / *.x.com           — KOL posts, not reporting
 #   twitter.com / *.twitter.com — same
 #   v2ex.com / *.v2ex.com     — forum chatter, very low signal for AI news
-BLOCKED_HOST_RE = re.compile(r"^https?://([^/]+\.)?(x|twitter|v2ex)\.com/", re.IGNORECASE)
+BLOCKED_HOSTS = ("x.com", "twitter.com", "v2ex.com")
 
 # Match items whose title is platform moderation/announcement noise OR
 # obvious paid placement / promotional content.
@@ -102,12 +104,17 @@ def filter_file(path: Path) -> tuple[int, int, int]:
     payload = json.loads(text)
     items = payload.get("items") or []
     before = len(items)
-    kept = [
-        it
-        for it in items
-        if not BLOCKED_HOST_RE.match(it.get("url") or "")
-        and not BLOCKED_TITLE_RE.search(it.get("title") or "")
-    ]
+    kept = []
+    for it in items:
+        try:
+            host = (urlsplit(it.get("url") or "").hostname or "").lower().rstrip(".")
+        except ValueError:
+            continue
+        if any(host == blocked or host.endswith("." + blocked) for blocked in BLOCKED_HOSTS):
+            continue
+        if any(BLOCKED_TITLE_RE.search(it.get(key) or "") for key in ("title", "title_zh", "title_en")):
+            continue
+        kept.append(it)
     payload["items"] = kept
     payload["total_items"] = len(kept)
     fixed = normalize_future_timestamps(payload)

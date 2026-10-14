@@ -12,7 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { ChevronDown, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
-import { fetchFeed, type NewsItem } from './feed';
+import { fetchFeed, filterNewsItems, type NewsItem } from './feed';
 import type { TKey } from '../../i18n';
 
 // ===== Archive (disk-backed) =====
@@ -40,9 +40,10 @@ interface FeedMeta {
 }
 
 const loadItems = (lang: 'zh' | 'en'): Promise<NewsItem[]> =>
-  invoke<NewsItem[]>('pulse_load_all', { lang });
+  invoke<NewsItem[]>('pulse_load_all', { lang }).then(filterNewsItems);
 const saveItems = async (lang: 'zh' | 'en', items: NewsItem[]): Promise<void> => {
-  if (items.length > 0) await invoke('pulse_save', { lang, items });
+  const allowed = filterNewsItems(items);
+  if (allowed.length > 0) await invoke('pulse_save', { lang, items: allowed });
 };
 const loadMeta = (lang: 'zh' | 'en'): FeedMeta | null => {
   try {
@@ -69,9 +70,7 @@ const migrateLegacyToDisk = async (lang: 'zh' | 'en'): Promise<void> => {
     const raw = localStorage.getItem(LEGACY_ITEMS_KEY(lang));
     if (raw) {
       const items: NewsItem[] = JSON.parse(raw);
-      if (items.length > 0) {
-        await invoke('pulse_save', { lang, items });
-      }
+      await saveItems(lang, items);
     }
     localStorage.removeItem(LEGACY_ITEMS_KEY(lang));
     localStorage.setItem(MIGRATION_DONE_KEY(lang), '1');

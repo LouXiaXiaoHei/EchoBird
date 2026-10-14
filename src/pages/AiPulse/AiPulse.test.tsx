@@ -12,7 +12,10 @@ vi.mock('../../hooks/useI18n', () => ({
 }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('./feed', () => ({ fetchFeed: vi.fn() }));
+vi.mock('./feed', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./feed')>()),
+  fetchFeed: vi.fn(),
+}));
 
 const news = (id: string, title: string, day = '14'): NewsItem => ({
   id,
@@ -97,6 +100,67 @@ afterEach(() => {
 });
 
 describe('restored AI news', () => {
+  it.each(['zh', 'en'])(
+    'filters old %s archives without refetching or rewriting them',
+    async (lang) => {
+      locale = lang === 'zh' ? 'zh-Hans' : 'en';
+      const good = lang === 'zh' ? chinese : english;
+      const discussion = news(
+        'discussion',
+        lang === 'zh' ? '广告业的 AI 转型' : 'AI in advertising'
+      );
+      const promotion = news(
+        'promotion',
+        lang === 'zh'
+          ? '[推广] 一个下午验证 Claude 中转，送 10 美元试用金'
+          : '[Sponsored] AI trial credits'
+      );
+      const xPost = {
+        ...news('x-post', lang === 'zh' ? 'AI 模型讨论' : 'AI model discussion'),
+        url: 'https://x.com/user/status/123',
+      };
+      const v2ex = {
+        ...news('v2ex', lang === 'zh' ? 'AI 产品体验' : 'AI product review'),
+        url: 'https://www.v2ex.com/t/123',
+      };
+      archive[lang] = [good, discussion, promotion, xPost, v2ex];
+      await mount();
+      expect(markup()).toContain(good.title);
+      expect(markup()).toContain(discussion.title);
+      for (const blocked of [promotion, xPost, v2ex]) expect(markup()).not.toContain(blocked.title);
+      expect(button('142')).toBeDefined();
+      expect(fetchFeed).not.toHaveBeenCalled();
+      expect(invoke).toHaveBeenCalledExactlyOnceWith('pulse_load_all', { lang });
+      expect(localStorage.setItem).not.toHaveBeenCalled();
+    }
+  );
+
+  it('does not archive blocked content returned by a remote source', async () => {
+    archive.zh = [];
+    const promotion = news('promotion', '[推广] AI 中转试用金');
+    const twitter = {
+      ...news('twitter', 'AI 动态'),
+      url: 'https://mobile.twitter.com/user/status/123',
+    };
+    vi.mocked(fetchFeed).mockResolvedValue(feed([chinese, promotion, twitter]));
+    await mount();
+    expect(invoke).toHaveBeenCalledWith('pulse_save', { lang: 'zh', items: [chinese] });
+    expect(markup()).toContain(chinese.title);
+    expect(markup()).not.toContain(promotion.title);
+    expect(markup()).not.toContain(twitter.title);
+    expect(button('141')).toBeDefined();
+  });
+
+  it('filters the old localStorage cache before migrating it to the archive', async () => {
+    storage.delete('pulse:migrated-to-disk:zh');
+    const promotion = news('promotion', '[推广] AI 中转试用金');
+    storage.set('pulse:items:zh', JSON.stringify([chinese, promotion]));
+    await mount();
+    expect(invoke).toHaveBeenCalledWith('pulse_save', { lang: 'zh', items: [chinese] });
+    expect(storage.has('pulse:items:zh')).toBe(false);
+    expect(markup()).not.toContain(promotion.title);
+  });
+
   it('does no news I/O while inactive, then loads a fresh archive without network or writes', async () => {
     await mount(false);
     expect(invoke).not.toHaveBeenCalled();

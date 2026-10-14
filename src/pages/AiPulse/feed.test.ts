@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const payload = {
   items: [{ id: 'article', title: 'AI news', source: 'AI Lab', url: 'https://example.com/news' }],
+  total_items: 1,
 };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 let fetchFeed: typeof import('./feed').fetchFeed;
@@ -19,6 +20,51 @@ afterEach(() => {
 });
 
 describe('news mirrors', () => {
+  it.each(['zh', 'en'] as const)(
+    'filters blocked links and promotional titles from the %s fallback source',
+    async (lang) => {
+      const blocked = [
+        { url: 'https://x.com', title: 'AI discussion' },
+        { url: 'https://MOBILE.TWITTER.COM:443/user/status/1', title: 'AI discussion' },
+        { url: 'https://v2ex.com?tab=ai', title: 'AI discussion' },
+        { url: 'https://x.com./user', title: 'AI discussion' },
+        {
+          url: 'https://example.com/promo',
+          title: '[推广] 一个下午验证 Claude 中转，送 10 美元试用金',
+        },
+        { url: 'https://example.com/ad', title: '【广告】AI 产品' },
+        { url: 'https://example.com/sponsor', title: '[Sponsored] AI trial credits' },
+        {
+          url: 'https://example.com/translated',
+          title: 'AI trial credits',
+          title_zh: '[推广] AI 试用金',
+        },
+      ].map((item, index) => ({ ...payload.items[0], id: `blocked-${index}`, ...item }));
+      const allowed = [
+        payload.items[0],
+        { ...payload.items[0], id: 'ad-industry', title: '广告业的 AI 转型' },
+        { ...payload.items[0], id: 'sponsor-news', title: 'Anthropic 拒绝 X 公司赞助' },
+        {
+          ...payload.items[0],
+          id: 'domain-in-title',
+          title: 'AI discussion on x.com',
+          url: 'https://example.com/x.com',
+        },
+        { ...payload.items[0], id: 'similar-domain', url: 'https://examplex.com/news' },
+      ];
+      fetchMock.mockResolvedValueOnce(response({}, 404)).mockResolvedValueOnce(
+        response({
+          items: [...blocked, ...allowed],
+          total_items: blocked.length + allowed.length,
+        })
+      );
+      const result = await fetchFeed(lang, new AbortController().signal);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.items).toEqual(allowed);
+      expect(result.total_items).toBe(allowed.length);
+    }
+  );
+
   it('rejects unavailable and malformed sources, then keeps the working CDN preferred', async () => {
     fetchMock
       .mockResolvedValueOnce(response({}, 404))

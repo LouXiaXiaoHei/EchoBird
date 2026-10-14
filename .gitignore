@@ -72,6 +72,7 @@ scripts/*
 !scripts/tests/
 scripts/tests/*
 !scripts/tests/test_refresh_free_models.py
+!scripts/tests/test_filter_pulse.py
 
 # llama-server binaries (downloaded during CI build)
 electron/tools/llama-server/bin/

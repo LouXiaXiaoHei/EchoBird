@@ -58,6 +58,28 @@ export interface NewsItem {
   title_en?: string | null;
 }
 
+// Match scripts/filter_pulse.py for mirrors and archives that bypass our workflow.
+const BLOCKED_HOSTS = ['x.com', 'twitter.com', 'v2ex.com'];
+const BLOCKED_TITLE_RE =
+  /社区公告|[【[](?:广告|推广|赞助|AD|PR|Sponsored)[】\]]|^(?:广告|推广|赞助)[:：\s|]/i;
+
+export function filterNewsItems(items: NewsItem[]): NewsItem[] {
+  return items.filter((item) => {
+    let host: string;
+    try {
+      host = new URL(item.url).hostname.toLowerCase().replace(/\.+$/, '');
+    } catch {
+      return false;
+    }
+    if (BLOCKED_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`))) {
+      return false;
+    }
+    return ![item.title, item.title_zh, item.title_en].some((title) =>
+      BLOCKED_TITLE_RE.test(title || '')
+    );
+  });
+}
+
 // ===== Network: mirror-aware fetch =====
 
 // Sticky preferred-mirror index, separate per feed: once a mirror serves a
@@ -116,6 +138,8 @@ async function fetchOneFeed(lang: 'zh' | 'en', signal: AbortSignal): Promise<Raw
           lastErr = new Error(`${mirror.name} invalid feed`);
           continue;
         }
+        parsed.items = filterNewsItems(parsed.items);
+        parsed.total_items = parsed.items.length;
         preferredMirror[lang] = (start + i) % mirrors.length;
         return parsed;
       } catch {

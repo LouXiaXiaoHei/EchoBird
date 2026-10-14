@@ -35,7 +35,9 @@ jobs:
           python scripts/filter_pulse.py docs/pulse/latest-7d.json
 
       - name: Build global feed
-        run: python scripts/build_en_pulse.py
+        run: |
+          python scripts/build_en_pulse.py
+          python scripts/filter_pulse.py docs/pulse/latest-7d-en.json
 
       - name: Validate feeds
         run: |
