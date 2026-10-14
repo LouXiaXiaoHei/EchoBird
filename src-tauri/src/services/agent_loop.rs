@@ -2446,8 +2446,9 @@ mod conversation_tests {
 
     #[test]
     fn clearing_persisted_history_handles_missing_files_and_reports_deletion_failure() {
-        let directory =
-            std::env::temp_dir().join(format!("echobird-agent-reset-{}", uuid::Uuid::new_v4()));
+        let directory = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("echobird-agent-reset-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("session.json");
         let histories = HistoryStore::new(directory.clone());

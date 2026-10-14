@@ -76,12 +76,12 @@ export function MotherAgentPanel() {
       <div className="h-10 px-2 flex items-center justify-between bg-transparent">
         <ViewModeTabs
           value={panelTab}
+          onChange={setPanelTab}
           options={[
             { value: 'conversations', label: t('mother.conversations') },
             { value: 'servers', label: t('mother.servers') },
             { value: 'guide', label: t('mother.sshGuide') },
           ]}
-          onChange={setPanelTab}
         />
       </div>
 
