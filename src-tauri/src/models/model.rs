@@ -44,6 +44,7 @@ pub enum AccountProvider {
     Grok,
     Cline,
     Kiro,
+    Zcode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

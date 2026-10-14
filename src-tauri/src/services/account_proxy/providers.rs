@@ -330,7 +330,8 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             | AccountProvider::Kiro
             | AccountProvider::Minimax
             | AccountProvider::Qoder
-            | AccountProvider::QoderCn => {
+            | AccountProvider::QoderCn
+            | AccountProvider::Zcode => {
                 unreachable!("Provider uses its account gateway")
             }
         })
@@ -429,7 +430,8 @@ fn signed(
         | AccountProvider::Kiro
         | AccountProvider::Minimax
         | AccountProvider::Qoder
-        | AccountProvider::QoderCn => {
+        | AccountProvider::QoderCn
+        | AccountProvider::Zcode => {
             unreachable!("Provider uses its account gateway")
         }
     }
@@ -896,7 +898,8 @@ async fn fetch_models(
         | AccountProvider::Kiro
         | AccountProvider::Minimax
         | AccountProvider::Qoder
-        | AccountProvider::QoderCn => {
+        | AccountProvider::QoderCn
+        | AccountProvider::Zcode => {
             unreachable!("Provider uses its account gateway")
         }
     };

@@ -728,13 +728,24 @@ async fn read_event(run: &Run, value: Value) -> Result<bool, ProxyError> {
     }
     if value["type"] == "result" {
         if value["is_error"].as_bool().unwrap_or(false) {
-            let status = value["api_error_status"]
+            let upstream_status = value["api_error_status"]
                 .as_u64()
                 .filter(|code| (400..600).contains(code))
-                .and_then(|code| StatusCode::from_u16(code as u16).ok())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+                .and_then(|code| StatusCode::from_u16(code as u16).ok());
+            if upstream_status.is_none()
+                && value["result"]
+                    .as_str()
+                    .is_some_and(|message| super::context_limit_error(None, message))
+            {
+                let mut error = ProxyError::new(
+                    StatusCode::BAD_REQUEST,
+                    "Claude Code rejected a prompt that exceeds its available context window",
+                );
+                error.error_code = Some("context_length_exceeded".into());
+                return Err(error);
+            }
             return Err(ProxyError::new(
-                status,
+                upstream_status.unwrap_or(StatusCode::BAD_GATEWAY),
                 "Claude Code account inference failed",
             ));
         }
@@ -1526,6 +1537,26 @@ mod tests {
                 .status,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[tokio::test]
+    async fn local_context_rejection_is_a_client_error() {
+        let (run, _, _) = fixture_run(vec![], json!("none"));
+        let error = read_event(
+            &run,
+            json!({"type":"result","is_error":true,"result":"Prompt is too long"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error_code.as_deref(), Some("context_length_exceeded"));
+        let other = read_event(
+            &run,
+            json!({"type":"result","is_error":true,"api_error_status":429,"result":"Prompt is too long"}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(other.status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

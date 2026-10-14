@@ -379,7 +379,7 @@ it('refreshes explicitly, preserves a valid choice, and retains the snapshot whe
   expect(showToast).toHaveBeenCalledWith('error', 'Error: Directory unavailable');
 });
 
-it.each(['workBuddy', 'workBuddyAi', 'qoder', 'qoderCn', 'kilo', 'cline'] as const)(
+it.each(['workBuddy', 'workBuddyAi', 'qoder', 'qoderCn', 'kilo', 'cline', 'zcode'] as const)(
   'updates %s free metadata with the model directory and preserves it on failure',
   async (provider) => {
     const source = { provider, accountId: 'saved' };

@@ -17,6 +17,7 @@ export const accountProxyProviders: { id: AccountProvider; name: string; icon: s
   { id: 'cline', name: 'Cline', icon: 'clinedesktop.png' },
   { id: 'kilo', name: 'Kilo', icon: 'kilodesktop.png' },
   { id: 'copilot', name: 'GitHub Copilot', icon: 'copilotdesktop.png' },
+  { id: 'zcode', name: 'ZCode', icon: 'zcode.png' },
 ];
 
 export interface ProxyAccount {

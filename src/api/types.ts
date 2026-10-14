@@ -48,7 +48,8 @@ export type AccountProvider =
   | 'qoder'
   | 'qoderCn'
   | 'grok'
-  | 'cline';
+  | 'cline'
+  | 'zcode';
 
 export interface AccountSource {
   provider: AccountProvider;

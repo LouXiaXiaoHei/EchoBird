@@ -11,6 +11,7 @@ mod qoder;
 mod responses;
 mod tools;
 mod trae;
+mod zcode;
 
 use axum::{
     body::Body,
@@ -162,6 +163,8 @@ pub async fn route(
         trae::route(provider, credentials, model, body, client).await
     } else if provider == AccountProvider::ClaudeCode {
         bridge::route(credentials, model, body).await
+    } else if provider == AccountProvider::Zcode {
+        zcode::route(credentials, model, body, client).await
     } else {
         providers::route(provider, credentials, model, body, client).await
     }
@@ -201,6 +204,8 @@ pub async fn list_models(
         trae::list_models(provider, credentials, client).await
     } else if provider == AccountProvider::ClaudeCode {
         bridge::list_models(credentials).await
+    } else if provider == AccountProvider::Zcode {
+        zcode::list_models(credentials, client).await
     } else {
         providers::list_models(provider, credentials, client).await
     }

@@ -117,7 +117,8 @@ export function AccountModelFields({
         provider === 'workBuddy' ||
         provider === 'workBuddyAi' ||
         provider === 'kilo' ||
-        provider === 'cline'
+        provider === 'cline' ||
+        provider === 'zcode'
       ) {
         try {
           const rows = await listProxyAccounts(provider);

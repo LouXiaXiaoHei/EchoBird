@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::{
     antigravity_accounts, claude_code_accounts, codex_accounts, minimax_accounts, qoder_accounts,
-    trae_accounts, workbuddy_accounts,
+    trae_accounts, workbuddy_accounts, zcode_accounts,
 };
 use crate::models::model::{AccountProvider, AccountSource};
 
@@ -125,6 +125,17 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
                 saved
             })
             .collect(),
+        Zcode => zcode_accounts::list_saved_accounts()?
+            .into_iter()
+            .map(|a| {
+                let site = if a.provider == "bigmodel" {
+                    "BigModel"
+                } else {
+                    "Z.ai"
+                };
+                option(provider, a.id, format!("{site} · {}", a.email), None)
+            })
+            .collect(),
     };
     for account in &mut accounts {
         account.free_model_ids = match provider {
@@ -223,6 +234,7 @@ pub(crate) async fn credentials(
         Grok => super::grok_accounts::proxy::credentials(&source.account_id, force_refresh).await,
         Cline => super::cline_accounts::proxy_credentials(&source.account_id, force_refresh).await,
         Kiro => super::kiro_accounts::proxy_credentials(&source.account_id, force_refresh).await,
+        Zcode => zcode_accounts::proxy_credentials(&source.account_id, force_refresh).await,
     }
     .map(|credentials| preparation_credentials(credentials, source))
 }
@@ -276,6 +288,13 @@ pub(crate) async fn credentials_after_rejection(
         }
         Kiro => {
             super::kiro_accounts::proxy_credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
+        Zcode => {
+            zcode_accounts::proxy_credentials_after_rejection(
                 &source.account_id,
                 rejected_credentials,
             )
@@ -396,6 +415,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
                     | AccountProvider::Grok
                     | AccountProvider::Cline
                     | AccountProvider::Kiro
+                    | AccountProvider::Zcode
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
             let refreshed = model_directory_credentials(
