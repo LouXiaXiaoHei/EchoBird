@@ -359,7 +359,7 @@ const zhHant: Partial<Translations> = {
   'toolCat.autoTrading': '量化分析',
   'toolCat.game': '遊戲',
   'toolCat.desktop': '桌面端',
-  'toolCat.cloudAgent': '雲端 Agent',
+  'toolCat.cloudAgent': 'Personal Agent',
   'toolCat.utility': '工具',
   'toolCat.science': '科研',
   'agent.modelsTab': '模型',

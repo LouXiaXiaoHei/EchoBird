@@ -358,7 +358,7 @@ const en: Translations = {
   'toolCat.autoTrading': 'Quant Analysis',
   'toolCat.game': 'Game',
   'toolCat.desktop': 'Desktop',
-  'toolCat.cloudAgent': 'Cloud Agent',
+  'toolCat.cloudAgent': 'Personal Agent',
   'toolCat.utility': 'Utilities',
   'toolCat.science': 'Science',
   // Agent Worker tabs
