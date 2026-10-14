@@ -231,6 +231,13 @@ function FamilySessions({ family }: { family: AiCareerFamily }) {
         const input = session.input_tokens;
         const output = session.output_tokens;
         const total = input !== null && output !== null ? formatCompact(input + output) : '—';
+        const metadata = [sessionProject(session.cwd), relativeTime(session, locale, t)];
+        const modelId = session.model_id?.trim();
+        if (modelId) metadata.push(modelId);
+        if (session.message_count !== null && session.message_count !== undefined)
+          metadata.push(
+            t('aiCareer.messages').replace('{count}', session.message_count.toLocaleString(locale))
+          );
         const rowKey = `${session.id}:${path ?? session.saved_at}`;
         return (
           <div
@@ -284,7 +291,7 @@ function FamilySessions({ family }: { family: AiCareerFamily }) {
               </div>
               <div className="flex items-center gap-3">
                 <div className="flex-1 min-w-0 text-[11px] text-cyber-text-secondary truncate">
-                  {sessionProject(session.cwd)} · {relativeTime(session, locale, t)}
+                  {metadata.join(' · ')}
                 </div>
                 <div className="flex-shrink-0 text-[11px] text-cyber-text-secondary text-right tabular-nums whitespace-nowrap">
                   {t('aiCareer.input')} {input === null ? '—' : formatCompact(input)} ·{' '}

@@ -165,8 +165,20 @@ pub struct SavedSession {
     pub saved_at: String,
     pub file_path: Option<String>,
     pub turn_count: Option<u32>,
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub message_count: Option<u32>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+}
+
+fn session_model_id(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && *id != "<synthetic>")
+        .map(str::to_string)
 }
 
 #[derive(Default, Clone, Copy)]
@@ -291,6 +303,9 @@ fn parse_agent_jsonl_checked(
     let mut cwd = String::new();
     let mut title = String::new();
     let mut total_messages = 0u32;
+    let mut message_count = 0u32;
+    let mut model_id = None;
+    let mut seen_messages = HashSet::new();
     let mut real_user_messages = 0u32;
     let mut usage_by_message = HashMap::new();
 
@@ -321,6 +336,9 @@ fn parse_agent_jsonl_checked(
         let Some(msg_obj) = msg_obj else { continue };
         let role = msg_obj.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if role == "assistant" {
+            if let Some(model) = session_model_id(msg_obj.get("model")) {
+                model_id = Some(model);
+            }
             if let Some(usage) = msg_obj.get("usage") {
                 let key = msg_obj
                     .get("id")
@@ -336,6 +354,34 @@ fn parse_agent_jsonl_checked(
         }
         if role == "user" || role == "assistant" {
             total_messages += 1;
+            let tool_result_only = role == "user"
+                && msg_obj
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|blocks| {
+                        !blocks.is_empty()
+                            && blocks.iter().all(|block| {
+                                block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+                            })
+                    });
+            let synthetic_assistant = role == "assistant"
+                && msg_obj
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|model| model.trim() == "<synthetic>");
+            let identity = msg_obj
+                .get("id")
+                .or_else(|| value.get("uuid"))
+                .and_then(|v| v.as_str())
+                .filter(|id| !id.is_empty());
+            if !tool_result_only
+                && !synthetic_assistant
+                && identity.map_or(true, |id| {
+                    seen_messages.insert((role.to_string(), id.to_string()))
+                })
+            {
+                message_count += 1;
+            }
         }
         if role == "user" {
             let is_real_user = match msg_obj.get("content") {
@@ -427,6 +473,8 @@ fn parse_agent_jsonl_checked(
         saved_at: mtime_millis(file_path),
         file_path: Some(file_path.to_string_lossy().into_owned()),
         turn_count: Some(turns_from_messages(total_messages)),
+        model_id,
+        message_count: Some(message_count),
         input_tokens: usage.input,
         output_tokens: usage.output,
     }))
@@ -533,6 +581,7 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
     let mut cwd = String::new();
     let mut title = String::new();
     let mut total_messages = 0u32;
+    let mut model_id = None;
     let mut usage = daily_tokens::CodexUsage::default();
     let mut metadata_seen = false;
 
@@ -546,6 +595,21 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
         let Some(payload) = value.get("payload") else {
             continue;
         };
+
+        if row_type == "turn_context" {
+            if let Some(model) = session_model_id(payload.get("model")) {
+                model_id = Some(model);
+            }
+        } else if row_type == "thread_settings_applied"
+            || (row_type == "event_msg"
+                && payload.get("type").and_then(|v| v.as_str()) == Some("thread_settings_applied"))
+        {
+            if let Some(model) = session_model_id(payload.pointer("/thread_settings/model"))
+                .or_else(|| session_model_id(payload.pointer("/settings/model")))
+            {
+                model_id = Some(model);
+            }
+        }
 
         if row_type == "session_meta" {
             if metadata_seen {
@@ -624,6 +688,8 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
         saved_at: mtime_millis(file_path),
         file_path: Some(file_path.to_string_lossy().into_owned()),
         turn_count: Some(turns_from_messages(total_messages)),
+        model_id,
+        message_count: Some(total_messages),
         input_tokens: usage.input,
         output_tokens: usage.output,
     }))
@@ -869,7 +935,7 @@ fn drizzle_history_page_checked(
                     .into_owned(),
                 None => directory,
             };
-            let usage = drizzle_session_usage_checked(&conn, &id)?;
+            let (usage, model_id) = drizzle_session_details_checked(&conn, &id)?;
             Ok(SavedSession {
                 id: format!("{}_native_{}", tool, id),
                 name: title,
@@ -879,6 +945,8 @@ fn drizzle_history_page_checked(
                 saved_at: time_updated.to_string(),
                 file_path: Some(db_str.clone()),
                 turn_count: Some(std::cmp::max(1, msg_count / 2) as u32),
+                model_id,
+                message_count: u32::try_from(msg_count).ok(),
                 input_tokens: usage.input,
                 output_tokens: usage.output,
             })
@@ -903,10 +971,10 @@ fn sqlite_has_column(
     Ok(false)
 }
 
-fn drizzle_session_usage_checked(
+fn drizzle_session_details_checked(
     conn: &rusqlite::Connection,
     session_id: &str,
-) -> rusqlite::Result<TokenUsage> {
+) -> rusqlite::Result<(TokenUsage, Option<String>)> {
     let has_v2_session = if sqlite_has_column(conn, "session_v2", "id")? {
         conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id = ?1)",
@@ -931,17 +999,48 @@ fn drizzle_session_usage_checked(
         "message"
     };
     if !sqlite_has_column(conn, table, "data")? {
-        return Ok(TokenUsage::default());
+        return Ok((TokenUsage::default(), None));
     }
     let boundary = drizzle_usage_boundary(conn, table);
+    let order = if sqlite_has_column(conn, table, "seq")? {
+        "m.seq, m.id"
+    } else if sqlite_has_column(conn, table, "time_created")? {
+        "m.time_created, m.id"
+    } else {
+        "m.rowid"
+    };
+    let role = if table == "session_message" && sqlite_has_column(conn, table, "type")? {
+        "m.type"
+    } else {
+        "NULL"
+    };
     let mut statement = conn.prepare(&format!(
-        "SELECT m.data FROM {table} m WHERE m.session_id = ?1{boundary}"
+        "SELECT m.data, {role} FROM {table} m WHERE m.session_id = ?1{boundary} ORDER BY {order}"
     ))?;
-    let rows = statement.query_map([session_id], |row| row.get::<_, Option<String>>(0))?;
+    let rows = statement.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })?;
     let mut usage = TokenUsage::default();
-    for data in rows {
-        let Some(data) = data? else { continue };
+    let mut model_id = None;
+    for row in rows {
+        let (data, role) = row?;
+        let Some(data) = data else { continue };
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+            if role
+                .as_deref()
+                .or_else(|| value.get("role").and_then(|v| v.as_str()))
+                == Some("assistant")
+            {
+                if let Some(model) = session_model_id(value.pointer("/model/id"))
+                    .or_else(|| session_model_id(value.get("modelID")))
+                    .or_else(|| session_model_id(value.get("modelId")))
+                {
+                    model_id = Some(model);
+                }
+            }
             if let Some(tokens) = value.get("tokens") {
                 let sample = TokenUsage::read(tokens, "input", "output");
                 if table != "message" || !is_unmeasured_drizzle_zero(&value, sample) {
@@ -950,7 +1049,7 @@ fn drizzle_session_usage_checked(
             }
         }
     }
-    Ok(usage)
+    Ok((usage, model_id))
 }
 
 fn is_unmeasured_drizzle_zero(value: &serde_json::Value, usage: TokenUsage) -> bool {
@@ -1196,7 +1295,9 @@ fn hermes_history_page_checked(
         title: String,
         cwd: String,
         started_at: f64,
-        msg_count: i64,
+        msg_count: Option<i64>,
+        conversation_count: Option<u32>,
+        model_id: Option<String>,
         usage: TokenUsage,
     }
     let raws: Vec<Raw> = {
@@ -1209,8 +1310,22 @@ fn hermes_history_page_checked(
         } else {
             "NULL, NULL"
         };
+        let model_column =
+            if sqlite_has_column(&conn, "sessions", "model").map_err(|error| error.to_string())? {
+                "model"
+            } else {
+                "NULL"
+            };
+        let conversation_count = if sqlite_has_column(&conn, "messages", "session_id")
+            .map_err(|error| error.to_string())?
+            && sqlite_has_column(&conn, "messages", "role").map_err(|error| error.to_string())?
+        {
+            "(SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id AND m.role IN ('user', 'assistant'))"
+        } else {
+            "NULL"
+        };
         let query = format!(
-            "SELECT id, title, cwd, started_at, message_count, {usage_columns} \
+            "SELECT id, title, cwd, started_at, message_count, {usage_columns}, {model_column}, {conversation_count} \
                      FROM sessions \
                      WHERE archived = 0 \
                      ORDER BY started_at DESC \
@@ -1224,7 +1339,11 @@ fn hermes_history_page_checked(
                     title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                     cwd: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
                     started_at: row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                    msg_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    msg_count: row.get(4)?,
+                    conversation_count: row
+                        .get::<_, Option<i64>>(8)?
+                        .and_then(|count| u32::try_from(count).ok()),
+                    model_id: row.get(7)?,
                     usage: TokenUsage {
                         input: row
                             .get::<_, Option<i64>>(5)?
@@ -1239,6 +1358,13 @@ fn hermes_history_page_checked(
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
+    let has_model_usage = ["session_id", "model", "last_seen"]
+        .into_iter()
+        .map(|column| sqlite_has_column(&conn, "session_model_usage", column))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .all(|present| present);
 
     raws.into_iter()
         .map(|r| {
@@ -1262,6 +1388,22 @@ fn hermes_history_page_checked(
                         }
                     })
             };
+            let mut model_id = r.model_id.as_deref().map(str::trim)
+                .filter(|id| !id.is_empty()).map(str::to_string);
+            if has_model_usage {
+                let mut statement = conn.prepare(
+                    "SELECT model FROM session_model_usage WHERE session_id = ?1 ORDER BY last_seen DESC"
+                ).map_err(|error| error.to_string())?;
+                let models = statement.query_map([&r.id], |row| row.get::<_, Option<String>>(0))
+                    .map_err(|error| error.to_string())?;
+                for model in models {
+                    let model = model.map_err(|error| error.to_string())?;
+                    if let Some(model) = model.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+                        model_id = Some(model.to_string());
+                        break;
+                    }
+                }
+            }
             Ok(SavedSession {
                 id: format!("hermes_native_{}", r.id),
                 name,
@@ -1270,8 +1412,10 @@ fn hermes_history_page_checked(
                 // started_at is epoch seconds; the frontend wants ms.
                 saved_at: ((r.started_at * 1000.0) as i64).to_string(),
                 file_path: Some(db_str.clone()),
-                turn_count: Some(turns_from_messages(r.msg_count.max(0) as u32)),
+                turn_count: Some(turns_from_messages(r.msg_count.unwrap_or(0).max(0) as u32)),
                 session_token: Some(r.id),
+                model_id,
+                message_count: r.conversation_count,
                 input_tokens: r.usage.input,
                 output_tokens: r.usage.output,
             })
@@ -1631,12 +1775,28 @@ fn parse_dsh_session_checked(path: &Path) -> Result<Option<SavedSession>, String
 
     let title = dsh_title_from_events(&events);
     let turn_count = dsh_turn_count(&events);
+    let mut model_id = None;
+    let mut message_count = 0u32;
     let mut usage_by_step = HashMap::new();
     for event in &events {
         let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
         let Some(data) = event.get("data") else {
             continue;
         };
+        if kind == "user/message" || kind == "assistant/message" {
+            message_count += 1;
+        }
+        if kind == "assistant/message" {
+            if let Some(model) =
+                session_model_id(data.pointer("/message/source/replayState/response/responseModel"))
+                    .or_else(|| {
+                        session_model_id(data.pointer("/message/source/replayState/response/model"))
+                    })
+                    .or_else(|| session_model_id(data.pointer("/message/source/model")))
+            {
+                model_id = Some(model);
+            }
+        }
         let sample = match kind {
             "assistant/message" => data.get("usage"),
             "assistant/chunk"
@@ -1674,6 +1834,8 @@ fn parse_dsh_session_checked(path: &Path) -> Result<Option<SavedSession>, String
         saved_at: mtime_millis(path),
         file_path: Some(path.to_string_lossy().into_owned()),
         turn_count: (turn_count > 0).then_some(turn_count),
+        model_id,
+        message_count: Some(message_count),
         input_tokens: usage.input,
         output_tokens: usage.output,
     }))
@@ -1813,7 +1975,7 @@ fn hydrate_session_cache() {
     HYDRATED.get_or_init(|| {
         if let Ok(mut cache) = session_cache().lock() {
             for (path, value) in
-                persistent_cache::read(&parsed_cache_path("ai-career-sessions-v1.json"))
+                persistent_cache::read(&parsed_cache_path("ai-career-sessions-v2.json"))
             {
                 cache.entry(path).or_insert(value);
             }
@@ -1823,7 +1985,7 @@ fn hydrate_session_cache() {
 
 fn flush_session_cache() {
     if let Ok(cache) = session_cache().lock() {
-        let _ = persistent_cache::write(&parsed_cache_path("ai-career-sessions-v1.json"), &cache);
+        let _ = persistent_cache::write(&parsed_cache_path("ai-career-sessions-v2.json"), &cache);
     }
 }
 
@@ -2271,6 +2433,110 @@ mod tests {
     }
 
     #[test]
+    fn session_metadata_reads_old_wire_data_without_guessing_messages() {
+        let session: SavedSession = serde_json::from_value(serde_json::json!({
+            "id":"fixture", "name":"Task", "tool":"codex", "cwd":"/fixture",
+            "saved_at":"1000", "turn_count":3
+        }))
+        .unwrap();
+        assert_eq!(session.model_id, None);
+        assert_eq!(session.message_count, None);
+        assert_eq!(session.turn_count, Some(3));
+    }
+
+    #[test]
+    fn claude_metadata_deduplicates_messages_and_keeps_last_real_model() {
+        let dir = fixture_dir();
+        let path = dir.join("claude.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                serde_json::json!({"uuid":"u1","message":{"role":"user","content":"Real task"}}),
+                serde_json::json!({"message":{"id":"a1","role":"assistant","model":"claude-old","content":[{"type":"text","text":"First part"}]}}),
+                serde_json::json!({"message":{"id":"a1","role":"assistant","model":"claude-old","content":[{"type":"tool_use","id":"tool-1"}]}}),
+                serde_json::json!({"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}),
+                serde_json::json!({"message":{"id":"a2","role":"assistant","model":" claude-new ","content":"Final answer"}}),
+                serde_json::json!({"message":{"id":"synthetic","role":"assistant","model":"<synthetic>","content":"Summary"}}),
+                serde_json::json!({"message":{"role":"tool","model":"not-a-chat-model","content":"Internal"}}),
+                serde_json::json!({"message":{"role":"system","content":"Internal"}}),
+            ],
+        );
+        let session = parse_agent_jsonl(&path, Family::Claude).unwrap();
+        assert_eq!(session.model_id.as_deref(), Some("claude-new"));
+        assert_eq!(session.message_count, Some(3));
+        assert_eq!(
+            session.turn_count,
+            Some(3),
+            "existing turn estimate is unchanged"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_metadata_tracks_context_and_settings_without_duplicate_event_messages() {
+        let dir = fixture_dir();
+        let path = dir.join("rollout.jsonl");
+        let mut rows = vec![
+            serde_json::json!({"type":"session_meta","payload":{"id":"fixture","cwd":"/fixture","source":"cli"}}),
+            serde_json::json!({"type":"turn_context","payload":{"model":"gpt-old"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Real task"}]}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"user_message","message":"Real task"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Answer"}]}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","output":"Internal"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"message","role":"system","content":[]}}),
+        ];
+        write_jsonl(&path, &rows);
+        let session = parse_codex_session_jsonl(&path).unwrap();
+        assert_eq!(session.model_id.as_deref(), Some("gpt-old"));
+        assert_eq!(session.message_count, Some(2));
+        rows.push(serde_json::json!({"type":"thread_settings_applied","payload":{"settings":{"model":"gpt-new"}}}));
+        rows.push(serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-latest"}}}));
+        rows.push(serde_json::json!({"type":"turn_context","payload":{"model":"  "}}));
+        rows.push(serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}));
+        write_jsonl(&path, &rows);
+        let session = parse_codex_session_jsonl(&path).unwrap();
+        assert_eq!(session.model_id.as_deref(), Some("gpt-latest"));
+        assert_eq!(session.message_count, Some(3));
+        assert_eq!(session.turn_count, Some(2));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dsh_metadata_counts_complete_messages_and_prefers_served_model() {
+        let dir = fixture_dir();
+        let rows = [
+            serde_json::json!({"type":"session","version":0,"id":"fixture","cwd":"/fixture"}),
+            serde_json::json!({"type":"turn/start","data":{"turn":0}}),
+            serde_json::json!({"type":"user/message","data":{"content":[{"type":"text","text":"Real task"}]}}),
+            serde_json::json!({"type":"assistant/chunk","data":{"chunk":{"type":"assistant/message","model":"wrong-streamed-model"}}}),
+            serde_json::json!({"type":"assistant/message","data":{"message":{"source":{"model":"auto","replayState":{"response":{"responseModel":"deepseek-v4-pro"}}}}}}),
+            serde_json::json!({"type":"tool/message","data":{"model":"wrong-tool-model"}}),
+            serde_json::json!({"type":"assistant/message","data":{"message":{"source":{"model":"requested-model","replayState":{"response":{"model":"deepseek-v4-flash"}}}}}}),
+            serde_json::json!({"type":"assistant/message","data":{"message":{"source":{"model":" "}}}}),
+            serde_json::json!({"type":"turn/end","data":{"turn":0}}),
+        ];
+        let plain = dir.join("session.jsonl");
+        write_jsonl(&plain, &rows);
+        let compressed = dir.join("session.jsonl.zstd");
+        std::fs::write(
+            &compressed,
+            zstd::stream::encode_all(std::fs::read(&plain).unwrap().as_slice(), 1).unwrap(),
+        )
+        .unwrap();
+        for path in [&plain, &compressed] {
+            let session = parse_dsh_session(path).unwrap();
+            assert_eq!(session.model_id.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(session.message_count, Some(4));
+            assert_eq!(session.turn_count, Some(1));
+        }
+        write_jsonl(&plain, &rows[..4]);
+        let session = parse_dsh_session(&plain).unwrap();
+        assert_eq!(session.model_id, None);
+        assert_eq!(session.message_count, Some(1));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn claude_usage_replaces_streamed_samples_and_preserves_zero_and_missing() {
         let dir = fixture_dir();
         let path = dir.join("session.jsonl");
@@ -2499,7 +2765,9 @@ mod tests {
             &path,
             &[
                 serde_json::json!({"type":"session_meta","payload":{"id":"fixture","cwd":"/fixture","source":"cli"}}),
+                serde_json::json!({"type":"turn_context","payload":{"model":"initial-model"}}),
                 serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Original title"}]}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}),
                 serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}),
             ],
         );
@@ -2507,6 +2775,8 @@ mod tests {
         SESSION_PARSE_COUNT.with(|count| count.set(0));
         let first = family_history_files_at(&root, Family::Codex, 0, 20, &cache).unwrap();
         assert_eq!(first[0].input_tokens, Some(10));
+        assert_eq!(first[0].model_id.as_deref(), Some("initial-model"));
+        assert_eq!(first[0].message_count, Some(2));
         assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 1);
         let cache_path = dir.join("cache.json");
         persistent_cache::write(&cache_path, &cache.lock().unwrap()).unwrap();
@@ -2517,6 +2787,12 @@ mod tests {
             "Original title"
         );
         assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 0);
+        {
+            let cache = reloaded.lock().unwrap();
+            let cached = cache.get(&path).unwrap().session.as_ref().unwrap();
+            assert_eq!(cached.model_id.as_deref(), Some("initial-model"));
+            assert_eq!(cached.message_count, Some(2));
+        }
         // Index names are applied after cache reuse, so native renames stay fresh.
         std::fs::write(
             dir.join("session_index.jsonl"),
@@ -2530,13 +2806,25 @@ mod tests {
         assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 0);
         let original = std::fs::read_to_string(&path).unwrap();
         let appended = serde_json::json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":15,"output_tokens":3}}}});
-        std::fs::write(&path, format!("{original}{appended}\n")).unwrap();
+        let settings = serde_json::json!({"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"latest-model"}}});
+        let message = serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}});
+        std::fs::write(
+            &path,
+            format!("{original}{settings}\n{message}\n{appended}\n"),
+        )
+        .unwrap();
         assert_eq!(
             family_history_files_at(&root, Family::Codex, 0, 20, &reloaded).unwrap()[0]
                 .input_tokens,
             Some(15)
         );
         assert_eq!(SESSION_PARSE_COUNT.with(|count| count.get()), 1);
+        {
+            let cache = reloaded.lock().unwrap();
+            let refreshed = cache.get(&path).unwrap().session.as_ref().unwrap();
+            assert_eq!(refreshed.model_id.as_deref(), Some("latest-model"));
+            assert_eq!(refreshed.message_count, Some(3));
+        }
         let renamed = root.join("renamed.jsonl");
         std::fs::rename(&path, &renamed).unwrap();
         assert_eq!(
@@ -2748,13 +3036,56 @@ mod tests {
         ).unwrap();
         let old = hermes_history_page(&db, 0, 20);
         assert_eq!((old[0].input_tokens, old[0].output_tokens), (None, None));
+        assert_eq!(old[0].model_id, None);
+        assert_eq!(old[0].message_count, None);
         conn.execute_batch("ALTER TABLE sessions ADD COLUMN input_tokens INTEGER; ALTER TABLE sessions ADD COLUMN output_tokens INTEGER; UPDATE sessions SET input_tokens=15, output_tokens=0;").unwrap();
         let recorded = hermes_history_page(&db, 0, 20);
         assert_eq!(
             (recorded[0].input_tokens, recorded[0].output_tokens),
             (Some(15), Some(0))
         );
+        conn.execute_batch(
+            "CREATE TABLE messages (session_id TEXT); INSERT INTO messages VALUES ('fixture');",
+        )
+        .unwrap();
+        assert_eq!(hermes_history_page(&db, 0, 20)[0].message_count, None);
+        conn.execute_batch(
+            "ALTER TABLE messages ADD COLUMN role TEXT; UPDATE messages SET role='user';",
+        )
+        .unwrap();
+        assert_eq!(hermes_history_page(&db, 0, 20)[0].message_count, Some(1));
         drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hermes_metadata_prefers_recent_usage_and_falls_back_to_session_model() {
+        let dir = fixture_dir();
+        let db = dir.join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL, message_count INTEGER, archived INTEGER, model TEXT);
+             INSERT INTO sessions VALUES ('main','Task','/fixture',1000,5,0,'initial-model'),
+                ('fallback','Fallback','/fixture',900,1,0,'session-model'),
+                ('unknown','Unknown','/fixture',800,NULL,0,NULL);
+             CREATE TABLE session_model_usage (session_id TEXT, model TEXT, last_seen REAL);
+             INSERT INTO session_model_usage VALUES ('main','old-model',10),('main','latest-model',20),
+                ('main','  ',30),('other','other-model',100);
+             CREATE TABLE messages (session_id TEXT, role TEXT);
+             INSERT INTO messages VALUES ('main','user'),('main','assistant'),('main','assistant'),
+                ('main','tool'),('main','system'),('fallback','user'),('other','assistant');"
+        ).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        let rows = hermes_history_page(&db, 0, 20);
+        assert_eq!(rows[0].model_id.as_deref(), Some("latest-model"));
+        assert_eq!(rows[0].message_count, Some(3));
+        assert_eq!(rows[0].turn_count, Some(3));
+        assert_eq!(rows[1].model_id.as_deref(), Some("session-model"));
+        assert_eq!(rows[1].message_count, Some(1));
+        assert_eq!(rows[2].model_id, None);
+        assert_eq!(rows[2].message_count, Some(0));
+        assert_eq!(std::fs::read(&db).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3092,9 +3423,62 @@ mod tests {
         assert_eq!(rows[0].session_token.as_deref(), Some("main"));
         assert_eq!(rows[0].saved_at, "5000");
         assert_eq!(rows[0].turn_count, Some(2));
+        assert_eq!(rows[0].message_count, Some(4));
+        assert_eq!(rows[0].model_id, None);
         assert_eq!(rows[0].file_path.as_deref(), db.to_str());
         assert_eq!(rows[1].name, "OpenCode Session");
         assert_eq!(rows[1].cwd, "/empty");
+        assert_eq!(rows[1].message_count, Some(0));
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        std::fs::remove_file(db).unwrap();
+    }
+
+    #[test]
+    fn drizzle_metadata_uses_authoritative_messages_and_latest_model_order() {
+        let db = opencode_v2_fixture();
+        add_opencode_v1_fixture(&db);
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(r#"
+            ALTER TABLE session_message ADD COLUMN data TEXT;
+            ALTER TABLE session_message ADD COLUMN seq INTEGER;
+            UPDATE session_message SET data='{"model":{"id":"ignored-user-model"}}',seq=0 WHERE id='u1';
+            UPDATE session_message SET data='{"model":{"id":"latest-v2-model"},"tokens":{"input":2,"output":1}}',seq=4 WHERE id='a1';
+            UPDATE session_message SET data='{"model":{"id":"older-v2-model"},"tokens":{"input":3,"output":1}}',seq=2 WHERE id='a2';
+            UPDATE session_message SET data='{"model":{"id":"ignored-control-model"}}',seq=6 WHERE id='switch';
+            INSERT INTO session_message VALUES ('blank','main','assistant','{"model":{"id":" "}}',5);
+            ALTER TABLE message ADD COLUMN data TEXT;
+            ALTER TABLE message ADD COLUMN time_created INTEGER;
+            UPDATE message SET data='{"role":"assistant","modelID":"stale-v1-model"}' WHERE session_id='main';
+            UPDATE message SET data='{"role":"assistant","modelId":"latest-v1-model"}',time_created=4 WHERE id='legacy-a';
+            INSERT INTO message VALUES ('legacy-older','legacy','{"role":"assistant","modelID":"older-v1-model"}',2);
+        "#).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        for tool in ["opencode", "mimo"] {
+            let rows = drizzle_history_page(&db, tool, tool, 0, 30);
+            let main = rows
+                .iter()
+                .find(|session| session.session_token.as_deref() == Some("main"))
+                .unwrap();
+            assert_eq!(main.model_id.as_deref(), Some("latest-v2-model"));
+            assert_eq!(main.message_count, Some(5));
+            assert_eq!((main.input_tokens, main.output_tokens), (Some(5), Some(2)));
+            let legacy = rows
+                .iter()
+                .find(|session| session.session_token.as_deref() == Some("legacy"))
+                .unwrap();
+            assert_eq!(legacy.model_id.as_deref(), Some("latest-v1-model"));
+            assert_eq!(legacy.message_count, Some(3));
+            let empty = rows
+                .iter()
+                .find(|session| session.session_token.as_deref() == Some("empty"))
+                .unwrap();
+            assert_eq!(
+                empty.model_id, None,
+                "empty V2 does not inherit old V1 metadata"
+            );
+            assert_eq!(empty.message_count, Some(0));
+        }
         assert_eq!(std::fs::read(&db).unwrap(), before);
         std::fs::remove_file(db).unwrap();
     }

@@ -282,6 +282,57 @@ describe('career family sessions', () => {
     expect(text()).toContain('translated:aiCareer.copyId');
   });
 
+  it('shows the native model and localized message count after the project and date', async () => {
+    i18n.t = (key: string) =>
+      ({ 'aiCareer.timeJustNow': 'Just now', 'aiCareer.messages': '{count} messages' })[key] ?? key;
+    vi.mocked(api.aiCareerFamilyHistory).mockResolvedValueOnce([
+      session(1, {
+        saved_at: new Date().toISOString(),
+        model_id: '  provider/model-v1  ',
+        message_count: 1234,
+      }),
+    ]);
+    await open();
+    expect(text()).toContain('Example · Just now · provider/model-v1 · 1,234 messages');
+    expect(text()).toContain('aiCareer.input');
+    expect(text()).toContain('120');
+    expect(api.aiCareerFamilyHistory).toHaveBeenCalledExactlyOnceWith('codex', 0, 20);
+    expect(copyText).not.toHaveBeenCalled();
+    expect(api.revealAiCareerSessionFile).not.toHaveBeenCalled();
+
+    i18n.locale = 'zh-CN';
+    i18n.t = (key: string) =>
+      ({ 'aiCareer.timeJustNow': '刚刚', 'aiCareer.messages': '{count} 条消息' })[key] ?? key;
+    await act(async () => renderer.update(<AiCareerPanel family="codex" />));
+    expect(text()).toContain('Example · 刚刚 · provider/model-v1 · 1,234 条消息');
+    expect(api.aiCareerFamilyHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [{}, 'Example · Just now'],
+    [{ model_id: null, message_count: null }, 'Example · Just now'],
+    [{ model_id: '  ', message_count: null }, 'Example · Just now'],
+    [{ model_id: 'gpt-native' }, 'Example · Just now · gpt-native'],
+    [{ model_id: null, message_count: 0 }, 'Example · Just now · 0 messages'],
+  ] satisfies [Partial<SavedSession>, string][])(
+    'omits unknown session metadata while preserving a measured zero: %o',
+    async (metadata, expected) => {
+      i18n.t = (key: string) =>
+        ({ 'aiCareer.timeJustNow': 'Just now', 'aiCareer.messages': '{count} messages' })[key] ??
+        key;
+      vi.mocked(api.aiCareerFamilyHistory).mockResolvedValueOnce([
+        session(1, { saved_at: new Date().toISOString(), ...metadata }),
+      ]);
+      await open();
+      const summary = renderer.root.findByProps({
+        className: 'flex-1 min-w-0 text-[11px] text-cyber-text-secondary truncate',
+      });
+      expect(summary.children).toEqual([expected]);
+      expect(text()).not.toContain('5 messages');
+      expect(text()).not.toContain('undefined');
+    }
+  );
+
   it('keeps a pending page isolated from language readiness and appends it once', async () => {
     const page = deferred<SavedSession[]>();
     const savedAt = new Date().toISOString();

@@ -83,6 +83,37 @@ it('does not publish or write an unchanged successful response', async () => {
   expect(setItem).toHaveBeenCalledTimes(1);
 });
 
+it('restores native model metadata alongside sessions cached before the fields existed', async () => {
+  const legacy = session(1);
+  const known = { ...session(2), model_id: 'provider/model-v1', message_count: 0 };
+  const unknown = { ...session(3), model_id: null, message_count: null };
+  const first = await restart();
+  first.getState().cacheSessions('codex', [legacy, known, unknown]);
+  const second = await restart();
+  expect(second.getState().cachedScopes.codex?.sessions).toEqual([legacy, known, unknown]);
+  expect(setItem).toHaveBeenCalledTimes(1);
+});
+
+it.each([{ model_id: 123 }, { message_count: '5' }, { message_count: -1 }])(
+  'rejects invalid cached session metadata without discarding other sections: %o',
+  async (metadata) => {
+    saved = JSON.stringify({
+      version: 1,
+      data: {
+        codex: {
+          dashboard: { heatmapEntries: [], tokenBytes: 0 },
+          sessions: [{ ...session(1), ...metadata }],
+        },
+      },
+    });
+    const store = await restart();
+    expect(store.getState().cachedScopes.codex).toEqual({
+      dashboard: { heatmapEntries: [], tokenBytes: 0 },
+    });
+    expect(setItem).not.toHaveBeenCalled();
+  }
+);
+
 it.each(['broken json', JSON.stringify({ version: 999, data: {} })])(
   'ignores a damaged or unsupported snapshot: %s',
   async (value) => {

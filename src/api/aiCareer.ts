@@ -16,6 +16,8 @@ export interface SavedSession {
   session_token: string | null;
   saved_at: string;
   file_path: string | null;
+  model_id?: string | null;
+  message_count?: number | null;
   turn_count: number | null;
   input_tokens: number | null;
   output_tokens: number | null;

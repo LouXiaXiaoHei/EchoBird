@@ -104,6 +104,8 @@ function readSnapshots(): Partial<Record<Scope, CareerSnapshot>> {
             ) &&
             nullableString(session.session_token) &&
             nullableString(session.file_path) &&
+            (session.model_id === undefined || nullableString(session.model_id)) &&
+            (session.message_count === undefined || nullableNumber(session.message_count)) &&
             nullableNumber(session.turn_count) &&
             nullableNumber(session.input_tokens) &&
             nullableNumber(session.output_tokens)
