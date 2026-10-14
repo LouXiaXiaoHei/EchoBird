@@ -224,6 +224,7 @@ pub(crate) async fn credentials(
         Cline => super::cline_accounts::proxy_credentials(&source.account_id, force_refresh).await,
         Kiro => super::kiro_accounts::proxy_credentials(&source.account_id, force_refresh).await,
     }
+    .map(|credentials| preparation_credentials(credentials, source))
 }
 
 pub(crate) async fn credentials_after_rejection(
@@ -301,6 +302,7 @@ pub(crate) async fn credentials_after_rejection(
             .await
         }
     }
+    .map(|credentials| preparation_credentials(credentials, source))
 }
 
 pub(crate) fn credential_error(message: String) -> super::account_proxy::ProxyError {
@@ -363,6 +365,17 @@ fn model_directory_credentials(mut credentials: Value, source: &AccountSource) -
     credentials
 }
 
+fn preparation_credentials(credentials: Value, source: &AccountSource) -> Value {
+    if matches!(
+        source.provider,
+        AccountProvider::Antigravity | AccountProvider::Copilot
+    ) {
+        model_directory_credentials(credentials, source)
+    } else {
+        credentials
+    }
+}
+
 pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> {
     let secret = model_directory_credentials(credentials(source, false).await?, source);
     let client = reqwest::Client::builder()
@@ -401,6 +414,52 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::json;
+
+    #[test]
+    fn preparation_credentials_bind_only_the_saved_metadata_accounts() {
+        let credentials = json!({
+            "accessToken":"fixture-token", "accountId":"native-account",
+            "projectId":"fixture-project", "baseUrl":"https://api.example.test",
+            "headers":{"X-Fixture":"preserved"}, "protocol":"responses",
+            "_echobird_saved_account_id":"old-saved-account"
+        });
+        for provider in [AccountProvider::Antigravity, AccountProvider::Copilot] {
+            let source = AccountSource {
+                provider,
+                account_id: "current-saved-account".into(),
+            };
+            let mut expected = credentials.clone();
+            expected["_echobird_saved_account_id"] = json!(source.account_id);
+            let bound = preparation_credentials(credentials.clone(), &source);
+            assert_eq!(bound, expected);
+            assert_eq!(preparation_credentials(bound.clone(), &source), bound);
+        }
+        for provider in [
+            AccountProvider::ClaudeCode,
+            AccountProvider::Codex,
+            AccountProvider::WorkBuddy,
+            AccountProvider::WorkBuddyAi,
+            AccountProvider::Kilo,
+            AccountProvider::Trae,
+            AccountProvider::Traecn,
+            AccountProvider::Grok,
+            AccountProvider::Cline,
+            AccountProvider::Kiro,
+            AccountProvider::Minimax,
+            AccountProvider::Qoder,
+            AccountProvider::QoderCn,
+        ] {
+            let source = AccountSource {
+                provider,
+                account_id: "another-saved-account".into(),
+            };
+            assert_eq!(
+                preparation_credentials(credentials.clone(), &source),
+                credentials,
+                "{provider:?}"
+            );
+        }
+    }
 
     #[test]
     fn account_sources_keep_new_provider_regions_and_wire_names_distinct() {

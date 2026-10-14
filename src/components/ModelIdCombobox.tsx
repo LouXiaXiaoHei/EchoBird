@@ -12,8 +12,11 @@ interface ModelIdComboboxProps {
   selectOnly?: boolean;
   compact?: boolean;
   optionLabels?: Record<string, string>;
+  optionMultipliers?: Record<string, number>;
   freeModelIds?: readonly string[];
   freeLabel?: string;
+  inlineActions?: boolean;
+  actionHint?: string;
   disabled?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -60,8 +63,11 @@ export function ModelIdCombobox({
   selectOnly = false,
   compact = false,
   optionLabels,
+  optionMultipliers,
   freeModelIds,
   freeLabel = 'Free',
+  inlineActions = false,
+  actionHint,
   disabled = false,
   open,
   onOpenChange,
@@ -97,6 +103,7 @@ export function ModelIdCombobox({
   // the React `key` below.
   const opts = useMemo(() => Array.from(new Set(options)), [options]);
   const freeIds = useMemo(() => new Set(freeModelIds), [freeModelIds]);
+  const useInlineActions = inlineActions && !compact;
   const hasOptions = opts.length > 0;
   const hasChevron = hasOptions || selectOnly;
   const label = (id: string) => optionLabels?.[id] ?? id;
@@ -146,7 +153,7 @@ export function ModelIdCombobox({
   useEffect(() => {
     if (!showList) return;
     const compute = () => {
-      const el = inputRef.current;
+      const el = useInlineActions ? containerRef.current : inputRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
       const spaceBelow = window.innerHeight - r.bottom;
@@ -172,7 +179,7 @@ export function ModelIdCombobox({
       window.removeEventListener('scroll', compute, true);
       window.removeEventListener('resize', compute);
     };
-  }, [showList, filtered.length, compact]);
+  }, [showList, filtered.length, compact, useInlineActions]);
 
   // Close when clicking outside (input container OR the portal menu).
   useEffect(() => {
@@ -229,8 +236,67 @@ export function ModelIdCombobox({
     }
   };
 
+  const chevronButton = hasChevron && !compact && (
+    <button
+      type="button"
+      tabIndex={-1}
+      disabled={disabled || !hasOptions}
+      onMouseDown={useInlineActions ? (e) => e.preventDefault() : undefined}
+      onClick={(e) => {
+        if (useInlineActions) e.stopPropagation();
+        if (disabled || !hasOptions) return;
+        setSearching(false);
+        setActiveIdx(-1);
+        setIsOpen(!isOpen);
+      }}
+      aria-label="Toggle model id suggestions"
+      className={`${useInlineActions ? 'shrink-0' : 'absolute right-1.5 top-1/2 -translate-y-1/2'} text-cyber-text-muted hover:text-cyber-text`}
+    >
+      <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+    </button>
+  );
+  const refreshButton = onRefresh && (
+    <button
+      type="button"
+      disabled={disabled || refreshing}
+      aria-label={refreshLabel}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!disabled && !refreshing) onRefresh();
+      }}
+      className={`${useInlineActions ? 'shrink-0' : `absolute ${hasChevron ? 'right-7' : 'right-1.5'} top-1/2 -translate-y-1/2`} text-cyber-text-muted hover:text-cyber-text disabled:opacity-50`}
+    >
+      <RefreshCw size={14} className={refreshing ? 'animate-spin' : undefined} />
+    </button>
+  );
+  const pasteButton = onPaste && pasteLabel && (useInlineActions || !hasChevron) && (
+    <button
+      type="button"
+      tabIndex={-1}
+      disabled={disabled}
+      onMouseDown={useInlineActions ? (e) => e.preventDefault() : undefined}
+      onClick={(e) => {
+        if (useInlineActions) e.stopPropagation();
+        if (!disabled) onPaste();
+      }}
+      className={`${useInlineActions ? 'shrink-0' : `absolute ${onRefresh ? 'right-8' : 'right-2'} top-1/2 -translate-y-1/2`} text-xs text-cyber-text-secondary`}
+    >
+      {pasteLabel}
+    </button>
+  );
+
   return (
-    <div ref={containerRef} className={compact ? 'relative flex min-w-0' : 'relative'}>
+    <div
+      ref={containerRef}
+      className={
+        compact
+          ? 'relative flex min-w-0'
+          : useInlineActions
+            ? 'relative flex items-center w-full min-w-0 bg-cyber-input border border-cyber-border rounded-button'
+            : 'relative'
+      }
+    >
       {compact ? (
         <button
           ref={(node) => {
@@ -289,53 +355,24 @@ export function ModelIdCombobox({
           }}
           onKeyDown={handleKeyDown}
           // Reserve space for the field's actions; paste is shown only for free text.
-          className={`w-full bg-cyber-input border border-cyber-border ${padding} px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button`}
+          className={`${useInlineActions ? 'min-w-0 flex-1 bg-transparent' : `w-full bg-cyber-input border border-cyber-border ${padding}`} px-2 py-1.5 text-xs text-cyber-text font-mono focus:border-cyber-border focus:outline-none rounded-button`}
         />
       )}
-      {hasChevron && !compact && (
-        <button
-          type="button"
-          tabIndex={-1}
-          disabled={disabled || !hasOptions}
-          onClick={() => {
-            if (disabled || !hasOptions) return;
-            setSearching(false);
-            setActiveIdx(-1);
-            setIsOpen(!isOpen);
-          }}
-          aria-label="Toggle model id suggestions"
-          className={`absolute ${compact ? 'right-0' : 'right-1.5'} top-1/2 -translate-y-1/2 text-cyber-text-muted hover:text-cyber-text`}
-        >
-          <ChevronDown size={14} className={`transition-transform ${isOpen ? 'rotate-180' : ''}`} />
-        </button>
-      )}
-      {onRefresh && (
-        <button
-          type="button"
-          disabled={disabled || refreshing}
-          aria-label={refreshLabel}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!disabled && !refreshing) onRefresh();
-          }}
-          className={`absolute ${hasChevron ? 'right-7' : 'right-1.5'} top-1/2 -translate-y-1/2 text-cyber-text-muted hover:text-cyber-text disabled:opacity-50`}
-        >
-          <RefreshCw size={14} className={refreshing ? 'animate-spin' : undefined} />
-        </button>
-      )}
-      {onPaste && pasteLabel && !hasChevron && (
-        <button
-          type="button"
-          tabIndex={-1}
-          disabled={disabled}
-          onClick={() => {
-            if (!disabled) onPaste();
-          }}
-          className={`absolute ${onRefresh ? 'right-8' : 'right-2'} top-1/2 -translate-y-1/2 text-xs text-cyber-text-secondary`}
-        >
-          {pasteLabel}
-        </button>
+      {useInlineActions ? (
+        <div className="flex items-center gap-2 shrink-0 pr-2">
+          {actionHint && (
+            <span className="text-xs text-cyber-text-muted whitespace-nowrap">{actionHint}</span>
+          )}
+          {refreshButton}
+          {pasteButton}
+          {chevronButton}
+        </div>
+      ) : (
+        <>
+          {chevronButton}
+          {refreshButton}
+          {pasteButton}
+        </>
       )}
       {showList &&
         menuPos &&
@@ -358,34 +395,47 @@ export function ModelIdCombobox({
             }
             className={`overflow-y-auto z-[9999] bg-cyber-surface border border-cyber-border/60 rounded-button shadow-lg cursor-default ${compact ? `model-id-combobox-menu${menuPos.dropUp ? ' is-drop-up' : ''}` : ''}`}
           >
-            {filtered.map((opt, idx) => (
-              <div
-                key={opt}
-                // mousedown (not click) so selection fires before the input blurs.
-                onMouseDown={(e) => {
-                  if (e.button !== 0) return;
-                  e.preventDefault();
-                  pick(opt);
-                }}
-                onMouseEnter={() => setActiveIdx(idx)}
-                className={`px-2 py-1.5 text-xs font-mono transition-colors ${freeIds.has(opt) ? 'flex items-center gap-2' : 'truncate'} ${
-                  opt === value
-                    ? 'bg-cyber-text/15 text-cyber-text'
-                    : idx === activeIdx
-                      ? 'bg-cyber-text/10 text-cyber-text'
-                      : 'text-cyber-text hover:bg-cyber-text/10'
-                }`}
-              >
-                {freeIds.has(opt) ? (
-                  <>
-                    <span className="min-w-0 truncate">{label(opt)}</span>
-                    <span className="shrink-0 font-sans text-cyber-accent">{freeLabel}</span>
-                  </>
-                ) : (
-                  label(opt)
-                )}
-              </div>
-            ))}
+            {filtered.map((opt, idx) => {
+              const free = freeIds.has(opt);
+              const multiplier = optionMultipliers?.[opt];
+              const hasMultiplier =
+                !free &&
+                typeof multiplier === 'number' &&
+                Number.isFinite(multiplier) &&
+                multiplier > 0;
+              return (
+                <div
+                  key={opt}
+                  // mousedown (not click) so selection fires before the input blurs.
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    e.preventDefault();
+                    pick(opt);
+                  }}
+                  onMouseEnter={() => setActiveIdx(idx)}
+                  className={`px-2 py-1.5 text-xs font-mono transition-colors ${free || hasMultiplier ? 'flex items-center gap-2' : 'truncate'} ${
+                    opt === value
+                      ? 'bg-cyber-text/15 text-cyber-text'
+                      : idx === activeIdx
+                        ? 'bg-cyber-text/10 text-cyber-text'
+                        : 'text-cyber-text hover:bg-cyber-text/10'
+                  }`}
+                >
+                  {free || hasMultiplier ? (
+                    <>
+                      <span className="min-w-0 truncate">{label(opt)}</span>
+                      <span
+                        className={`shrink-0 font-sans ${free ? 'text-cyber-accent' : 'text-cyber-text-muted'}`}
+                      >
+                        {free ? freeLabel : `${multiplier}×`}
+                      </span>
+                    </>
+                  ) : (
+                    label(opt)
+                  )}
+                </div>
+              );
+            })}
           </div>,
           document.body
         )}

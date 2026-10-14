@@ -212,15 +212,32 @@ pub fn get_public_activity() -> PublicActivity {
 }
 
 pub fn set_candidate_ids(candidate_ids: Vec<String>) -> Result<PublicConfig, String> {
-    let valid_user_ids: HashSet<String> = model_manager::get_user_models()
-        .into_iter()
-        .map(|model| model.internal_id)
-        .collect();
+    let user_models = model_manager::get_user_models();
+    let _guard = config_lock()
+        .lock()
+        .map_err(|_| "smart router config lock poisoned".to_string())?;
+    let mut config = load_config_unlocked()?;
+    config.candidate_ids = prepare_candidate_ids(
+        candidate_ids,
+        &config.candidate_ids,
+        &user_models,
+        &crate::services::local_llm::get_server_info_sync(),
+    )?;
+    save_config_unlocked(&config)?;
+    server::retain_candidate_memory(&config.candidate_ids);
+    Ok(public_config(config))
+}
+
+fn prepare_candidate_ids(
+    candidate_ids: Vec<String>,
+    existing_ids: &[String],
+    user_models: &[ModelConfig],
+    local_server: &crate::services::local_llm::LocalServerInfo,
+) -> Result<Vec<String>, String> {
     let mut seen = HashSet::new();
     let candidate_ids: Vec<String> = candidate_ids
         .into_iter()
         .filter(|id| id != SMART_ROUTER_INTERNAL_ID)
-        .filter(|id| valid_user_ids.contains(id) || id == "local-server")
         .filter(|id| seen.insert(id.clone()))
         .collect();
     if candidate_ids.len() > server::MAX_ROUTE_CANDIDATES {
@@ -230,14 +247,25 @@ pub fn set_candidate_ids(candidate_ids: Vec<String>) -> Result<PublicConfig, Str
         ));
     }
 
-    let _guard = config_lock()
-        .lock()
-        .map_err(|_| "smart router config lock poisoned".to_string())?;
-    let mut config = load_config_unlocked()?;
-    config.candidate_ids = candidate_ids;
-    save_config_unlocked(&config)?;
-    server::retain_candidate_memory(&config.candidate_ids);
-    Ok(public_config(config))
+    for id in &candidate_ids {
+        if existing_ids.contains(id) {
+            continue;
+        }
+        let routable = if id == "local-server" {
+            local_server_is_routable(local_server)
+        } else {
+            user_models
+                .iter()
+                .any(|model| model.internal_id == *id && model_is_routable(model))
+        };
+        if !routable {
+            return Err(format!(
+                "Smart Router cannot add an unavailable model: {id}"
+            ));
+        }
+    }
+
+    Ok(candidate_ids)
 }
 
 pub fn get_candidate_models() -> Vec<ModelConfig> {
@@ -360,13 +388,31 @@ pub(crate) fn candidate_ids() -> Vec<String> {
 }
 
 pub(crate) fn api_key_for_use() -> Result<String, String> {
-    let config = load_config()?;
+    request_config_for_use().map(|config| config.api_key)
+}
+
+pub(super) struct RequestConfig {
+    pub api_key: String,
+    pub candidate_ids: Vec<String>,
+}
+
+fn request_config_from_loader(
+    load: impl FnOnce() -> Result<StoredConfig, String>,
+) -> Result<RequestConfig, String> {
+    let config = load()?;
     let api_key = model_manager::decrypt_key_for_use(&config.api_key);
     if api_key.is_empty() {
         Err("smart router API key could not be decrypted".to_string())
     } else {
-        Ok(api_key)
+        Ok(RequestConfig {
+            api_key,
+            candidate_ids: config.candidate_ids,
+        })
     }
+}
+
+pub(super) fn request_config_for_use() -> Result<RequestConfig, String> {
+    request_config_from_loader(load_config)
 }
 
 pub fn model_config() -> Option<ModelConfig> {
@@ -455,6 +501,62 @@ pub async fn set_enabled(enabled: bool) -> Result<PublicConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_snapshot_follows_config_updates_without_changing_inflight_ids() {
+        let path = std::env::temp_dir().join(format!(
+            "echobird-router-request-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let load = || {
+            let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+            serde_json::from_slice::<StoredConfig>(&bytes).map_err(|error| error.to_string())
+        };
+        let mut stored = StoredConfig {
+            api_key: "fixture-first-key".into(),
+            candidate_ids: vec!["first".into(), "second".into()],
+            ..StoredConfig::default()
+        };
+        save_config_at(&path, &stored).unwrap();
+        let accepted = request_config_from_loader(load).unwrap();
+
+        stored.api_key = "fixture-next-key".into();
+        stored.candidate_ids.reverse();
+        save_config_at(&path, &stored).unwrap();
+        let next = request_config_from_loader(load).unwrap();
+        assert_eq!(next.api_key, "fixture-next-key");
+        assert_eq!(next.candidate_ids, vec!["second", "first"]);
+        assert_eq!(accepted.api_key, "fixture-first-key");
+        assert_eq!(accepted.candidate_ids, vec!["first", "second"]);
+
+        fs::write(&path, "invalid config").unwrap();
+        assert!(request_config_from_loader(load).is_err());
+        fs::remove_file(&path).unwrap();
+        assert!(request_config_from_loader(load).is_err());
+    }
+
+    #[test]
+    fn request_snapshot_rejects_unusable_entry_keys() {
+        for api_key in ["", "enc:v1:zz"] {
+            let result = request_config_from_loader(|| {
+                Ok(StoredConfig {
+                    api_key: api_key.into(),
+                    candidate_ids: vec!["first".into()],
+                    ..StoredConfig::default()
+                })
+            });
+            assert_eq!(
+                result.err().as_deref(),
+                Some("smart router API key could not be decrypted")
+            );
+        }
+        assert_eq!(
+            request_config_from_loader(|| Err("unreadable config".into()))
+                .err()
+                .as_deref(),
+            Some("unreadable config")
+        );
+    }
 
     #[test]
     fn config_initialization_journal_survives_atomic_replacement() {
@@ -570,6 +672,74 @@ mod tests {
         assert!(!model_is_routable(&model));
         model.api_key = "   ".to_string();
         assert!(!model_is_routable(&model));
+    }
+
+    #[test]
+    fn new_unroutable_candidates_are_rejected_before_changing_the_list() {
+        let local = crate::services::local_llm::LocalServerInfo::default();
+        for model in [
+            serde_json::json!({"internalId":"new","name":"Anthropic only","modelId":"fixture",
+                "baseUrl":"","anthropicUrl":"https://example.test/anthropic","apiKey":"fixture-key"}),
+            serde_json::json!({"internalId":"new","name":"Missing key","modelId":"fixture",
+                "baseUrl":"https://example.test/v1","apiKey":""}),
+            serde_json::json!({"internalId":"new","name":"Missing model","modelId":"",
+                "baseUrl":"https://example.test/v1","apiKey":"fixture-key"}),
+        ] {
+            let model: ModelConfig = serde_json::from_value(model).unwrap();
+            assert!(prepare_candidate_ids(vec!["new".into()], &[], &[model], &local).is_err());
+        }
+        for id in ["missing", "local-server"] {
+            assert!(prepare_candidate_ids(vec![id.into()], &[], &[], &local).is_err());
+        }
+    }
+
+    #[test]
+    fn existing_unavailable_candidates_can_be_reordered_and_removed() {
+        let legacy: ModelConfig = serde_json::from_value(serde_json::json!({
+            "internalId":"legacy","name":"Legacy","modelId":"fixture","baseUrl":"",
+            "anthropicUrl":"https://example.test/anthropic","apiKey":""
+        }))
+        .unwrap();
+        let local = crate::services::local_llm::LocalServerInfo::default();
+        let existing = vec!["legacy".into(), "missing".into(), "local-server".into()];
+        let reordered = vec!["local-server".into(), "missing".into(), "legacy".into()];
+        assert_eq!(
+            prepare_candidate_ids(reordered.clone(), &existing, &[legacy], &local).unwrap(),
+            reordered
+        );
+        assert_eq!(
+            prepare_candidate_ids(vec!["missing".into()], &existing, &[], &local).unwrap(),
+            vec!["missing"]
+        );
+        assert!(prepare_candidate_ids(Vec::new(), &existing, &[], &local)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn available_account_keyless_and_local_candidates_can_still_be_added() {
+        let account: ModelConfig = serde_json::from_value(serde_json::json!({
+            "internalId":"account","name":"Account","modelId":"fixture","baseUrl":"",
+            "accountSource":{"provider":"codex","accountId":"fixture-account"}
+        }))
+        .unwrap();
+        let keyless: ModelConfig = serde_json::from_value(serde_json::json!({
+            "internalId":"keyless","name":"Keyless","modelId":"kilo-auto/free",
+            "baseUrl":"https://api.kilo.ai/api/gateway","apiKey":""
+        }))
+        .unwrap();
+        let local = crate::services::local_llm::LocalServerInfo {
+            running: true,
+            port: 53682,
+            model_name: "fixture-local".into(),
+            api_key: "fixture-key".into(),
+            ..Default::default()
+        };
+        let requested = vec!["account".into(), "keyless".into(), "local-server".into()];
+        assert_eq!(
+            prepare_candidate_ids(requested.clone(), &[], &[account, keyless], &local).unwrap(),
+            requested
+        );
     }
 
     #[test]

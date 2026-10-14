@@ -145,10 +145,6 @@ fn jwt_is_expired(token: &str) -> bool {
         .is_some_and(|expiry| expiry <= chrono::Utc::now().timestamp())
 }
 
-async fn refresh_auth_tokens(auth: &mut Value) -> Result<(), String> {
-    refresh_auth_tokens_at(auth, OAUTH_TOKEN_URL).await
-}
-
 async fn refresh_auth_tokens_at(auth: &mut Value, token_url: &str) -> Result<(), String> {
     let refresh_token = auth
         .get("tokens")
@@ -156,6 +152,7 @@ async fn refresh_auth_tokens_at(auth: &mut Value, token_url: &str) -> Result<(),
         .ok_or_else(|| "accountError.loginRequired".to_string())?;
     let response = reqwest::Client::new()
         .post(token_url)
+        .timeout(std::time::Duration::from_secs(30))
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, "Codex Desktop")
         .header("originator", "Codex Desktop")
@@ -203,9 +200,10 @@ fn apply_refreshed_tokens(auth: &mut Value, body: &Value) -> Result<(), String> 
 async fn request_usage(
     access_token: &str,
     account_id: Option<&str>,
+    usage_url: &str,
 ) -> Result<reqwest::Response, String> {
     let mut request = reqwest::Client::new()
-        .get(USAGE_URL)
+        .get(usage_url)
         .bearer_auth(access_token)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, "Codex Desktop")
@@ -1028,39 +1026,80 @@ async fn proxy_credentials_with_rejection_at(
     token_url: &str,
     rejected_token: Option<&str>,
 ) -> Result<Value, String> {
-    let _guard = TOKEN_LOCK.lock().await;
+    let guard = TOKEN_LOCK.lock().await;
     if !valid_account_id(account_id) {
         return Err("accountError.invalidAccount".into());
     }
     let path = store_dir.join(format!("{account_id}.json"));
-    let (raw, mut auth) = read_oauth_snapshot(&path).ok_or("accountError.invalidAccount")?;
+    let (raw, auth) = read_oauth_snapshot(&path).ok_or("accountError.invalidAccount")?;
     if metadata_from_auth(&auth, &raw)?.id != account_id {
         return Err("accountError.invalidAccount".into());
     }
     let token =
         non_empty_string(auth["tokens"].get("access_token")).ok_or("accountError.loginRequired")?;
-    if force_refresh && (rejected_token.is_none() || rejected_token == Some(token.as_str()))
+    let (_, auth, _guard) = if force_refresh
+        && (rejected_token.is_none() || rejected_token == Some(token.as_str()))
         || jwt_is_expired(&token)
     {
-        refresh_auth_tokens_at(&mut auth, token_url).await?;
-        let (latest_raw, latest_auth) =
-            read_oauth_snapshot(&path).ok_or("accountError.invalidAccount")?;
-        if latest_raw != raw {
-            if metadata_from_auth(&latest_auth, &latest_raw)?.id != account_id {
-                return Err("accountError.invalidAccount".into());
-            }
-            auth = latest_auth;
-        } else {
-            write_private_file(
-                &path,
-                &serde_json::to_vec_pretty(&auth).map_err(|_| "accountError.write")?,
-            )?;
-        }
-    }
+        finish_token_rotation(
+            path,
+            account_id.to_owned(),
+            raw,
+            auth,
+            token_url.to_owned(),
+            None,
+            guard,
+        )
+        .await?
+    } else {
+        (raw, auth, guard)
+    };
     Ok(serde_json::json!({
         "accessToken": non_empty_string(auth["tokens"].get("access_token")).ok_or("accountError.loginRequired")?,
         "accountId": account_id_from_auth(&auth),
     }))
+}
+
+async fn finish_token_rotation(
+    path: PathBuf,
+    account_id: String,
+    raw: Vec<u8>,
+    mut auth: Value,
+    token_url: String,
+    native_dir: Option<PathBuf>,
+    guard: tokio::sync::MutexGuard<'static, ()>,
+) -> Result<(Vec<u8>, Value, tokio::sync::MutexGuard<'static, ()>), String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        if sender.is_closed() {
+            return;
+        }
+        // Once sent, a rotating grant must finish saving even if its caller leaves.
+        let result = async move {
+            refresh_auth_tokens_at(&mut auth, &token_url).await?;
+            let (latest_raw, latest_auth) =
+                read_oauth_snapshot(&path).ok_or("accountError.invalidAccount")?;
+            let saved_raw = if latest_raw != raw {
+                if metadata_from_auth(&latest_auth, &latest_raw)?.id != account_id {
+                    return Err("accountError.invalidAccount".into());
+                }
+                auth = latest_auth;
+                latest_raw
+            } else {
+                let refreshed_raw =
+                    serde_json::to_vec_pretty(&auth).map_err(|_| "accountError.write")?;
+                write_private_file(&path, &refreshed_raw)?;
+                if let Some(native_dir) = native_dir {
+                    persist_active_snapshot(&native_dir, &account_id, &refreshed_raw)?;
+                }
+                refreshed_raw
+            };
+            Ok((saved_raw, auth, guard))
+        }
+        .await;
+        let _ = sender.send(result);
+    });
+    receiver.await.map_err(|_| "accountError.network")?
 }
 
 fn switch_account_at(
@@ -1175,17 +1214,38 @@ fn quota_cache_from_usage(
 }
 
 pub async fn refresh_account_quota(account_id: &str) -> Result<CodexAccountSummary, String> {
-    let _guard = TOKEN_LOCK.lock().await;
     if !valid_account_id(account_id) {
         return Err("accountError.invalidAccount".to_string());
     }
-    let codex_dir = codex_home()?;
-    let store_dir = account_store_dir()?;
+    refresh_account_quota_at(
+        account_id,
+        &codex_home()?,
+        &account_store_dir()?,
+        OAUTH_TOKEN_URL,
+        USAGE_URL,
+    )
+    .await
+}
+
+async fn refresh_account_quota_at(
+    account_id: &str,
+    codex_dir: &Path,
+    store_dir: &Path,
+    token_url: &str,
+    usage_url: &str,
+) -> Result<CodexAccountSummary, String> {
+    let mut guard = TOKEN_LOCK.lock().await;
+    if !valid_account_id(account_id) {
+        return Err("accountError.invalidAccount".to_string());
+    }
     let saved_path = store_dir.join(format!("{account_id}.json"));
-    let raw = fs::read(&saved_path).map_err(|_| "accountError.invalidAccount".to_string())?;
+    let mut raw = fs::read(&saved_path).map_err(|_| "accountError.invalidAccount".to_string())?;
     let mut auth: Value = serde_json::from_slice(&raw)
         .map_err(|error| format!("accountError.invalidAccount|{error}"))?;
     let mut metadata = metadata_from_auth(&auth, &raw)?;
+    if metadata.id != account_id {
+        return Err("accountError.invalidAccount".into());
+    }
     let chatgpt_account_id = account_id_from_auth(&auth);
     let mut access_token = auth
         .get("tokens")
@@ -1193,30 +1253,42 @@ pub async fn refresh_account_quota(account_id: &str) -> Result<CodexAccountSumma
         .ok_or_else(|| "accountError.loginRequired".to_string())?;
 
     if jwt_is_expired(&access_token) {
-        refresh_auth_tokens(&mut auth).await?;
+        (raw, auth, guard) = finish_token_rotation(
+            saved_path.clone(),
+            account_id.to_owned(),
+            raw,
+            auth,
+            token_url.to_owned(),
+            Some(codex_dir.to_owned()),
+            guard,
+        )
+        .await?;
         access_token = auth
             .get("tokens")
             .and_then(|tokens| non_empty_string(tokens.get("access_token")))
             .ok_or_else(|| "accountError.format".to_string())?;
-        let refreshed_raw = serde_json::to_vec_pretty(&auth)
-            .map_err(|error| format!("accountError.write|{error}"))?;
-        write_private_file(&saved_path, &refreshed_raw)?;
-        persist_active_snapshot(&codex_dir, account_id, &refreshed_raw)?;
     }
 
-    let mut response = request_usage(&access_token, chatgpt_account_id.as_deref()).await?;
+    let mut response =
+        request_usage(&access_token, chatgpt_account_id.as_deref(), usage_url).await?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-        refresh_auth_tokens(&mut auth).await?;
+        (raw, auth, guard) = finish_token_rotation(
+            saved_path.clone(),
+            account_id.to_owned(),
+            raw,
+            auth,
+            token_url.to_owned(),
+            Some(codex_dir.to_owned()),
+            guard,
+        )
+        .await?;
         access_token = auth
             .get("tokens")
             .and_then(|tokens| non_empty_string(tokens.get("access_token")))
             .ok_or_else(|| "accountError.format".to_string())?;
-        let refreshed_raw = serde_json::to_vec_pretty(&auth)
-            .map_err(|error| format!("accountError.write|{error}"))?;
-        write_private_file(&saved_path, &refreshed_raw)?;
-        persist_active_snapshot(&codex_dir, account_id, &refreshed_raw)?;
-        response = request_usage(&access_token, chatgpt_account_id.as_deref()).await?;
+        response = request_usage(&access_token, chatgpt_account_id.as_deref(), usage_url).await?;
     }
+    let _guard = guard;
     let status = response.status();
     let body: Value = response
         .json()
@@ -1227,17 +1299,16 @@ pub async fn refresh_account_quota(account_id: &str) -> Result<CodexAccountSumma
     }
     metadata.subscription_end_at = metadata_from_auth(&auth, &raw)?.subscription_end_at;
     let plan = non_empty_string(body.get("plan_type")).or_else(|| metadata.plan.clone());
-    let quota_cache =
-        quota_cache_from_usage(&body, plan, read_quota_cache(&store_dir, account_id))?;
+    let quota_cache = quota_cache_from_usage(&body, plan, read_quota_cache(store_dir, account_id))?;
     write_private_file(
-        &quota_path(&store_dir, account_id),
+        &quota_path(store_dir, account_id),
         serde_json::to_string(&quota_cache)
             .map_err(|error| format!("accountError.quota|{error}"))?
             .as_bytes(),
     )?;
 
     let active_id = active_account_id(&codex_dir.join("auth.json"));
-    Ok(build_summary(metadata, active_id.as_deref(), &store_dir))
+    Ok(build_summary(metadata, active_id.as_deref(), store_dir))
 }
 
 #[cfg(test)]
@@ -1392,6 +1463,263 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn proxy_token_rotation_survives_caller_cancellation() {
+        use axum::{
+            http::{HeaderMap, StatusCode},
+            routing::{get, post},
+            Json, Router,
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio::sync::Notify;
+
+        for mode in [
+            "complete",
+            "not-started",
+            "prepared",
+            "cancel",
+            "queued",
+            "deadline",
+            "concurrent",
+            "replace",
+            "delete",
+            "quota-expired-complete",
+            "quota-expired-cancel",
+            "quota-expired-replace",
+            "quota-expired-delete",
+            "quota-rejected",
+        ] {
+            let dir = temp_dir(mode);
+            let mut auth: Value = serde_json::from_slice(&oauth(
+                "fixture@example.test",
+                "fixture-account",
+                "fixture-refresh",
+            ))
+            .unwrap();
+            let token = jwt(json!({
+                "exp":if mode.starts_with("quota-expired") { 0 } else { chrono::Utc::now().timestamp()+3600 },
+                "https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}
+            }));
+            auth["tokens"]["access_token"] = json!(token);
+            let raw = serde_json::to_vec(&auth).unwrap();
+            let metadata = save_snapshot(&raw, &auth, &dir).unwrap();
+            let path = dir.join(format!("{}.json", metadata.id));
+            let native = dir.join("native").join("auth.json");
+            write_private_file(&native, &raw).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let usage_calls = Arc::new(AtomicUsize::new(0));
+            let received = Arc::new(Notify::new());
+            let release = Arc::new(Notify::new());
+            let deadline = Arc::new(Notify::new());
+            let observed = calls.clone();
+            let entered = received.clone();
+            let unblock = release.clone();
+            let next = jwt(json!({
+                "rotation":1,"exp":chrono::Utc::now().timestamp()+3600,
+                "https://api.openai.com/auth":{"chatgpt_account_id":"fixture-account"}
+            }));
+            let next_response = next.clone();
+            let reads = usage_calls.clone();
+            let rejected = format!("Bearer {token}");
+            let app = Router::new().route(
+                "/token",
+                post(move |Json(body): Json<Value>| {
+                    let received = entered.clone();
+                    let release = unblock.clone();
+                    let call = observed.fetch_add(1, Ordering::SeqCst);
+                    let access = next_response.clone();
+                    async move {
+                        assert_eq!(body["refresh_token"], "fixture-refresh");
+                        received.notify_one();
+                        if call == 0 {
+                            release.notified().await;
+                        }
+                        Json(json!({"access_token":access,"refresh_token":"rotated-refresh"}))
+                    }
+                }),
+            ).route("/usage", get(move |headers: HeaderMap| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                let status = if headers.get("authorization").and_then(|value| value.to_str().ok()) == Some(rejected.as_str()) {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::OK
+                };
+                async move { (status, Json(json!({"plan_type":"free","rate_limit":{"primary_window":{"used_percent":10}}}))) }
+            }));
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/token", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            if matches!(mode, "not-started" | "prepared") {
+                {
+                    let credentials = proxy_credentials_with_rejection_at(
+                        &dir,
+                        &metadata.id,
+                        true,
+                        &url,
+                        Some(&token),
+                    );
+                    tokio::pin!(credentials);
+                    if mode == "prepared" {
+                        assert!(futures_util::poll!(&mut credentials).is_pending());
+                    }
+                }
+                let guard =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), TOKEN_LOCK.lock())
+                        .await
+                        .unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert_eq!(fs::read(&path).unwrap(), raw);
+                drop(guard);
+                server.abort();
+                fs::remove_dir_all(dir).unwrap();
+                continue;
+            }
+            let args = (dir.clone(), metadata.id.clone(), url.clone(), token.clone());
+            let trigger = deadline.clone();
+            let caller = tokio::spawn(async move {
+                let credentials = async {
+                    if mode.starts_with("quota") {
+                        refresh_account_quota_at(
+                            &args.1,
+                            &args.0.join("native"),
+                            &args.0,
+                            &args.2,
+                            &format!("{}/usage", args.2.trim_end_matches("/token")),
+                        )
+                        .await
+                        .map(|summary| serde_json::to_value(summary).unwrap())
+                    } else {
+                        proxy_credentials_with_rejection_at(
+                            &args.0,
+                            &args.1,
+                            true,
+                            &args.2,
+                            Some(&args.3),
+                        )
+                        .await
+                    }
+                };
+                tokio::pin!(credentials);
+                tokio::select! {
+                    result = &mut credentials => result,
+                    _ = trigger.notified() => {
+                        assert!(tokio::time::timeout(
+                            std::time::Duration::from_millis(10),
+                            &mut credentials,
+                        ).await.is_err());
+                        Err("fixture-deadline".into())
+                    }
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), received.notified())
+                .await
+                .unwrap();
+            if mode == "queued" {
+                let args = (dir.clone(), metadata.id.clone(), url.clone());
+                let entered = Arc::new(Notify::new());
+                let pending = entered.clone();
+                let queued = tokio::spawn(async move {
+                    pending.notify_one();
+                    proxy_credentials_at(&args.0, &args.1, true, &args.2).await
+                });
+                entered.notified().await;
+                queued.abort();
+                assert!(queued.await.unwrap_err().is_cancelled());
+            }
+            let second = if mode == "concurrent" {
+                let args = (dir.clone(), metadata.id.clone(), url.clone(), token.clone());
+                Some(tokio::spawn(async move {
+                    proxy_credentials_with_rejection_at(
+                        &args.0,
+                        &args.1,
+                        true,
+                        &args.2,
+                        Some(&args.3),
+                    )
+                    .await
+                }))
+            } else {
+                None
+            };
+            if matches!(mode, "complete" | "queued" | "quota-expired-complete") {
+                release.notify_one();
+                let result = caller.await.unwrap().unwrap();
+                if mode == "quota-expired-complete" {
+                    assert_eq!(result["quotaPercent"], 90);
+                } else {
+                    assert_eq!(result["accessToken"], next);
+                }
+            } else {
+                if mode == "deadline" {
+                    deadline.notify_one();
+                    assert_eq!(caller.await.unwrap().unwrap_err(), "fixture-deadline");
+                } else {
+                    caller.abort();
+                    assert!(caller.await.unwrap_err().is_cancelled());
+                }
+                if mode.ends_with("replace") {
+                    auth["tokens"]["access_token"] = json!("new-login-access");
+                    auth["tokens"]["refresh_token"] = json!("new-login-refresh");
+                    write_private_file(&path, &serde_json::to_vec(&auth).unwrap()).unwrap();
+                } else if mode.ends_with("delete") {
+                    fs::remove_file(&path).unwrap();
+                }
+                release.notify_one();
+                let guard =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), TOKEN_LOCK.lock())
+                        .await
+                        .unwrap();
+                drop(guard);
+            }
+            if let Some(second) = second {
+                assert_eq!(
+                    tokio::time::timeout(std::time::Duration::from_secs(5), second)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap()["accessToken"],
+                    next
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "{mode}");
+            assert_eq!(
+                usage_calls.load(Ordering::SeqCst),
+                usize::from(matches!(mode, "quota-expired-complete" | "quota-rejected")),
+                "{mode}"
+            );
+            if mode.ends_with("delete") {
+                assert!(!path.exists());
+            } else {
+                let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                if mode.ends_with("replace") {
+                    assert_eq!(saved["tokens"], auth["tokens"]);
+                } else {
+                    assert_eq!(saved["tokens"]["access_token"], next, "{mode}");
+                    assert_eq!(
+                        saved["tokens"]["refresh_token"], "rotated-refresh",
+                        "{mode}"
+                    );
+                }
+            }
+            let native_auth: Value = serde_json::from_slice(&fs::read(&native).unwrap()).unwrap();
+            if mode.starts_with("quota") && !mode.ends_with("replace") && !mode.ends_with("delete")
+            {
+                assert_eq!(native_auth["tokens"]["access_token"], next, "{mode}");
+                assert_eq!(
+                    native_auth["tokens"]["refresh_token"], "rotated-refresh",
+                    "{mode}"
+                );
+            } else {
+                assert_eq!(fs::read(&native).unwrap(), raw, "{mode}");
+            }
+            server.abort();
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[tokio::test]

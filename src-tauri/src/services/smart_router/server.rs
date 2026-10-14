@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -18,12 +18,15 @@ use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    api_key_for_use, candidate_ids, PublicActivity, SMART_ROUTER_INTERNAL_ID, SMART_ROUTER_MODEL_ID,
+    api_key_for_use, candidate_ids, request_config_for_use, PublicActivity,
+    SMART_ROUTER_INTERNAL_ID, SMART_ROUTER_MODEL_ID,
 };
+use crate::models::model::AccountProvider;
 use crate::services::{free_model_directory, model_manager};
 use crate::utils::platform::echobird_dir;
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_STREAM_PREFLIGHT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BINDINGS: usize = 512;
 const RESPONSE_BINDING_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const RESPONSES_CAPABILITY_LIFETIME_MS: u64 = 5 * 60 * 1_000;
@@ -467,11 +470,11 @@ async fn handle_chat(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let expected_key = match api_key_for_use() {
-        Ok(key) => key,
+    let request_config = match request_config_for_use() {
+        Ok(config) => config,
         Err(e) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    if !is_authorized(&headers, &expected_key) {
+    if !is_authorized(&headers, &request_config.api_key) {
         return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
 
@@ -486,7 +489,7 @@ async fn handle_chat(
         );
     }
 
-    let candidates = resolve_candidates();
+    let candidates = resolve_candidates(request_config.candidate_ids);
     route_chat_with_candidates(&state, &headers, body, candidates).await
 }
 
@@ -502,17 +505,23 @@ async fn handle_responses(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let key = match api_key_for_use() {
-        Ok(key) => key,
+    let request_config = match request_config_for_use() {
+        Ok(config) => config,
         Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
-    if !is_authorized(&headers, &key) {
+    if !is_authorized(&headers, &request_config.api_key) {
         return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
     if !is_supported_router_model(body["model"].as_str().unwrap_or_default()) {
         return openai_error(StatusCode::NOT_FOUND, "Unknown router model");
     }
-    route_responses_with_candidates(&state, &headers, body, resolve_candidates()).await
+    route_responses_with_candidates(
+        &state,
+        &headers,
+        body,
+        resolve_candidates(request_config.candidate_ids),
+    )
+    .await
 }
 
 async fn handle_messages(
@@ -520,15 +529,21 @@ async fn handle_messages(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let expected_key = match api_key_for_use() {
-        Ok(key) => key,
+    let request_config = match request_config_for_use() {
+        Ok(config) => config,
         Err(e) => return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    if !is_authorized(&headers, &expected_key) {
+    if !is_authorized(&headers, &request_config.api_key) {
         return anthropic_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
 
-    route_messages_with_candidates(&state, &headers, body, resolve_candidates()).await
+    route_messages_with_candidates(
+        &state,
+        &headers,
+        body,
+        resolve_candidates(request_config.candidate_ids),
+    )
+    .await
 }
 
 async fn route_messages_with_candidates(
@@ -552,9 +567,9 @@ async fn route_messages_with_candidates(
     }
 }
 
-fn resolve_candidates() -> Vec<Candidate> {
+fn resolve_candidates(ids: Vec<String>) -> Vec<Candidate> {
     resolve_candidates_from(
-        candidate_ids(),
+        ids,
         &model_manager::get_user_models(),
         &crate::services::local_llm::get_server_info_sync(),
     )
@@ -796,6 +811,12 @@ async fn refresh_rejected_account(
     started: Instant,
     policy: RoutePolicy,
 ) -> Result<Value, crate::services::account_proxy::ProxyError> {
+    if let Some(source) = &candidate.account_source {
+        crate::services::account_proxy::forget_preparation_metadata(
+            source.provider,
+            &source.account_id,
+        );
+    }
     let refresh = async {
         #[cfg(test)]
         if let Some(fixture) = &_state.fixture_authentication {
@@ -919,6 +940,8 @@ async fn send_api_request(
     let mut body = body.clone();
     if protocol == RouteProtocol::Chat {
         crate::services::account_proxy::strip_response_metadata(&mut body);
+    } else {
+        crate::services::account_proxy::normalize_responses_tool_rounds(&mut body);
     }
     let mut request = state
         .http_client
@@ -1188,6 +1211,17 @@ async fn route_with_policy(
                 copy_response_headers(&mut response, &response_headers);
                 return response;
             }
+            if is_context_limit_body(&response_body) {
+                let mut response = upstream_response(
+                    StatusCode::BAD_REQUEST,
+                    content_type,
+                    cache_control,
+                    response_body,
+                    &candidate,
+                );
+                copy_response_headers(&mut response, &response_headers);
+                return response;
+            }
             if let Some(failure) = classify_failure(status, &response_body) {
                 if failure == FailureClass::RequestIncompatible {
                     incompatible_response = Some(upstream_response(
@@ -1238,7 +1272,7 @@ async fn route_with_policy(
         }
 
         if stream_requested {
-            let completion = StreamCompletion {
+            let mut completion = StreamCompletion {
                 headers: response.headers().clone(),
                 protocol,
                 ..StreamCompletion::default()
@@ -1258,35 +1292,64 @@ async fn route_with_policy(
                 });
                 break;
             };
-            let first = tokio::time::timeout(first_byte_timeout, upstream_stream.next()).await;
+            let first = match tokio::time::timeout(first_byte_timeout, async {
+                while let Some(chunk) = upstream_stream.next().await {
+                    let chunk = chunk?;
+                    if !chunk.is_empty() {
+                        return Ok(chunk);
+                    }
+                }
+                Err(axum::Error::new(empty_response_error()))
+            })
+            .await
+            {
+                Ok(Ok(chunk)) => {
+                    preflight_stream(
+                        chunk,
+                        &mut upstream_stream,
+                        &mut completion,
+                        bound_continuation && native_responses,
+                    )
+                    .await
+                }
+                Ok(Err(error)) => Err(error),
+                Err(_) => {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    attempts.push(AttemptRecord {
+                        candidate_id: candidate.internal_id.clone(),
+                        model_id: candidate.model_id.clone(),
+                        failure: FailureClass::Transient,
+                        status: Some(status.as_u16()),
+                    });
+                    continue;
+                }
+            };
             match first {
-                Ok(Some(Ok(first_chunk))) if !first_chunk.is_empty() => {
+                Ok(buffered) => {
                     let stream_state = state.clone();
                     let stream_candidate = candidate.clone();
                     let body_stream = stream::unfold(
-                        (
-                            Some(first_chunk),
-                            upstream_stream,
-                            completion,
-                            false,
-                            activity_guard,
-                        ),
-                        move |(mut first, mut upstream, mut completion, finished, guard)| {
+                        (buffered, upstream_stream, completion, false, activity_guard),
+                        move |(mut buffered, mut upstream, mut completion, finished, guard)| {
                             let stream_state = stream_state.clone();
                             let stream_candidate = stream_candidate.clone();
                             async move {
                                 if finished {
                                     return None;
                                 }
-                                let item = if let Some(bytes) = first.take() {
-                                    Some(Ok(bytes))
+                                let (item, observed) = if let Some(bytes) = buffered.pop_front() {
+                                    (Some(Ok(bytes)), true)
                                 } else {
-                                    upstream.next().await
+                                    (upstream.next().await, false)
                                 };
                                 let (result, finished) = match item {
-                                    Some(Ok(bytes)) => match completion.push(&bytes) {
+                                    Some(Ok(bytes)) => match if observed {
+                                        Ok(())
+                                    } else {
+                                        completion.push(&bytes)
+                                    } {
                                         Ok(()) => {
-                                            if completion.done {
+                                            if completion.done && buffered.is_empty() {
                                                 if completion.failure.is_none() {
                                                     mark_success(&stream_state, &stream_candidate);
                                                     if native_responses {
@@ -1305,7 +1368,7 @@ async fn route_with_policy(
                                                     );
                                                 }
                                             }
-                                            (Ok(bytes), completion.done)
+                                            (Ok(bytes), completion.done && buffered.is_empty())
                                         }
                                         Err(error) => {
                                             let _ = mark_response_failure(
@@ -1358,7 +1421,7 @@ async fn route_with_policy(
                                         }
                                     },
                                 };
-                                Some((result, (None, upstream, completion, finished, guard)))
+                                Some((result, (buffered, upstream, completion, finished, guard)))
                             }
                         },
                     );
@@ -1373,7 +1436,7 @@ async fn route_with_policy(
                     }
                     return result;
                 }
-                Ok(Some(Err(mut error))) => {
+                Err(mut error) => {
                     if proxy_error_from_chain(&error)
                         .is_some_and(|error| error.status == StatusCode::UNAUTHORIZED)
                     {
@@ -1421,16 +1484,6 @@ async fn route_with_policy(
                     });
                     continue;
                 }
-                Ok(Some(Ok(_))) | Ok(None) | Err(_) => {
-                    mark_failure(state, &candidate, FailureClass::Transient, None);
-                    attempts.push(AttemptRecord {
-                        candidate_id: candidate.internal_id.clone(),
-                        model_id: candidate.model_id.clone(),
-                        failure: FailureClass::Transient,
-                        status: Some(status.as_u16()),
-                    });
-                    continue;
-                }
             }
         }
 
@@ -1473,10 +1526,30 @@ async fn route_with_policy(
                         &response_headers,
                     ) {
                         mark_response_failure(state, &candidate, &error, bound_continuation);
+                        if crate::services::account_proxy::context_limit_error(
+                            error.error_code.as_deref(),
+                            &error.message,
+                        ) {
+                            return error.into_response();
+                        }
                     } else if matches!(value["status"].as_str(), Some("completed" | "incomplete"))
                         && value["object"] == "response"
                         && value["id"].as_str().is_some_and(|id| !id.is_empty())
                     {
+                        if empty_completed_response(&value) {
+                            let error = empty_response_error();
+                            mark_response_failure(state, &candidate, &error, bound_continuation);
+                            if bound_continuation {
+                                return error.into_response();
+                            }
+                            attempts.push(AttemptRecord {
+                                candidate_id: candidate.internal_id.clone(),
+                                model_id: candidate.model_id.clone(),
+                                failure: FailureClass::Transient,
+                                status: Some(status.as_u16()),
+                            });
+                            continue;
+                        }
                         mark_success(state, &candidate);
                         if native_responses {
                             remember_response(state, &candidate, value["id"].as_str());
@@ -1495,6 +1568,19 @@ async fn route_with_policy(
                         upstream_response(status, content_type, cache_control, bytes, &candidate);
                     copy_response_headers(&mut response, &response_headers);
                     return response;
+                }
+                if serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .is_some_and(|value| empty_chat_response(&value))
+                {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    attempts.push(AttemptRecord {
+                        candidate_id: candidate.internal_id.clone(),
+                        model_id: candidate.model_id.clone(),
+                        failure: FailureClass::Transient,
+                        status: Some(status.as_u16()),
+                    });
+                    continue;
                 }
                 mark_success(state, &candidate);
                 return upstream_response(status, content_type, cache_control, bytes, &candidate);
@@ -1595,8 +1681,10 @@ struct ToolCallBuffer {
 
 struct AnthropicSseAdapter {
     parser: crate::services::account_proxy::SseParser,
+    google_thought: crate::services::account_proxy::GoogleThought,
     message_id: String,
     text_index: Option<usize>,
+    thinking_index: Option<usize>,
     next_block_index: usize,
     tool_calls: BTreeMap<u64, ToolCallBuffer>,
     finish_reason: Option<String>,
@@ -1608,8 +1696,10 @@ impl AnthropicSseAdapter {
     fn new() -> Self {
         Self {
             parser: crate::services::account_proxy::SseParser::default(),
+            google_thought: crate::services::account_proxy::GoogleThought::default(),
             message_id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
             text_index: None,
+            thinking_index: None,
             next_block_index: 0,
             tool_calls: BTreeMap::new(),
             finish_reason: None,
@@ -1704,34 +1794,17 @@ impl AnthropicSseAdapter {
             return Ok(Vec::new());
         };
         let mut events = Vec::new();
+        if let Some(text) = delta["reasoning_content"].as_str() {
+            self.push_content(true, text, &mut events);
+        }
         if let Some(text) = delta.get("content").and_then(Value::as_str) {
-            if !text.is_empty() {
-                let index = match self.text_index {
-                    Some(index) => index,
-                    None => {
-                        let index = self.next_block_index;
-                        self.next_block_index += 1;
-                        self.text_index = Some(index);
-                        events.push(anthropic_sse_event(
-                            "content_block_start",
-                            json!({
-                                "type": "content_block_start",
-                                "index": index,
-                                "content_block": {"type": "text", "text": ""}
-                            }),
-                        ));
-                        index
-                    }
-                };
-                events.push(anthropic_sse_event(
-                    "content_block_delta",
-                    json!({
-                        "type": "content_block_delta",
-                        "index": index,
-                        "delta": {"type": "text_delta", "text": text}
-                    }),
-                ));
+            let marked = delta["extra_content"]["google"]["thought"] == true;
+            for (thinking, text) in self.google_thought.push(text, marked) {
+                self.push_content(thinking, &text, &mut events);
             }
+        }
+        if let Some(text) = delta["refusal"].as_str() {
+            self.push_content(false, text, &mut events);
         }
 
         if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
@@ -1754,6 +1827,45 @@ impl AnthropicSseAdapter {
         Ok(events)
     }
 
+    fn push_content(&mut self, thinking: bool, text: &str, events: &mut Vec<Bytes>) {
+        if text.is_empty() {
+            return;
+        }
+        let previous = if thinking {
+            self.text_index.take()
+        } else {
+            self.thinking_index.take()
+        };
+        if let Some(index) = previous {
+            events.push(anthropic_sse_event(
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":index}),
+            ));
+        }
+        let current = if thinking {
+            &mut self.thinking_index
+        } else {
+            &mut self.text_index
+        };
+        let index = match *current {
+            Some(index) => index,
+            None => {
+                let index = self.next_block_index;
+                self.next_block_index += 1;
+                *current = Some(index);
+                events.push(anthropic_sse_event(
+                    "content_block_start",
+                    json!({"type":"content_block_start","index":index,"content_block":if thinking { json!({"type":"thinking","thinking":""}) } else { json!({"type":"text","text":""}) }}),
+                ));
+                index
+            }
+        };
+        events.push(anthropic_sse_event(
+            "content_block_delta",
+            json!({"type":"content_block_delta","index":index,"delta":if thinking { json!({"type":"thinking_delta","thinking":text}) } else { json!({"type":"text_delta","text":text}) }}),
+        ));
+    }
+
     fn finish_events(&mut self) -> Vec<Bytes> {
         if self.finished {
             return Vec::new();
@@ -1761,7 +1873,11 @@ impl AnthropicSseAdapter {
         self.finished = true;
         let mut events = Vec::new();
 
-        if let Some(index) = self.text_index {
+        if let Some((thinking, text)) = self.google_thought.finish() {
+            self.push_content(thinking, &text, &mut events);
+        }
+
+        for index in [self.thinking_index, self.text_index].into_iter().flatten() {
             events.push(anthropic_sse_event(
                 "content_block_stop",
                 json!({"type": "content_block_stop", "index": index}),
@@ -1810,7 +1926,7 @@ impl AnthropicSseAdapter {
             ));
         }
 
-        if self.text_index.is_none() && self.tool_calls.is_empty() {
+        if self.next_block_index == 0 && self.tool_calls.is_empty() {
             events.push(anthropic_sse_event(
                 "content_block_start",
                 json!({
@@ -2076,6 +2192,9 @@ struct StreamCompletion {
     protocol: RouteProtocol,
     response_id: Option<String>,
     failure: Option<crate::services::account_proxy::ProxyError>,
+    meaningful: bool,
+    accounted: bool,
+    legitimate_empty: bool,
     finish_reason: bool,
     done: bool,
 }
@@ -2094,6 +2213,7 @@ impl StreamCompletion {
             if data.trim() == "[DONE]" {
                 if self.protocol == RouteProtocol::Chat {
                     self.done = true;
+                    self.require_output()?;
                 }
                 continue;
             }
@@ -2111,6 +2231,20 @@ impl StreamCompletion {
             }
             if self.protocol == RouteProtocol::Responses {
                 let kind = value["type"].as_str().unwrap_or(&event);
+                self.meaningful |= matches!(
+                    kind,
+                    "response.output_text.delta"
+                        | "response.reasoning_summary_text.delta"
+                        | "response.reasoning_text.delta"
+                        | "response.refusal.delta"
+                        | "response.audio.delta"
+                        | "response.output_audio.delta"
+                        | "response.audio_transcript.delta"
+                        | "response.output_audio_transcript.delta"
+                ) && nonempty_text(&value["delta"]);
+                self.meaningful |= output_item_has_content(&value["item"])
+                    || content_part_has_content(&value["part"]);
+                self.accounted |= positive_token_usage(&value["response"]["usage"]);
                 if matches!(kind, "response.completed" | "response.incomplete") {
                     if !value["response"]["error"].is_null() {
                         self.failure = crate::services::account_proxy::stream_error(
@@ -2135,8 +2269,21 @@ impl StreamCompletion {
                     }
                     self.done = true;
                     self.response_id = value["response"]["id"].as_str().map(str::to_owned);
+                    self.meaningful |= response_has_content(&value["response"]);
+                    self.legitimate_empty |= legitimate_empty_response(&value["response"]);
+                    self.require_output()?;
                 }
                 continue;
+            }
+            self.accounted |= positive_token_usage(&value["usage"]);
+            if let Some(choices) = value["choices"].as_array() {
+                for choice in choices {
+                    self.meaningful |= chat_message_has_content(&choice["delta"]);
+                    self.legitimate_empty |= matches!(
+                        choice["finish_reason"].as_str(),
+                        Some("length" | "content_filter")
+                    );
+                }
             }
             self.finish_reason |=
                 value
@@ -2158,13 +2305,211 @@ impl StreamCompletion {
         let frames = self.parser.finish();
         self.observe(frames)?;
         if self.done || self.finish_reason {
-            Ok(())
+            if self.failure.is_some() {
+                Ok(())
+            } else {
+                self.require_output()
+            }
         } else {
             Err(std::io::Error::other(
                 "Upstream stream ended before completion",
             ))
         }
     }
+
+    fn require_output(&self) -> Result<(), std::io::Error> {
+        if self.meaningful || self.accounted || self.legitimate_empty {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(empty_response_error()))
+        }
+    }
+}
+
+async fn preflight_stream<S>(
+    first_chunk: Bytes,
+    upstream: &mut S,
+    completion: &mut StreamCompletion,
+    preserve_native_failure: bool,
+) -> Result<VecDeque<Bytes>, axum::Error>
+where
+    S: futures_util::Stream<Item = Result<Bytes, axum::Error>> + Unpin,
+{
+    let mut buffered = VecDeque::new();
+    let mut buffered_bytes = 0usize;
+    let mut first = Some(first_chunk);
+    loop {
+        let chunk = if let Some(chunk) = first.take() {
+            chunk
+        } else {
+            match upstream.next().await {
+                Some(chunk) => chunk?,
+                None => break,
+            }
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+        completion.push(&chunk).map_err(axum::Error::new)?;
+        if let Some(error) = &completion.failure {
+            if !preserve_native_failure
+                || crate::services::account_proxy::context_limit_error(
+                    error.error_code.as_deref(),
+                    &error.message,
+                )
+            {
+                return Err(axum::Error::new(error.clone()));
+            }
+        }
+        buffered_bytes = buffered_bytes.saturating_add(chunk.len());
+        buffered.push_back(chunk);
+        if completion.meaningful
+            || completion.done
+            || (completion.finish_reason && (completion.accounted || completion.legitimate_empty))
+        {
+            return Ok(buffered);
+        }
+        if buffered_bytes > MAX_STREAM_PREFLIGHT_BYTES {
+            return Err(axum::Error::new(std::io::Error::other(
+                "Upstream stream sent too much metadata before any output",
+            )));
+        }
+    }
+    completion.finish().map_err(axum::Error::new)?;
+    if let Some(error) = &completion.failure {
+        if !preserve_native_failure
+            || crate::services::account_proxy::context_limit_error(
+                error.error_code.as_deref(),
+                &error.message,
+            )
+        {
+            return Err(axum::Error::new(error.clone()));
+        }
+    }
+    Ok(buffered)
+}
+
+fn nonempty_text(value: &Value) -> bool {
+    value.as_str().is_some_and(|text| !text.is_empty())
+}
+
+fn positive_token_usage(usage: &Value) -> bool {
+    [
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+    ]
+    .iter()
+    .any(|field| usage[*field].as_f64().is_some_and(|tokens| tokens > 0.0))
+}
+
+fn content_part_has_content(part: &Value) -> bool {
+    nonempty_text(&part["text"])
+        || nonempty_text(&part["refusal"])
+        || nonempty_text(&part["thinking"])
+        || part["type"].as_str().is_some_and(|kind| {
+            !kind.is_empty()
+                && !matches!(
+                    kind,
+                    "text" | "input_text" | "output_text" | "summary_text" | "refusal" | "thinking"
+                )
+        })
+}
+
+fn output_item_has_content(item: &Value) -> bool {
+    match item["type"].as_str() {
+        Some("message" | "reasoning") => {
+            nonempty_text(&item["content"])
+                || nonempty_text(&item["encrypted_content"])
+                || (item["type"] == "reasoning" && nonempty_text(&item["id"]))
+                || ["content", "summary"].iter().any(|field| {
+                    item[*field]
+                        .as_array()
+                        .is_some_and(|parts| parts.iter().any(content_part_has_content))
+                })
+        }
+        Some(kind) => !kind.is_empty(),
+        None => false,
+    }
+}
+
+fn response_has_content(response: &Value) -> bool {
+    response["output"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(output_item_has_content))
+}
+
+fn chat_message_has_content(message: &Value) -> bool {
+    nonempty_text(&message["content"])
+        || nonempty_text(&message["reasoning_content"])
+        || nonempty_text(&message["refusal"])
+        || nonempty_text(&message["audio"]["data"])
+        || nonempty_text(&message["audio"]["transcript"])
+        || message["content"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(content_part_has_content))
+        || message["images"]
+            .as_array()
+            .is_some_and(|parts| parts.iter().any(content_part_has_content))
+        || message["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty())
+        || message["function_call"].is_object()
+}
+
+fn empty_completed_response(response: &Value) -> bool {
+    response["status"] == "completed"
+        && !response_has_content(response)
+        && !positive_token_usage(&response["usage"])
+        && !legitimate_empty_response(response)
+}
+
+fn empty_chat_response(response: &Value) -> bool {
+    let Some(choices) = response["choices"].as_array() else {
+        return false;
+    };
+    !positive_token_usage(&response["usage"])
+        && choices.iter().all(|choice| {
+            let Some(message) = choice["message"].as_object() else {
+                return false;
+            };
+            message.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "role"
+                        | "content"
+                        | "reasoning_content"
+                        | "refusal"
+                        | "tool_calls"
+                        | "function_call"
+                        | "audio"
+                        | "images"
+                )
+            }) && !chat_message_has_content(&choice["message"])
+                && !matches!(
+                    choice["finish_reason"].as_str(),
+                    Some("length" | "content_filter")
+                )
+        })
+}
+
+fn legitimate_empty_response(response: &Value) -> bool {
+    response["status"] == "incomplete"
+        || matches!(
+            response["incomplete_details"]["reason"].as_str(),
+            Some("max_output_tokens" | "content_filter")
+        )
+}
+
+fn empty_response_error() -> crate::services::account_proxy::ProxyError {
+    let mut error = crate::services::account_proxy::ProxyError::new(
+        StatusCode::BAD_GATEWAY,
+        "Upstream completed without any output or token usage",
+    );
+    error.error_code = Some("empty_response".into());
+    error
 }
 
 fn proxy_error_from_chain<'a>(
@@ -2193,6 +2538,25 @@ fn mark_stream_failure(
     error: &(dyn std::error::Error + 'static),
 ) -> Option<FailureClass> {
     if let Some(proxy) = proxy_error_from_chain(error) {
+        if let Some(source) = &candidate.account_source {
+            if (matches!(
+                source.provider,
+                AccountProvider::Antigravity | AccountProvider::Copilot
+            ) && matches!(
+                proxy.status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            )) || (source.provider == AccountProvider::Copilot
+                && matches!(
+                    proxy.error_code.as_deref(),
+                    Some("model_not_found" | "model_not_supported")
+                ))
+            {
+                crate::services::account_proxy::forget_preparation_metadata(
+                    source.provider,
+                    &source.account_id,
+                );
+            }
+        }
         let mut headers = HeaderMap::new();
         if let Some(value) = &proxy.retry_after {
             headers.insert(header::RETRY_AFTER, value.clone());
@@ -2269,6 +2633,7 @@ pub(crate) fn forget_account_authentication(
     provider: crate::models::model::AccountProvider,
     account_id: &str,
 ) {
+    crate::services::account_proxy::forget_preparation_metadata(provider, account_id);
     let source = crate::models::model::AccountSource {
         provider,
         account_id: account_id.into(),
@@ -2469,6 +2834,9 @@ fn remaining_timeout(started: Instant, budget: Duration, cap: Duration) -> Optio
 }
 
 fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
+    if is_context_limit_body(body) {
+        return None;
+    }
     let message = String::from_utf8_lossy(body).to_ascii_lowercase();
     if [
         "content policy",
@@ -2546,6 +2914,18 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
         return Some(FailureClass::RateLimit);
     }
     None
+}
+
+fn is_context_limit_body(body: &[u8]) -> bool {
+    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let error = value
+        .pointer("/response/error")
+        .filter(|error| !error.is_null())
+        .or_else(|| value.get("error").filter(|error| !error.is_null()))
+        .unwrap_or(&value);
+    let code = error["code"].as_str().or_else(|| error["type"].as_str());
+    let message = String::from_utf8_lossy(body);
+    crate::services::account_proxy::context_limit_error(code, &message)
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<Duration> {
@@ -2866,6 +3246,10 @@ fn json_error(status: StatusCode, message: &str, attempts: Option<Value>) -> Res
 #[cfg(test)]
 #[path = "responses_tests.rs"]
 mod responses_tests;
+
+#[cfg(test)]
+#[path = "audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3698,7 +4082,9 @@ mod tests {
             "/v1/chat/completions",
             post(|| async {
                 let chunks = stream::once(async {
-                    Ok::<Bytes, Infallible>(Bytes::from_static(b"data: second\n\n"))
+                    Ok::<Bytes, Infallible>(Bytes::from_static(
+                        b"data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n",
+                    ))
                 });
                 Response::builder()
                     .status(StatusCode::OK)
@@ -4182,6 +4568,208 @@ mod tests {
         assert!(
             memory.candidates["stream-quota"].cooldown_until_ms.unwrap() >= started + 3_600_000
         );
+    }
+
+    #[tokio::test]
+    async fn preparation_metadata_stream_errors_invalidate_only_known_account_failures() {
+        use crate::models::model::AccountSource;
+
+        for (provider, status, code, invalidates, expected_failure) in [
+            (
+                AccountProvider::Copilot,
+                StatusCode::NOT_FOUND,
+                Some("model_not_found"),
+                true,
+                Some(FailureClass::ModelUnavailable),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::BAD_REQUEST,
+                Some("model_not_supported"),
+                true,
+                Some(FailureClass::ModelUnavailable),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::UNAUTHORIZED,
+                None,
+                true,
+                Some(FailureClass::Authentication),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::FORBIDDEN,
+                None,
+                true,
+                Some(FailureClass::Authentication),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::NOT_FOUND,
+                None,
+                false,
+                Some(FailureClass::ModelUnavailable),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::BAD_REQUEST,
+                Some("tools_not_supported"),
+                false,
+                Some(FailureClass::RequestIncompatible),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::PAYMENT_REQUIRED,
+                Some("insufficient_quota"),
+                false,
+                Some(FailureClass::Billing),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("rate_limit_exceeded"),
+                false,
+                Some(FailureClass::RateLimit),
+            ),
+            (
+                AccountProvider::Copilot,
+                StatusCode::BAD_REQUEST,
+                Some("context_length_exceeded"),
+                false,
+                None,
+            ),
+            (
+                AccountProvider::Kilo,
+                StatusCode::NOT_FOUND,
+                Some("model_not_found"),
+                false,
+                Some(FailureClass::ModelUnavailable),
+            ),
+            (
+                AccountProvider::Kilo,
+                StatusCode::UNAUTHORIZED,
+                None,
+                false,
+                Some(FailureClass::Authentication),
+            ),
+        ] {
+            let catalogue_hits = Arc::new(AtomicUsize::new(0));
+            let inference_hits = Arc::new(AtomicUsize::new(0));
+            let catalogue_counter = catalogue_hits.clone();
+            let inference_counter = inference_hits.clone();
+            let addr = spawn_mock(
+                Router::new()
+                    .route("/v1/models", get(move || {
+                        catalogue_counter.fetch_add(1, Ordering::SeqCst);
+                        async { Json(json!({"data":[{"id":"fixture-model", "supported_endpoints":["/chat/completions"]}]})) }
+                    }))
+                    .route("/v1/chat/completions", post(move || {
+                        inference_counter.fetch_add(1, Ordering::SeqCst);
+                        async {
+                            Response::builder()
+                                .header(header::CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"fixture-answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                                .unwrap()
+                        }
+                    })),
+            ).await;
+            let account_id = uuid::Uuid::new_v4().to_string();
+            let credentials = json!({
+                "accessToken":"fixture-token", "baseUrl":format!("http://{addr}/v1"),
+                "_echobird_saved_account_id":account_id,
+            });
+            let client = reqwest::Client::new();
+            assert_eq!(
+                crate::services::account_proxy::list_models(
+                    AccountProvider::Copilot,
+                    credentials.clone(),
+                    &client,
+                )
+                .await
+                .unwrap(),
+                ["fixture-model"],
+            );
+            let route = || {
+                crate::services::account_proxy::route(
+                    AccountProvider::Copilot,
+                    credentials.clone(),
+                    "fixture-model",
+                    json!({"messages":[], "stream":false}),
+                    &client,
+                )
+            };
+            let response = route().await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("fixture-answer"));
+            assert_eq!(catalogue_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(inference_hits.load(Ordering::SeqCst), 1);
+
+            let mut model = candidate(addr, "metadata-stream");
+            model.account_source = Some(AccountSource {
+                provider,
+                account_id,
+            });
+            let mut error =
+                crate::services::account_proxy::ProxyError::new(status, "Fixture upstream failure");
+            error.error_code = code.map(str::to_owned);
+            error.model_scope = matches!(
+                code,
+                Some("model_not_found" | "model_not_supported" | "tools_not_supported")
+            );
+            error.retry_after =
+                (status == StatusCode::TOO_MANY_REQUESTS).then(|| HeaderValue::from_static("120"));
+            let error = std::io::Error::other(std::io::Error::other(error));
+            let state = AppState::for_tests().unwrap();
+            assert_eq!(
+                mark_stream_failure(&state, &model, &error),
+                expected_failure
+            );
+            assert_eq!(catalogue_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(inference_hits.load(Ordering::SeqCst), 1);
+            {
+                let memory = state.route_memory.lock().unwrap();
+                let records_failure = expected_failure
+                    .is_some_and(|failure| failure != FailureClass::RequestIncompatible);
+                assert_eq!(
+                    memory.candidates.contains_key(&model.internal_id),
+                    records_failure
+                );
+                let records_account = matches!(
+                    expected_failure,
+                    Some(
+                        FailureClass::Authentication
+                            | FailureClass::Billing
+                            | FailureClass::RateLimit
+                    )
+                );
+                assert_eq!(
+                    memory
+                        .accounts
+                        .contains_key(&account_health_key(&model).unwrap()),
+                    records_account
+                );
+                if records_failure {
+                    assert_eq!(
+                        memory.candidates[&model.internal_id].failure,
+                        expected_failure
+                    );
+                }
+            }
+
+            let response = route().await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8_lossy(&body).contains("fixture-answer"));
+            assert_eq!(
+                catalogue_hits.load(Ordering::SeqCst),
+                1 + usize::from(invalidates),
+                "{provider:?} {status} {code:?}"
+            );
+            assert_eq!(inference_hits.load(Ordering::SeqCst), 2);
+        }
     }
 
     #[tokio::test]
@@ -4717,6 +5305,19 @@ mod tests {
         ))
     }
 
+    fn successful_chat_fixture(streaming: bool) -> Response {
+        if streaming {
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/event-stream")
+                .body(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                .unwrap()
+        } else {
+            crate::services::account_proxy::json_response(
+                &json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+            )
+        }
+    }
+
     #[tokio::test]
     async fn early_authentication_failure_refreshes_once_before_any_output() {
         for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
@@ -4733,9 +5334,9 @@ mod tests {
                     };
                     let successful = if protocol == RouteProtocol::Responses {
                         if streaming {
-                            Response::new(Body::from("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\"}}\n\n"))
+                            Response::new(Body::from("event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"fresh output\"}]}]}}\n\n"))
                         } else {
-                            Response::new(Body::from("{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\"}"))
+                            Response::new(Body::from("{\"id\":\"resp-fresh\",\"object\":\"response\",\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"fresh output\"}]}]}"))
                         }
                     } else if streaming {
                         Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"fresh output\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
@@ -4794,6 +5395,13 @@ mod tests {
     async fn repeated_early_unauthorized_does_not_refresh_again() {
         for streaming in [false, true] {
             let state = authentication_fixture(unauthorized_body(), unauthorized_body());
+            state
+                .fixture_responses
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .insert("refresh-backup".into(), successful_chat_fixture(streaming));
             let mut backup = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "refresh-backup");
             // The backup has independent credentials and must remain eligible.
             backup.account_source = None;
@@ -4808,6 +5416,8 @@ mod tests {
                 response.headers()["X-EchoBird-Routed-Via"],
                 "refresh-backup/refresh-backup-model"
             );
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(String::from_utf8_lossy(&bytes).contains("backup"));
             assert_eq!(
                 state
                     .fixture_authentication
@@ -4992,6 +5602,13 @@ mod tests {
         let state =
             authentication_fixture(unauthorized_body(), Response::new(Body::from("unused")));
         state
+            .fixture_responses
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .insert("refresh-backup".into(), successful_chat_fixture(true));
+        state
             .fixture_authentication
             .as_ref()
             .unwrap()
@@ -5012,6 +5629,8 @@ mod tests {
             response.headers()["X-EchoBird-Routed-Via"],
             "refresh-backup/refresh-backup-model"
         );
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&bytes).contains("backup"));
         let fixture = state
             .fixture_authentication
             .as_ref()

@@ -15,6 +15,127 @@ use super::protocol::SseParser;
 use super::tools::{self, RESPONSES_REQUEST};
 use super::{json_response, stream_response, ProxyError};
 
+/// Keep a batch's assistant text before its calls without changing native items.
+pub(crate) fn normalize_responses_tool_rounds(body: &mut Value) {
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut first_call = None;
+    for index in 0..input.len() {
+        let item = &input[index];
+        match item["type"].as_str().unwrap_or("message") {
+            "function_call" | "custom_tool_call" => {
+                first_call.get_or_insert(index);
+            }
+            "reasoning" if item.get("call_id").is_none() => {}
+            "message"
+                if item["role"] == "assistant"
+                    && item.get("call_id").is_none()
+                    && (item["content"].is_string()
+                        || item["content"].as_array().is_some_and(|parts| {
+                            !parts.is_empty()
+                                && parts.iter().all(|part| {
+                                    matches!(
+                                        part["type"].as_str(),
+                                        Some("text" | "input_text" | "output_text")
+                                    ) && part["text"].is_string()
+                                })
+                        })) =>
+            {
+                if let Some(first) = first_call {
+                    let mut from = index;
+                    while from > first
+                        && input[from - 1]["type"] == "reasoning"
+                        && input[from - 1].get("call_id").is_none()
+                    {
+                        from -= 1;
+                    }
+                    let moved: Vec<_> = input.drain(from..=index).collect();
+                    first_call = Some(first + moved.len());
+                    input.splice(first..first, moved);
+                }
+            }
+            _ => first_call = None,
+        }
+    }
+}
+
+/// Google can mark only the chunk opening a thought, leaving its close unmarked.
+#[derive(Default)]
+pub(crate) struct GoogleThought {
+    pending: String,
+    inside: bool,
+    awaiting_open: bool,
+}
+
+impl GoogleThought {
+    pub(crate) fn push(&mut self, text: &str, marked: bool) -> Vec<(bool, String)> {
+        const OPEN: &str = "<thought>";
+        const CLOSE: &str = "</thought>";
+        let pending_thought = !self.pending.is_empty();
+        let continuing = pending_thought || self.awaiting_open;
+        let mut value = std::mem::take(&mut self.pending);
+        value.push_str(text);
+        if !self.inside {
+            if !marked && !continuing {
+                return (!value.is_empty())
+                    .then_some((false, value))
+                    .into_iter()
+                    .collect();
+            }
+            let lead = value.trim_start();
+            if let Some(thought) = lead.strip_prefix(OPEN) {
+                value = thought.to_string();
+                self.inside = true;
+                self.awaiting_open = false;
+            } else if lead.is_empty() {
+                self.awaiting_open = true;
+                return (!value.is_empty())
+                    .then_some((true, value))
+                    .into_iter()
+                    .collect();
+            } else if !lead.is_empty() && OPEN.starts_with(lead) {
+                self.pending = value;
+                return Vec::new();
+            } else {
+                self.awaiting_open = false;
+                return (!value.is_empty())
+                    .then_some((marked || pending_thought, value))
+                    .into_iter()
+                    .collect();
+            }
+        }
+        if let Some(close) = value.find(CLOSE) {
+            self.inside = false;
+            let mut parts = Vec::new();
+            if close > 0 {
+                parts.push((true, value[..close].to_string()));
+            }
+            let answer = &value[close + CLOSE.len()..];
+            if !answer.is_empty() {
+                parts.push((false, answer.to_string()));
+            }
+            return parts;
+        }
+        let held = (1..CLOSE.len())
+            .rev()
+            .find(|length| value.ends_with(&CLOSE[..*length]))
+            .unwrap_or(0);
+        let split = value.len() - held;
+        self.pending = value[split..].to_string();
+        (!value[..split].is_empty())
+            .then(|| (true, value[..split].to_string()))
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn finish(&mut self) -> Option<(bool, String)> {
+        self.inside = false;
+        self.awaiting_open = false;
+        (!self.pending.is_empty()).then(|| (true, std::mem::take(&mut self.pending)))
+    }
+}
+
 /// Responses clients enter the same Chat-based router, including tool-result turns.
 pub fn responses_to_chat(input: &Value) -> Result<Value, ProxyError> {
     if input
@@ -51,7 +172,25 @@ pub fn responses_to_chat(input: &Value) -> Result<Value, ProxyError> {
                         }
                         json!(parts)
                     };
-                    messages.push(json!({"role":item["role"],"content":content}));
+                    if let Some(previous) = messages.last_mut().filter(|previous| {
+                        item["role"] == "assistant"
+                            && previous["role"] == "assistant"
+                            && previous["tool_calls"].is_array()
+                    }) {
+                        let mut parts = if let Some(text) = previous["content"].as_str() {
+                            vec![json!({"type":"text","text":text})]
+                        } else {
+                            previous["content"].as_array().cloned().unwrap_or_default()
+                        };
+                        if let Some(text) = content.as_str() {
+                            parts.push(json!({"type":"text","text":text}));
+                        } else if let Some(content) = content.as_array() {
+                            parts.extend(content.iter().cloned());
+                        }
+                        previous["content"] = json!(parts);
+                    } else {
+                        messages.push(json!({"role":item["role"],"content":content}));
+                    }
                 }
                 "function_call" | "custom_tool_call" => {
                     let name = tools::alias(
@@ -181,6 +320,7 @@ struct Encoder {
     usage: Value,
     finish_reason: String,
     finished: bool,
+    google_thought: GoogleThought,
 }
 
 impl Encoder {
@@ -217,7 +357,7 @@ impl Encoder {
         let mut response = json!({"id":self.id,"object":"response","created_at":chrono::Utc::now().timestamp(),"model":self.model,
             "status":status,"output":output,"error":null,"incomplete_details":null,"usage":self.usage});
         if status == "incomplete" {
-            response["incomplete_details"] = json!({"reason":"max_output_tokens"});
+            response["incomplete_details"] = json!({"reason":if self.finish_reason == "content_filter" { "content_filter" } else { "max_output_tokens" }});
         }
         response
     }
@@ -277,6 +417,27 @@ impl Encoder {
                 .get("delta")
                 .or_else(|| choice.get("message"))
                 .unwrap_or(&Value::Null);
+            let mut delta = delta.clone();
+            if let Some(text) = delta["content"].as_str() {
+                let parts = self
+                    .google_thought
+                    .push(text, delta["extra_content"]["google"]["thought"] == true);
+                let thought: String = parts
+                    .iter()
+                    .filter(|(reasoning, _)| *reasoning)
+                    .map(|(_, text)| text.as_str())
+                    .collect();
+                let answer: String = parts
+                    .iter()
+                    .filter(|(reasoning, _)| !*reasoning)
+                    .map(|(_, text)| text.as_str())
+                    .collect();
+                delta["content"] = json!(answer);
+                if !thought.is_empty() {
+                    let previous = delta["reasoning_content"].as_str().unwrap_or_default();
+                    delta["reasoning_content"] = json!(format!("{previous}{thought}"));
+                }
+            }
             if let Some(item) = delta.get("_echobird_response_item") {
                 self.response_item(item, &mut chunks);
             }
@@ -434,8 +595,13 @@ impl Encoder {
         if self.finished {
             return Vec::new();
         }
+        let mut chunks = if let Some((_, text)) = self.google_thought.finish() {
+            self.decode(&json!({"choices":[{"delta":{"reasoning_content":text}}]}).to_string())
+                .expect("constructed Chat reasoning event")
+        } else {
+            Vec::new()
+        };
         self.finished = true;
-        let mut chunks = Vec::new();
         for index in 0..self.output.len() {
             if self.output[index]["type"] == "custom_tool_call" {
                 let input = tools::custom_input(
@@ -474,7 +640,7 @@ impl Encoder {
                 json!({"output_index":index,"item":item}),
             ));
         }
-        let status = if self.finish_reason == "length" {
+        let status = if matches!(self.finish_reason.as_str(), "length" | "content_filter") {
             "incomplete"
         } else {
             "completed"
@@ -584,11 +750,13 @@ pub async fn chat_to_responses_with_tools(
         }
         encoder.complete();
         return routed_headers(
-            json_response(&encoder.response(if encoder.finish_reason == "length" {
-                "incomplete"
-            } else {
-                "completed"
-            })),
+            json_response(&encoder.response(
+                if matches!(encoder.finish_reason.as_str(), "length" | "content_filter") {
+                    "incomplete"
+                } else {
+                    "completed"
+                },
+            )),
             &parts.headers,
         );
     }
@@ -729,6 +897,342 @@ mod tests {
         assert_eq!(
             super::super::protocol::chat_to_responses(&chat, "native")["input"],
             input["input"]
+        );
+    }
+
+    #[test]
+    fn interleaved_batch_text_stays_with_one_assistant_tool_round() {
+        let input = json!({"input":[
+            {"role":"assistant","content":"Reading first"},
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{}"},
+            {"type":"reasoning","summary":[]},
+            {"role":"assistant","content":[{"type":"output_text","text":"Reading second"}]},
+            {"type":"function_call","call_id":"b","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"a","output":"first"},
+            {"type":"function_call_output","call_id":"b","output":"second"},
+            {"role":"user","content":"Continue"}
+        ]});
+        let chat = responses_to_chat(&input).unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(
+            messages[0]["content"],
+            json!([
+                {"type":"text","text":"Reading first"},
+                {"type":"text","text":"Reading second"}
+            ])
+        );
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "a");
+        assert_eq!(messages[0]["tool_calls"][1]["id"], "b");
+        assert_eq!(messages[1]["tool_call_id"], "a");
+        assert_eq!(messages[2]["tool_call_id"], "b");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(
+            super::super::protocol::chat_to_responses(&chat, "native")["input"],
+            input["input"]
+        );
+    }
+
+    #[test]
+    fn native_tool_round_normalization_preserves_items_and_complete_exchanges() {
+        let input = json!([
+            {"type":"message","id":"msg_first","role":"assistant","content":[{"type":"output_text","text":"First"}]},
+            {"type":"function_call","id":"fc_first","call_id":"a","namespace":"fixture","name":"read","arguments":"{\"path\":\"a\"}"},
+            {"type":"reasoning","id":"rs_second","encrypted_content":"opaque-fixture","summary":[]},
+            {"type":"message","id":"msg_second","role":"assistant","content":"Second"},
+            {"type":"custom_tool_call","id":"ctc_second","call_id":"b","name":"write","input":"raw fixture"},
+            {"type":"function_call_output","call_id":"a","output":"first result"},
+            {"type":"custom_tool_call_output","call_id":"b","output":[{"type":"input_text","text":"second result"}]},
+            {"role":"assistant","content":"Next exchange"},
+            {"type":"function_call","call_id":"c","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"c","output":"third result"}
+        ]);
+        let mut body = json!({"input":input,"instructions":"Keep all metadata","store":false,"tools":[{"type":"custom","name":"write","format":{"type":"text"}}]});
+        let mut expected = body.clone();
+        let source = body["input"].as_array().unwrap();
+        expected["input"] = json!([
+            source[0], source[2], source[3], source[1], source[4], source[5], source[6], source[7],
+            source[8], source[9]
+        ]);
+        normalize_responses_tool_rounds(&mut body);
+        assert_eq!(body, expected);
+        normalize_responses_tool_rounds(&mut body);
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn native_tool_round_normalization_respects_unknown_and_user_barriers() {
+        for barrier in [
+            json!({"type":"future_vendor_event","id":"opaque-item","payload":{"keep":true}}),
+            json!({"role":"user","content":"New instruction"}),
+            json!({"type":"function_call_output","call_id":"a","output":"completed"}),
+            json!({"role":"assistant","call_id":"opaque-call","content":"Bound message"}),
+            json!({"type":"message","role":"assistant","content":[{"type":"future_content","payload":"keep"}]}),
+        ] {
+            let mut body = json!({"input":[
+                {"type":"function_call","call_id":"a","name":"read","arguments":"{}"},
+                barrier,
+                {"role":"assistant","content":"Keep me after the barrier"},
+                {"type":"function_call","call_id":"b","name":"read","arguments":"{}"},
+                {"type":"function_call_output","call_id":"b","output":"finished"}
+            ]});
+            let expected = body.clone();
+            normalize_responses_tool_rounds(&mut body);
+            assert_eq!(body, expected);
+        }
+    }
+
+    #[test]
+    fn text_between_complete_tool_exchanges_stays_in_its_turn() {
+        let chat = responses_to_chat(&json!({"input":[
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"a","output":"first"},
+            {"role":"assistant","content":"Next task"},
+            {"type":"function_call","call_id":"b","name":"read","arguments":"{}"},
+            {"type":"function_call_output","call_id":"b","output":"second"}
+        ]}))
+        .unwrap();
+        let messages = chat["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["tool_call_id"], "a");
+        assert_eq!(messages[2]["content"], "Next task");
+        assert_eq!(messages[2]["tool_calls"][0]["id"], "b");
+        assert_eq!(messages[3]["tool_call_id"], "b");
+    }
+
+    #[test]
+    fn marked_google_thought_tags_stay_out_of_responses_answers() {
+        for parts in [
+            vec![(true, "<thought>计划"), (false, "中</thought>答案")],
+            vec![
+                (true, "<th"),
+                (false, "ought>计划中</tho"),
+                (false, "ught>答案"),
+            ],
+            vec![(true, "<thought>计划中</thought>答案")],
+            vec![(true, "计划中"), (false, "答案")],
+        ] {
+            let mut encoder = Encoder::new();
+            let mut wire = String::new();
+            for (index, (marked, text)) in parts.into_iter().enumerate() {
+                wire.push_str(&format!("data: {}\n\n", json!({"choices":[{"delta":{"content":text,"reasoning_content":if index == 0 { "Existing " } else { "" },"extra_content":{"google":{"thought":marked}}}}]})));
+            }
+            wire.push_str(&format!("data: {}\n\n", json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_probe","function":{"name":"probe","arguments":"{\"number\":42}"}}]},"finish_reason":"tool_calls"}]})));
+            wire.push_str("data: [DONE]\n\n");
+            let mut parser = SseParser::default();
+            let mut events = Vec::new();
+            for byte in wire.as_bytes() {
+                for (_, data) in parser.push(std::slice::from_ref(byte)) {
+                    events.extend(encoder.decode(&data).unwrap());
+                }
+            }
+            let response = encoder.response("completed");
+            let output = response["output"].as_array().unwrap();
+            let reasoning = output
+                .iter()
+                .find(|item| item["type"] == "reasoning")
+                .unwrap();
+            let answer = output
+                .iter()
+                .find(|item| item["type"] == "message")
+                .unwrap();
+            assert_eq!(reasoning["summary"][0]["text"], "Existing 计划中");
+            assert_eq!(answer["content"][0]["text"], "答案");
+            let call = output
+                .iter()
+                .find(|item| item["type"] == "function_call")
+                .unwrap();
+            assert_eq!(call["call_id"], "call_probe");
+            assert_eq!(call["arguments"], "{\"number\":42}");
+            let deltas: Vec<_> = events
+                .iter()
+                .flat_map(|event| {
+                    let mut parser = SseParser::default();
+                    parser.push(event)
+                })
+                .filter_map(|(_, data)| serde_json::from_str::<Value>(&data).ok())
+                .collect();
+            assert_eq!(
+                deltas
+                    .iter()
+                    .filter(|event| event["type"] == "response.output_text.delta")
+                    .filter_map(|event| event["delta"].as_str())
+                    .collect::<String>(),
+                "答案"
+            );
+            assert!(deltas
+                .iter()
+                .any(|event| event["type"] == "response.completed"));
+        }
+    }
+
+    #[test]
+    fn unmarked_thought_quotes_and_explicit_reasoning_remain_intact() {
+        for quote in [
+            "Quote <thought>literally</thought>",
+            "<thought>literally</thought>",
+        ] {
+            let mut encoder = Encoder::new();
+            encoder.decode(&json!({"choices":[{"delta":{"reasoning_content":"Explicit reasoning","content":quote}}]}).to_string()).unwrap();
+            encoder.complete();
+            let response = encoder.response("completed");
+            assert_eq!(
+                response["output"][0]["summary"][0]["text"],
+                "Explicit reasoning"
+            );
+            assert_eq!(response["output"][1]["content"][0]["text"], quote);
+        }
+    }
+
+    #[test]
+    fn marked_partial_thought_tags_flush_only_to_reasoning() {
+        for marked in [
+            "<th",
+            "<thought>unfinished</th",
+            "Thought quotes <thought>literally",
+        ] {
+            let mut encoder = Encoder::new();
+            encoder.decode(&json!({"choices":[{"delta":{"content":marked,"extra_content":{"google":{"thought":true}}}}]}).to_string()).unwrap();
+            encoder.complete();
+            let response = encoder.response("completed");
+            let output = response["output"].as_array().unwrap();
+            assert!(output.iter().all(|item| item["type"] == "reasoning"));
+            assert_eq!(
+                output[0]["summary"][0]["text"],
+                marked.strip_prefix("<thought>").unwrap_or(marked)
+            );
+        }
+    }
+
+    #[test]
+    fn closed_google_thought_keeps_literal_tags_in_the_answer() {
+        let mut encoder = Encoder::new();
+        encoder.decode(&json!({"choices":[{"delta":{"content":"<thought>Planning","extra_content":{"google":{"thought":true}}}}]}).to_string()).unwrap();
+        encoder.decode(&json!({"choices":[{"delta":{"content":"</thought>Quote <thought>literally</thought>"}}]}).to_string()).unwrap();
+        encoder.complete();
+        let response = encoder.response("completed");
+        assert_eq!(response["output"][0]["summary"][0]["text"], "Planning");
+        assert_eq!(
+            response["output"][1]["content"][0]["text"],
+            "Quote <thought>literally</thought>"
+        );
+    }
+
+    #[test]
+    fn marked_whitespace_and_empty_prefixes_still_arm_google_thought_tags() {
+        for prefix in [" \n", ""] {
+            let mut encoder = Encoder::new();
+            encoder.decode(&json!({"choices":[{"delta":{"content":prefix,"extra_content":{"google":{"thought":true}}}}]}).to_string()).unwrap();
+            encoder
+                .decode(
+                    &json!({"choices":[{"delta":{"content":"<thought>private</thought>answer"}}]})
+                        .to_string(),
+                )
+                .unwrap();
+            encoder.complete();
+            let response = encoder.response("completed");
+            let output = response["output"].as_array().unwrap();
+            let answer = output
+                .iter()
+                .find(|item| item["type"] == "message")
+                .unwrap();
+            assert_eq!(answer["content"][0]["text"], "answer");
+            let reasoning = output
+                .iter()
+                .find(|item| item["type"] == "reasoning")
+                .unwrap();
+            assert_eq!(reasoning["summary"][0]["text"], format!("{prefix}private"));
+        }
+    }
+
+    #[test]
+    fn unmarked_whitespace_and_marked_prefix_without_tags_preserve_answers() {
+        for (marked, prefix, answer) in [
+            (false, " \n", "<thought>literal</thought>"),
+            (true, " \n", "Plain answer"),
+            (true, "", "Plain answer"),
+        ] {
+            let mut thought = GoogleThought::default();
+            let mut parts = thought.push(prefix, marked);
+            parts.extend(thought.push(answer, false));
+            let visible: String = parts
+                .iter()
+                .filter(|(reasoning, _)| !*reasoning)
+                .map(|(_, text)| text.as_str())
+                .collect();
+            assert_eq!(
+                visible,
+                if marked {
+                    answer.to_string()
+                } else {
+                    format!("{prefix}{answer}")
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn content_filtered_chat_replies_are_incomplete_in_stream_and_json() {
+        for stream in [false, true] {
+            let value = json!({"model":"filtered-fixture","choices":[{"message":{"role":"assistant","content":null},"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}});
+            let wire = if stream {
+                format!("data: {value}\n\ndata: [DONE]\n\n")
+            } else {
+                value.to_string()
+            };
+            let upstream = Response::builder()
+                .header(
+                    "content-type",
+                    if stream {
+                        "text/event-stream"
+                    } else {
+                        "application/json"
+                    },
+                )
+                .body(Body::from(wire))
+                .unwrap();
+            let response = chat_to_responses(upstream, stream).await;
+            assert!(response.status().is_success());
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+            let result = if stream {
+                let mut parser = SseParser::default();
+                let events: Vec<Value> = parser
+                    .push(&bytes)
+                    .into_iter()
+                    .map(|(_, data)| serde_json::from_str(&data).unwrap())
+                    .collect();
+                assert!(!events
+                    .iter()
+                    .any(|event| event["type"] == "response.completed"));
+                events
+                    .into_iter()
+                    .find(|event| event["type"] == "response.incomplete")
+                    .unwrap()["response"]
+                    .clone()
+            } else {
+                serde_json::from_slice::<Value>(&bytes).unwrap()
+            };
+            assert_eq!(result["status"], "incomplete");
+            assert_eq!(result["incomplete_details"]["reason"], "content_filter");
+            assert_eq!(result["output"], json!([]));
+            assert_eq!(result["usage"]["output_tokens"], 0);
+        }
+    }
+
+    #[test]
+    fn length_limited_chat_reply_keeps_max_output_reason() {
+        let mut encoder = Encoder::new();
+        encoder
+            .decode(
+                &json!({"choices":[{"delta":{"content":"partial"},"finish_reason":"length"}]})
+                    .to_string(),
+            )
+            .unwrap();
+        encoder.complete();
+        assert_eq!(
+            encoder.response("incomplete")["incomplete_details"]["reason"],
+            "max_output_tokens"
         );
     }
 

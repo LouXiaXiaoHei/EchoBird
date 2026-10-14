@@ -60,6 +60,23 @@ fn profile(config: &LlmConfig) -> Option<&'static Profile> {
     })
 }
 
+pub(crate) fn supports_native_anthropic_effort(base_url: &str, model: &str, effort: &str) -> bool {
+    let Ok(endpoint) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    if endpoint.origin().ascii_serialization() != "https://api.anthropic.com" {
+        return false;
+    }
+    let config = LlmConfig {
+        provider: LlmProvider::Anthropic,
+        base_url: base_url.into(),
+        model: model.into(),
+        api_key: String::new(),
+        reasoning_effort: None,
+    };
+    profile(&config).is_some_and(|profile| profile.levels.iter().any(|level| level == effort))
+}
+
 pub fn apply(body: &mut Value, config: &LlmConfig) -> Result<(), String> {
     let Some(effort) = config.reasoning_effort.as_deref() else {
         return Ok(());

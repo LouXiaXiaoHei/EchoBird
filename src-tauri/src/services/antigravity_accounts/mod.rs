@@ -288,7 +288,12 @@ pub async fn delete(id: &str) -> Result<(), String> {
     let _guard = ACCOUNT_LOCK.lock().await;
     let mut accounts = load()?;
     accounts.remove(id);
-    save(&accounts)
+    save(&accounts)?;
+    super::account_proxy::forget_preparation_metadata(
+        crate::models::model::AccountProvider::Antigravity,
+        id,
+    );
+    Ok(())
 }
 
 async fn ensure_cli_closed() -> Result<(), String> {
@@ -407,6 +412,10 @@ pub async fn refresh(id: &str) -> Result<Account, String> {
         .map(|v| v.0);
     let result = summary(id, saved, active.as_deref());
     save(&accounts)?;
+    super::account_proxy::forget_preparation_metadata(
+        crate::models::model::AccountProvider::Antigravity,
+        id,
+    );
     Ok(result)
 }
 

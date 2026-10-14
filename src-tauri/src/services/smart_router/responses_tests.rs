@@ -694,11 +694,19 @@ async fn unknown_removed_or_reconfigured_continuation_is_rejected_without_upstre
 
 #[tokio::test]
 async fn delivered_native_failure_preserves_event_and_cooldown_without_replaying() {
-    let first = sse(
-        "response.created",
-        &json!({"type":"response.created","response":{
-            "id":"resp_native_failed","status":"in_progress","error":null}}),
-    );
+    let first = [
+        sse(
+            "response.created",
+            &json!({"type":"response.created","response":{
+                "id":"resp_native_failed","status":"in_progress","error":null}}),
+        ),
+        sse(
+            "response.output_text.delta",
+            &json!({"type":"response.output_text.delta","item_id":"msg_native_failed",
+                "output_index":0,"content_index":0,"delta":"partial output before failure"}),
+        ),
+    ]
+    .concat();
     let failure = sse(
         "response.failed",
         &json!({"type":"response.failed","response":{"id":"resp_native_failed",
@@ -723,16 +731,20 @@ async fn delivered_native_failure_preserves_event_and_cooldown_without_replaying
     let backup = MockServer::new(vec![native_ok("resp_failure_backup", "backup")], vec![]).await;
     let state = AppState::for_tests().unwrap();
     let started = now_ms();
-    let response = route_responses_with_candidates(
-        &state,
-        &HeaderMap::new(),
-        json!({"model":SMART_ROUTER_MODEL_ID,"input":"question","stream":true}),
-        vec![
-            native.candidate("delivered-native-failure"),
-            backup.candidate("native-failure-backup"),
-        ],
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        route_responses_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"input":"question","stream":true}),
+            vec![
+                native.candidate("delivered-native-failure"),
+                backup.candidate("native-failure-backup"),
+            ],
+        ),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
     let mut returned = body.next().await.unwrap().unwrap().to_vec();
@@ -839,11 +851,19 @@ fn candidate_has_activity(id: &str) -> bool {
 #[tokio::test]
 async fn dropping_native_body_releases_activity_and_pending_upstream_without_failure() {
     let (sender, mut dropped) = tokio::sync::oneshot::channel();
-    let first = sse(
-        "response.created",
-        &json!({"type":"response.created","response":{
-            "id":"resp_cancelled_native","status":"in_progress","error":null}}),
-    );
+    let first = [
+        sse(
+            "response.created",
+            &json!({"type":"response.created","response":{
+                "id":"resp_cancelled_native","status":"in_progress","error":null}}),
+        ),
+        sse(
+            "response.output_text.delta",
+            &json!({"type":"response.output_text.delta","item_id":"msg_cancelled_native",
+                "output_index":0,"content_index":0,"delta":"partial output before cancellation"}),
+        ),
+    ]
+    .concat();
     let reply = Response::builder()
         .header(header::CONTENT_TYPE, "text/event-stream")
         .body(Body::from_stream(PendingNativeStream {
@@ -855,16 +875,20 @@ async fn dropping_native_body_releases_activity_and_pending_upstream_without_fai
     let backup = MockServer::new(vec![native_ok("resp_cancel_backup", "backup")], vec![]).await;
     let state = AppState::for_tests().unwrap();
     let id = "native-cancel-fixture";
-    let response = route_responses_with_candidates(
-        &state,
-        &HeaderMap::new(),
-        json!({"model":SMART_ROUTER_MODEL_ID,"input":"question","stream":true}),
-        vec![
-            native.candidate(id),
-            backup.candidate("native-cancel-backup"),
-        ],
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        route_responses_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"input":"question","stream":true}),
+            vec![
+                native.candidate(id),
+                backup.candidate("native-cancel-backup"),
+            ],
+        ),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let mut body = response.into_body().into_data_stream();
     assert_eq!(

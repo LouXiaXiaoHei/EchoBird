@@ -284,6 +284,13 @@ const ja: Partial<Translations> = {
   'model.paste': '貼り付け',
   'model.modelId': 'モデル ID',
   'model.free': '無料',
+  'model.catalogKeyRequired': '先に API キーを入力',
+  'model.catalogKeyInvalid': 'モデル一覧を取得できません。API キーを確認してください。',
+  'model.catalogInvalidUrl': 'モデルの接続先 URL を確認してください。',
+  'model.catalogUnsupported':
+    'この接続先は利用可能なモデル一覧を提供していません。元の一覧を保持しています。モデル ID は手動で入力できます。',
+  'model.catalogFailed':
+    'モデル一覧の取得に失敗しました。元の一覧を保持しています。後でもう一度お試しください。',
   'model.modelIdPlaceholder': 'モデル ID を検索または入力…',
   'model.openaiUrl': 'OpenAI URL',
   'model.anthropicUrl': 'Anthropic URL',

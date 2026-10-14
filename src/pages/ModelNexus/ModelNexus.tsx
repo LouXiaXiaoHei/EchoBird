@@ -24,7 +24,7 @@ import {
 import { X, Lock, Unlock, RefreshCw, GripVertical } from 'lucide-react';
 import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
-import { ModelCard, ModelCardSkeleton, getModelIcon, ModelIdCombobox } from '../../components';
+import { ModelCard, ModelCardSkeleton, getModelIcon } from '../../components';
 import { ViewModeTabs } from '../../components/ViewModeTabs';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
@@ -37,6 +37,7 @@ import type { ModelUsageData } from '../../api/tauri';
 import modelDirectory from '../../data/modelDirectory.json';
 import { useFreeModels } from '../FreeModels/FreeModels';
 import { AccountModelFields } from './AccountModelFields';
+import { ApiModelFields } from './ApiModelFields';
 
 // ===== Provider =====
 
@@ -1372,29 +1373,13 @@ export function AddModelModal() {
               </>
             )}
             {!newModelForm.accountSource && (
-              <div>
-                <label className="block text-xs text-cyber-text-secondary mb-1">
-                  {t('model.modelId')}
-                </label>
-                {/* Single searchable combobox: free-type any id, with a filtered
-                  suggestion dropdown when the clicked directory entry carries a
-                  model id list. No options → plain input. */}
-                <ModelIdCombobox
-                  value={newModelForm.modelId}
-                  onChange={(v) => setNewModelForm((prev) => ({ ...prev, modelId: v }))}
-                  options={newModelForm.modelIdOptions}
-                  placeholder={t('model.modelIdPlaceholder')}
-                  onPaste={async () => {
-                    try {
-                      const text = (await readClipboardText()).trim();
-                      if (text) setNewModelForm((prev) => ({ ...prev, modelId: text }));
-                    } catch {
-                      /* clipboard empty / unreadable — no-op */
-                    }
-                  }}
-                  pasteLabel={t('model.paste')}
-                />
-              </div>
+              <ApiModelFields
+                key={editingModelId ?? 'new'}
+                form={newModelForm}
+                setForm={setNewModelForm}
+                editing={!!editingModelId}
+                active={!modelModalAnimatingOut && !isSavingModel}
+              />
             )}
             {!newModelForm.accountSource && (
               <div>

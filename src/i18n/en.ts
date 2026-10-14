@@ -254,6 +254,13 @@ const en: Translations = {
   'model.paste': 'Paste',
   'model.modelId': 'Model ID',
   'model.free': 'Free',
+  'model.catalogKeyRequired': 'Enter API key first',
+  'model.catalogKeyInvalid': 'Unable to read models. Please check the API key.',
+  'model.catalogInvalidUrl': 'Please check the model endpoint URL.',
+  'model.catalogUnsupported':
+    'This endpoint does not provide a usable model list. The existing list is retained; you can enter a model ID manually.',
+  'model.catalogFailed':
+    'Unable to read models. The existing list is retained. Please try again later.',
   'model.modelIdPlaceholder': 'Search or enter model ID…',
   'model.openaiUrl': 'OpenAI URL',
   'model.anthropicUrl': 'Anthropic URL',

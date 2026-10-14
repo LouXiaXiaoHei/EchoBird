@@ -98,7 +98,10 @@ function mount(extra: Partial<Props> = {}) {
               blur,
               getBoundingClientRect: () => ({ left: 12, width: 240, top: 100, bottom: 130 }),
             }
-          : { contains: () => false },
+          : {
+              contains: () => false,
+              getBoundingClientRect: () => ({ left: 10, width: 360, top: 100, bottom: 132 }),
+            },
     });
   });
 }
@@ -177,6 +180,161 @@ it('preserves API browse, search, keyboard selection and the positioned body por
   act(() => input().props.onClick());
   const outside = addEventListener.mock.calls.find(([name]) => name === 'mousedown')?.[1];
   act(() => outside({ target: {} }));
+  expect(menus()).toHaveLength(0);
+});
+
+it('lays out the API hint, refresh and paste beside free input without overlaying long IDs', () => {
+  const refresh = vi.fn();
+  const paste = vi.fn();
+  const id = 'provider/a-long-model-identifier-with-a-release-and-version';
+  mount({
+    value: id,
+    inlineActions: true,
+    actionHint: '需要先填入密钥',
+    onRefresh: refresh,
+    refreshLabel: 'Read models',
+    onPaste: paste,
+    pasteLabel: 'Paste model',
+  });
+  expect(input().props.readOnly).toBe(false);
+  expect(input().props.value).toBe(id);
+  expect(input().props.className).toContain('min-w-0 flex-1');
+  expect(input().props.className).not.toMatch(/pr-\d/);
+  expect(input().parent?.props.className).toContain('flex items-center');
+  const actions = input().parent!.findByProps({
+    className: 'flex items-center gap-2 shrink-0 pr-2',
+  });
+  expect(actions.findByType('span').children).toEqual(['需要先填入密钥']);
+  expect(
+    actions.findAllByType('button').map((node) => node.props['aria-label'] ?? node.children[0])
+  ).toEqual(['Read models', 'Paste model']);
+  expect(
+    actions.findAllByType('button').every((node) => !node.props.className.includes('absolute'))
+  ).toBe(true);
+  const preventDefault = vi.fn();
+  const stopPropagation = vi.fn();
+  act(() => {
+    button('Read models').props.onMouseDown({ preventDefault });
+    button('Read models').props.onClick({ stopPropagation });
+    actions.findAllByType('button')[1].props.onMouseDown({ preventDefault });
+    actions.findAllByType('button')[1].props.onClick({ stopPropagation });
+  });
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(paste).toHaveBeenCalledOnce();
+  expect(preventDefault).toHaveBeenCalledTimes(2);
+  expect(stopPropagation).toHaveBeenCalledTimes(2);
+  expect(props.onChange).not.toHaveBeenCalled();
+  expect(menus()).toHaveLength(0);
+  act(() => input().props.onChange({ target: { value: 'arbitrary-api-id' } }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('arbitrary-api-id');
+});
+
+it('retains paste beside suggestions, removes the API hint and positions the menu across the whole group', () => {
+  mount({
+    value: 'saved-id',
+    options: ['saved-id', 'other-id'],
+    inlineActions: true,
+    actionHint: '需要先填入密钥',
+    onRefresh: vi.fn(),
+    refreshLabel: 'Read models',
+    onPaste: vi.fn(),
+    pasteLabel: 'Paste model',
+  });
+  expect(
+    renderer.root
+      .findAllByType('button')
+      .map((node) => node.props['aria-label'] ?? node.children[0])
+  ).toEqual(['Read models', 'Paste model', 'Toggle model id suggestions']);
+  update({ actionHint: undefined });
+  expect(JSON.stringify(renderer.toJSON())).not.toContain('需要先填入密钥');
+  act(() => input().props.onFocus());
+  expect(menus()[0].props.style).toMatchObject({ left: 10, width: 360, top: 133 });
+  act(() => button('Toggle model id suggestions').props.onClick({ stopPropagation: vi.fn() }));
+  expect(menus()).toHaveLength(0);
+  key('ArrowDown');
+  expect(menus()).toHaveLength(1);
+  key('ArrowDown');
+  key('ArrowDown');
+  key('Enter');
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('other-id');
+  expect(input().props.value).toBe('other-id');
+  expect(menus()).toHaveLength(0);
+});
+
+it('isolates inline API actions from an open menu and leaves typing and selection usable while refreshing', () => {
+  const refresh = vi.fn();
+  const paste = vi.fn();
+  mount({
+    value: 'saved-id',
+    options: ['saved-id', 'other-id'],
+    inlineActions: true,
+    onRefresh: refresh,
+    refreshLabel: 'Read models',
+    onPaste: paste,
+    pasteLabel: 'Paste model',
+  });
+  act(() => input().props.onFocus());
+  const menu = menus()[0];
+  act(() => {
+    button('Read models').props.onClick({ stopPropagation: vi.fn() });
+    renderer.root.findAllByType('button')[1].props.onClick({ stopPropagation: vi.fn() });
+  });
+  expect(refresh).toHaveBeenCalledOnce();
+  expect(paste).toHaveBeenCalledOnce();
+  expect(menus()[0]).toBe(menu);
+  expect(props.onChange).not.toHaveBeenCalled();
+  update({ refreshing: true });
+  expect(button('Read models').props.disabled).toBe(true);
+  expect(input().props.disabled).toBe(false);
+  expect(button('Toggle model id suggestions').props.disabled).toBe(false);
+  act(() => button('Read models').props.onClick({ stopPropagation: vi.fn() }));
+  expect(refresh).toHaveBeenCalledOnce();
+  act(() => options()[1].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('other-id');
+  act(() => input().props.onChange({ target: { value: 'manual-id' } }));
+  expect(props.onChange).toHaveBeenLastCalledWith('manual-id');
+});
+
+it('shows reliable positive multipliers without rounding and prioritizes the free label', () => {
+  mount({
+    value: 'paid-id',
+    options: [
+      'paid-id',
+      'free-id',
+      'precise-id',
+      'zero-id',
+      'negative-id',
+      'invalid-id',
+      'infinite-id',
+      'unknown-id',
+    ],
+    optionLabels: { 'paid-id': 'Paid display name' },
+    optionMultipliers: {
+      'paid-id': 0.79,
+      'free-id': 1,
+      'precise-id': 1.23456789,
+      'zero-id': 0,
+      'negative-id': -1,
+      'invalid-id': NaN,
+      'infinite-id': Infinity,
+    },
+    freeModelIds: ['free-id'],
+    freeLabel: '免费',
+  });
+  expect(input().props.value).toBe('Paid display name');
+  act(() => input().props.onFocus());
+  const badges = (index: number) => options()[index].findAllByType('span');
+  expect(badges(0).map((node) => node.children)).toEqual([['Paid display name'], ['0.79×']]);
+  expect(badges(0)[1].props.className).toContain('text-cyber-text-muted');
+  expect(badges(1).map((node) => node.children)).toEqual([['free-id'], ['免费']]);
+  expect(badges(1)[1].props.className).toContain('text-cyber-accent');
+  expect(badges(2).map((node) => node.children)).toEqual([['precise-id'], ['1.23456789×']]);
+  for (let index = 3; index < options().length; index += 1) expect(badges(index)).toHaveLength(0);
+  act(() => options()[0].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('paid-id');
+  expect(input().props.value).toBe('Paid display name');
+  expect(menus()).toHaveLength(0);
+  act(() => input().props.onChange({ target: { value: '0.79×' } }));
   expect(menus()).toHaveLength(0);
 });
 

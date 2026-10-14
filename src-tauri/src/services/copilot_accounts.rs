@@ -748,12 +748,21 @@ pub async fn refresh(id: &str) -> Result<Account, String> {
     saved.active_tools = latest.active_tools;
     saved.summary.active = latest.summary.active;
     write_saved(&path_at(&store()?, id)?, &saved)?;
+    super::account_proxy::forget_preparation_metadata(
+        crate::models::model::AccountProvider::Copilot,
+        id,
+    );
     Ok(saved.summary)
 }
 
 pub async fn delete(id: &str) -> Result<(), String> {
     let _guard = STORE_LOCK.lock().map_err(|_| "accountError.busy")?;
-    fs::remove_file(path_at(&store()?, id)?).map_err(|_| "accountError.write".into())
+    fs::remove_file(path_at(&store()?, id)?).map_err(|_| "accountError.write".to_string())?;
+    super::account_proxy::forget_preparation_metadata(
+        crate::models::model::AccountProvider::Copilot,
+        id,
+    );
+    Ok(())
 }
 
 pub async fn proxy_credentials(id: &str, force_refresh: bool) -> Result<Value, String> {

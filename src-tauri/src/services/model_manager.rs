@@ -116,6 +116,36 @@ fn is_encrypted(key: &str) -> bool {
 /// macOS: IOPlatformUUID via ioreg
 /// Linux: /etc/machine-id
 fn get_machine_fingerprint() -> String {
+    static FINGERPRINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    machine_fingerprint_with(
+        &FINGERPRINT,
+        probe_machine_fingerprint,
+        fallback_machine_fingerprint,
+    )
+}
+
+fn machine_fingerprint_with(
+    cache: &std::sync::Mutex<Option<String>>,
+    probe: impl FnOnce() -> Option<String>,
+    fallback: impl FnOnce() -> String,
+) -> String {
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(fingerprint) = cached.as_ref() {
+        return fingerprint.clone();
+    }
+    if let Some(fingerprint) = probe() {
+        if !fingerprint.is_empty() {
+            *cached = Some(fingerprint.clone());
+        }
+        return fingerprint;
+    }
+    drop(cached);
+    fallback()
+}
+
+fn probe_machine_fingerprint() -> Option<String> {
     #[cfg(windows)]
     {
         if let Ok(output) = crate::utils::process::command("reg")
@@ -131,7 +161,7 @@ fn get_machine_fingerprint() -> String {
             // Output format: "    MachineGuid    REG_SZ    <guid>"
             if let Some(line) = text.lines().find(|l| l.contains("MachineGuid")) {
                 if let Some(guid) = line.split_whitespace().last() {
-                    return guid.to_string();
+                    return Some(guid.to_string());
                 }
             }
         }
@@ -147,7 +177,7 @@ fn get_machine_fingerprint() -> String {
             for line in text.lines() {
                 if line.contains("IOPlatformUUID") {
                     if let Some(uuid) = line.split('"').nth(3) {
-                        return uuid.to_string();
+                        return Some(uuid.to_string());
                     }
                 }
             }
@@ -159,11 +189,15 @@ fn get_machine_fingerprint() -> String {
         if let Ok(id) = std::fs::read_to_string("/etc/machine-id") {
             let trimmed = id.trim().to_string();
             if !trimmed.is_empty() {
-                return trimmed;
+                return Some(trimmed);
             }
         }
     }
 
+    None
+}
+
+fn fallback_machine_fingerprint() -> String {
     // Fallback: hostname via env var
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -174,9 +208,6 @@ fn get_machine_fingerprint() -> String {
 /// Actual AES key = HMAC-SHA256(random_file_key, machine_fingerprint)
 /// This ensures: same machine + same file = works; different machine = self-destruct.
 fn get_encryption_key() -> Result<[u8; 32], String> {
-    use hmac::Mac;
-    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
-
     let key_path = echobird_dir().join("config").join(".encryption_key");
 
     let file_key = if key_path.exists() {
@@ -197,9 +228,20 @@ fn get_encryption_key() -> Result<[u8; 32], String> {
     let username = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "default".to_string());
+    derive_encryption_key(&file_key, &fingerprint, &username)
+}
+
+fn derive_encryption_key(
+    file_key: &[u8],
+    fingerprint: &str,
+    username: &str,
+) -> Result<[u8; 32], String> {
+    use hmac::Mac;
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
     let identity = format!("{}|{}", fingerprint, username);
 
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(&file_key)
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(file_key)
         .map_err(|e| format!("HMAC init error: {}", e))?;
     hmac::Mac::update(&mut mac, identity.as_bytes());
     let result = mac.finalize().into_bytes();
@@ -1124,6 +1166,132 @@ pub fn is_key_destroyed(internal_id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::model::ModelConfig;
+
+    #[test]
+    fn fingerprint_successful_native_probe_is_reused() {
+        let cache = std::sync::Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        for _ in 0..8 {
+            let fingerprint = machine_fingerprint_with(
+                &cache,
+                || {
+                    calls.set(calls.get() + 1);
+                    Some("machine-guid-fixture".to_string())
+                },
+                || panic!("native success must not use fallback"),
+            );
+            assert_eq!(fingerprint, "machine-guid-fixture");
+        }
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn fingerprint_concurrent_cold_probes_are_coalesced() {
+        let cache = std::sync::Mutex::new(None);
+        let barrier = std::sync::Barrier::new(8);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        machine_fingerprint_with(
+                            &cache,
+                            || {
+                                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                Some("machine-guid-fixture".to_string())
+                            },
+                            || panic!("native success must not use fallback"),
+                        )
+                    })
+                })
+                .collect();
+            for handle in handles {
+                assert_eq!(handle.join().unwrap(), "machine-guid-fixture");
+            }
+        });
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn fingerprint_native_failure_keeps_fallback_and_allows_recovery() {
+        let cache = std::sync::Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        for hostname in ["first-hostname-fixture", "second-hostname-fixture"] {
+            assert_eq!(
+                machine_fingerprint_with(
+                    &cache,
+                    || {
+                        calls.set(calls.get() + 1);
+                        None
+                    },
+                    || hostname.to_string(),
+                ),
+                hostname
+            );
+            assert!(cache.lock().unwrap().is_none());
+        }
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            machine_fingerprint_with(
+                &cache,
+                || Some("recovered-guid-fixture".to_string()),
+                || panic!("native recovery must not use fallback"),
+            ),
+            "recovered-guid-fixture"
+        );
+        assert_eq!(
+            machine_fingerprint_with(
+                &cache,
+                || panic!("recovered fingerprint must be reused"),
+                || panic!("native recovery must not use fallback"),
+            ),
+            "recovered-guid-fixture"
+        );
+    }
+
+    #[test]
+    fn fingerprint_empty_native_value_is_preserved_without_being_cached() {
+        let cache = std::sync::Mutex::new(None);
+        assert_eq!(
+            machine_fingerprint_with(
+                &cache,
+                || Some(String::new()),
+                || panic!("empty native value previously did not use fallback"),
+            ),
+            ""
+        );
+        assert!(cache.lock().unwrap().is_none());
+        assert_eq!(
+            machine_fingerprint_with(
+                &cache,
+                || Some("recovered-guid-fixture".to_string()),
+                || panic!("native recovery must not use fallback"),
+            ),
+            "recovered-guid-fixture"
+        );
+    }
+
+    #[test]
+    fn fingerprint_cache_preserves_identity_and_key_derivation() {
+        let fingerprint = "machine-guid-fixture";
+        let username = "user-fixture";
+        assert_eq!(
+            hex::encode(derive_encryption_key(&[7; 32], fingerprint, username).unwrap()),
+            "c3af0f14876eab798f214c4c93f25e8047143d266d84dfa5ae132f42c2411b9b"
+        );
+        assert_eq!(
+            hex::encode(
+                derive_encryption_key(&[7; 32], fingerprint, "other-user-fixture").unwrap()
+            ),
+            "dee1a0f181f4f249e626a564f8bb7e1076bbad5e8f380da67064952f584dc5be"
+        );
+        assert_eq!(
+            hex::encode(derive_encryption_key(&[8; 32], fingerprint, username).unwrap()),
+            "eb1ace1edd9e43b35c134f2b56f0cab454408be59292ee8dd0ed267831a399a9"
+        );
+        assert_eq!(ENCRYPTED_PREFIX, "enc:v1:");
+    }
 
     struct FirstLaunchDirectory(std::path::PathBuf);
 

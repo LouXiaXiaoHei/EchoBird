@@ -2,7 +2,20 @@
 
 use crate::models::model::{ModelConfig, PingResult, TestResult};
 use crate::services::model_manager::{self, AddModelInput, UpdateModelInput};
+use crate::services::upstream_model_catalog::{self, CatalogInput, ModelCatalog};
 use crate::services::usage_providers::{self, UsageResult};
+
+#[tauri::command]
+pub async fn fetch_upstream_model_catalog(input: CatalogInput) -> Result<ModelCatalog, String> {
+    upstream_model_catalog::fetch(input).await
+}
+
+#[tauri::command]
+pub fn get_cached_upstream_model_catalog(
+    input: CatalogInput,
+) -> Result<Option<ModelCatalog>, String> {
+    upstream_model_catalog::get_cached(input)
+}
 
 /// Get all models (user + built-in + local)
 #[tauri::command]

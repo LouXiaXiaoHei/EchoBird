@@ -23,8 +23,13 @@ use crate::models::model::AccountProvider;
 
 pub(crate) use protocol::SseParser;
 pub use providers::responses_response;
-pub(crate) use providers::stream_error;
+pub(crate) use providers::{context_limit_error, stream_error};
 pub use responses::{chat_to_responses, chat_to_responses_with_tools, responses_to_chat};
+pub(crate) use responses::{normalize_responses_tool_rounds, GoogleThought};
+
+pub(crate) fn forget_preparation_metadata(provider: AccountProvider, account_id: &str) {
+    providers::forget_metadata(provider, account_id);
+}
 
 pub(crate) fn cached_qoder_model_labels(
     provider: AccountProvider,

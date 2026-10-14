@@ -111,22 +111,7 @@ async fn handle_messages_with(
         req_body["model"] = Value::String(bare);
     }
 
-    // Reasoning-effort clamp — REQUIRED, do not remove. Claude Code's opus
-    // tiers request `output_config.effort: "xhigh"` by default, but
-    // third-party Anthropic-compatible upstreams accept only
-    // low/medium/high/max and reject the request with a 400
-    // ("output_config.effort ... got xhigh instead"), which surfaces to the
-    // user as "the model doesn't work". Downgrade xhigh → high (the
-    // universally-supported top tier). No-op for any other effort value.
-    if let Some(effort) = req_body
-        .get_mut("output_config")
-        .and_then(|c| c.get_mut("effort"))
-    {
-        if effort.as_str() == Some("xhigh") {
-            log::info!("[AnthropicProxy] Reasoning effort clamp: xhigh → high");
-            *effort = Value::String("high".to_string());
-        }
-    }
+    normalize_reasoning_effort(&mut req_body, &relay.base_url);
 
     // URL composition matches llm_client.rs:404 — handle every shape
     // users (and our model directory templates) realistically put in
@@ -211,6 +196,27 @@ async fn handle_messages_with(
     response
 }
 
+fn normalize_reasoning_effort(body: &mut Value, base_url: &str) {
+    if crate::services::reasoning_effort::supports_native_anthropic_effort(
+        base_url,
+        body["model"].as_str().unwrap_or_default(),
+        "xhigh",
+    ) {
+        return;
+    }
+    // Keep Claude clients' xhigh requests usable on compatible upstreams
+    // that only accept low/medium/high/max.
+    if let Some(effort) = body
+        .get_mut("output_config")
+        .and_then(|config| config.get_mut("effort"))
+    {
+        if effort.as_str() == Some("xhigh") {
+            log::info!("[AnthropicProxy] Reasoning effort clamp: xhigh → high");
+            *effort = Value::String("high".to_string());
+        }
+    }
+}
+
 fn read_relay(filename: &str) -> Option<Relay> {
     let path = relay_path(filename)?;
     let content = std::fs::read_to_string(&path).ok()?;
@@ -241,4 +247,49 @@ fn read_relay(filename: &str) -> Option<Relay> {
 
 fn relay_path(filename: &str) -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".echobird").join(filename))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_supported_xhigh_reaches_the_outbound_payload_unchanged() {
+        for model in ["claude-opus-5-5", "claude-opus-5-5-20261001"] {
+            let mut body = json!({"model":model,"output_config":{"effort":"xhigh","format":{"type":"text"}},
+                "thinking":{"type":"adaptive"},"max_tokens":32768,"messages":[{"role":"user","content":"fixture"}]});
+            let original = body.clone();
+            normalize_reasoning_effort(&mut body, "https://api.anthropic.com/v1");
+            assert_eq!(body, original, "{model} supports the requested effort");
+        }
+    }
+
+    #[test]
+    fn unknown_or_incompatible_upstreams_keep_the_existing_effort_fallback() {
+        for (base, model) in [
+            ("https://api.anthropic.com", "claude-opus-4-5"),
+            ("https://api.anthropic.com", "unknown"),
+            ("https://api.anthropic.com", "claude-opus-5-5-custom"),
+            ("https://relay.example/v1", "claude-opus-5-5"),
+            ("https://api.deepseek.com/anthropic", "claude-opus-5-5"),
+            ("https://api.anthropic.com.evil.test", "claude-opus-5-5"),
+            ("http://api.anthropic.com", "claude-opus-5-5"),
+            ("https://api.anthropic.com:8443", "claude-opus-5-5"),
+        ] {
+            let mut body = json!({"model":model,"output_config":{"effort":"xhigh","extra":true},"max_tokens":4096});
+            normalize_reasoning_effort(&mut body, base);
+            assert_eq!(body["output_config"]["effort"], "high", "{base} {model}");
+            assert_eq!(body["output_config"]["extra"], true);
+            assert_eq!(body["max_tokens"], 4096);
+        }
+        for mut body in [
+            json!({"model":"claude-opus-5-5"}),
+            json!({"model":"unknown","output_config":{"effort":"max"}}),
+            json!({"model":"unknown","output_config":{"effort":"high"}}),
+        ] {
+            let original = body.clone();
+            normalize_reasoning_effort(&mut body, "https://api.anthropic.com");
+            assert_eq!(body, original);
+        }
+    }
 }

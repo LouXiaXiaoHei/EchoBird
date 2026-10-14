@@ -1,6 +1,10 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+    },
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -10,6 +14,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -22,6 +27,181 @@ use super::{stream_response, ProxyError};
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const CODE_ASSIST_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
+const METADATA_CACHE_LIMIT: usize = 64;
+const PROJECT_LIFETIME: Duration = Duration::from_secs(30);
+const COPILOT_CATALOG_LIFETIME: Duration = Duration::from_secs(300);
+
+#[derive(Clone)]
+enum PreparedMetadata {
+    Project((String, Option<String>)),
+    Catalog(Value),
+}
+
+#[derive(Default)]
+struct MetadataCell {
+    generation: AtomicU64,
+    value: tokio::sync::Mutex<Option<(Instant, u64, PreparedMetadata)>>,
+}
+
+struct MetadataEntry {
+    provider: AccountProvider,
+    account_id: Option<String>,
+    created: Instant,
+    cell: Arc<MetadataCell>,
+}
+
+fn metadata_cells() -> &'static Mutex<BTreeMap<String, MetadataEntry>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, MetadataEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn project_load_base(credentials: &Value) -> &str {
+    credentials["loadBaseUrl"]
+        .as_str()
+        .unwrap_or_else(|| {
+            if credentials["baseUrl"].is_string() {
+                base(AccountProvider::Antigravity, credentials)
+            } else {
+                "https://cloudcode-pa.googleapis.com"
+            }
+        })
+        .trim_end_matches('/')
+}
+
+fn metadata_key(provider: AccountProvider, credentials: &Value) -> String {
+    let context = json!([
+        provider,
+        base(provider, credentials),
+        if provider == AccountProvider::Antigravity {
+            project_load_base(credentials)
+        } else {
+            ""
+        },
+        credentials
+    ]);
+    format!("{:x}", Sha256::digest(context.to_string()))
+}
+
+fn metadata_cell(provider: AccountProvider, credentials: &Value) -> Arc<MetadataCell> {
+    let mut cells = metadata_cells()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    metadata_cell_at(&mut cells, provider, credentials)
+}
+
+fn metadata_cell_at(
+    cells: &mut BTreeMap<String, MetadataEntry>,
+    provider: AccountProvider,
+    credentials: &Value,
+) -> Arc<MetadataCell> {
+    let key = metadata_key(provider, credentials);
+    if let Some(entry) = cells.get(&key) {
+        return entry.cell.clone();
+    }
+    if cells.len() >= METADATA_CACHE_LIMIT {
+        let oldest = cells
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.cell) == 1)
+            .min_by_key(|(_, entry)| entry.created)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            cells.remove(&oldest);
+        } else {
+            return Arc::new(MetadataCell::default());
+        }
+    }
+    let cell = Arc::new(MetadataCell::default());
+    cells.insert(
+        key,
+        MetadataEntry {
+            provider,
+            account_id: credentials["_echobird_saved_account_id"]
+                .as_str()
+                .map(str::to_owned),
+            created: Instant::now(),
+            cell: cell.clone(),
+        },
+    );
+    cell
+}
+
+pub(super) fn forget_metadata(provider: AccountProvider, account_id: &str) {
+    let mut cells = metadata_cells()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    cells.retain(|_, entry| {
+        if entry.provider == provider && entry.account_id.as_deref() == Some(account_id) {
+            entry.cell.generation.fetch_add(1, Ordering::SeqCst);
+            false
+        } else {
+            true
+        }
+    });
+}
+
+fn forget_metadata_credentials(provider: AccountProvider, credentials: &Value) {
+    if let Some(entry) = metadata_cells()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .remove(&metadata_key(provider, credentials))
+    {
+        entry.cell.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn forget_failed_metadata(provider: AccountProvider, credentials: &Value, error: &ProxyError) {
+    if (matches!(
+        provider,
+        AccountProvider::Antigravity | AccountProvider::Copilot
+    ) && matches!(
+        error.status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    )) || (provider == AccountProvider::Copilot
+        && matches!(
+            error.error_code.as_deref(),
+            Some("model_not_found" | "model_not_supported")
+        ))
+    {
+        forget_metadata_credentials(provider, credentials);
+    }
+}
+
+async fn prepare_metadata<F, Fut>(
+    provider: AccountProvider,
+    credentials: &Value,
+    refresh: bool,
+    fetch: F,
+) -> Result<PreparedMetadata, ProxyError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<PreparedMetadata, ProxyError>>,
+{
+    access_token(credentials)?;
+    let cell = metadata_cell(provider, credentials);
+    if refresh {
+        cell.generation.fetch_add(1, Ordering::SeqCst);
+    }
+    let mut cached = cell.value.lock().await;
+    let generation = cell.generation.load(Ordering::SeqCst);
+    let lifetime = if provider == AccountProvider::Antigravity {
+        PROJECT_LIFETIME
+    } else {
+        COPILOT_CATALOG_LIFETIME
+    };
+    if !refresh {
+        if let Some((_, _, value)) = cached.as_ref().filter(|(at, saved_generation, _)| {
+            at.elapsed() < lifetime && *saved_generation == generation
+        }) {
+            return Ok(value.clone());
+        }
+    }
+    *cached = None;
+    let value = fetch().await?;
+    if cell.generation.load(Ordering::SeqCst) == generation {
+        *cached = Some((Instant::now(), generation, value.clone()));
+    }
+    Ok(value)
+}
 
 type AccountFreeModels = BTreeMap<String, Vec<String>>;
 
@@ -337,6 +517,29 @@ pub(super) fn upstream_error(status: StatusCode, headers: &HeaderMap, value: &Va
     error
 }
 
+pub(crate) fn context_limit_error(code: Option<&str>, message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    matches!(
+        code,
+        Some(
+            "context_length_exceeded"
+                | "context_window_exceeded"
+                | "model_context_window_exceeded"
+                | "prompt_too_long"
+                | "input_too_long"
+        )
+    ) || [
+        "maximum context length",
+        "context length exceeded",
+        "context window exceeded",
+        "prompt is too long",
+        "input is too long",
+        "exceeds the context window",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
+
 pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Option<ProxyError> {
     let value: Value = serde_json::from_str(data).ok()?;
     let detail = if event == "response.failed" || value["type"] == "response.failed" {
@@ -366,36 +569,40 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
         .as_str()
         .or_else(|| detail["status"].as_str())
         .or_else(|| detail["type"].as_str());
-    let status = detail["status"]
-        .as_u64()
-        .and_then(|status| u16::try_from(status).ok())
-        .and_then(|status| StatusCode::from_u16(status).ok())
-        .filter(|status| status.is_client_error() || status.is_server_error())
-        .unwrap_or(match code {
-            Some(
-                "rate_limit_exceeded"
-                | "rate_limit_error"
-                | "usage_limit_reached"
-                | "RESOURCE_EXHAUSTED",
-            ) => StatusCode::TOO_MANY_REQUESTS,
-            Some("insufficient_quota" | "billing_error" | "billing_hard_limit_reached") => {
-                StatusCode::PAYMENT_REQUIRED
-            }
-            Some("invalid_api_key" | "authentication_error" | "unauthorized" | "invalid_grant") => {
-                StatusCode::UNAUTHORIZED
-            }
-            Some(
-                "model_not_found"
-                | "model_not_supported"
-                | "tools_not_supported"
-                | "response_not_found",
-            ) => StatusCode::NOT_FOUND,
-            Some("invalid_previous_response_id") => StatusCode::BAD_REQUEST,
-            Some("server_error" | "overloaded_error" | "service_unavailable_error") => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            _ => StatusCode::BAD_GATEWAY,
-        });
+    let status = if context_limit_error(code, &safe_error(&json!({"error":detail}))) {
+        StatusCode::BAD_REQUEST
+    } else {
+        detail["status"]
+            .as_u64()
+            .and_then(|status| u16::try_from(status).ok())
+            .and_then(|status| StatusCode::from_u16(status).ok())
+            .filter(|status| status.is_client_error() || status.is_server_error())
+            .unwrap_or(match code {
+                Some(
+                    "rate_limit_exceeded"
+                    | "rate_limit_error"
+                    | "usage_limit_reached"
+                    | "RESOURCE_EXHAUSTED",
+                ) => StatusCode::TOO_MANY_REQUESTS,
+                Some("insufficient_quota" | "billing_error" | "billing_hard_limit_reached") => {
+                    StatusCode::PAYMENT_REQUIRED
+                }
+                Some(
+                    "invalid_api_key" | "authentication_error" | "unauthorized" | "invalid_grant",
+                ) => StatusCode::UNAUTHORIZED,
+                Some(
+                    "model_not_found"
+                    | "model_not_supported"
+                    | "tools_not_supported"
+                    | "response_not_found",
+                ) => StatusCode::NOT_FOUND,
+                Some("invalid_previous_response_id") => StatusCode::BAD_REQUEST,
+                Some("server_error" | "overloaded_error" | "service_unavailable_error") => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::BAD_GATEWAY,
+            })
+    };
     let mut error = upstream_error(status, headers, &json!({"error":detail}));
     if error.retry_after.is_none() {
         error.retry_after = detail["retry_after"]
@@ -403,6 +610,55 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
             .and_then(|value| HeaderValue::from_str(value).ok());
     }
     Some(error)
+}
+
+#[cfg(test)]
+mod context_limit_regressions {
+    use super::*;
+
+    #[test]
+    fn context_limit_stream_failures_are_client_errors_even_with_a_rate_status() {
+        for code in [
+            "context_length_exceeded",
+            "context_window_exceeded",
+            "prompt_too_long",
+        ] {
+            let detail =
+                json!({"code":code,"message":"Request does not fit the model","status":429});
+            for event in ["", "response.failed", "response.completed"] {
+                let value = if event.is_empty() {
+                    json!({"error":detail})
+                } else {
+                    json!({"type":event,"response":{"error":detail}})
+                };
+                let error = stream_error(event, &value.to_string(), &HeaderMap::new()).unwrap();
+                assert_eq!(error.status, StatusCode::BAD_REQUEST);
+                assert_eq!(error.error_code.as_deref(), Some(code));
+            }
+        }
+        let error = stream_error("error", &json!({"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 201000 tokens > 200000 maximum"}}).to_string(), &HeaderMap::new()).unwrap();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error_type.as_deref(), Some("invalid_request_error"));
+    }
+
+    #[test]
+    fn context_limit_detection_preserves_quota_and_unknown_failures() {
+        for (code, expected) in [
+            ("rate_limit_exceeded", StatusCode::TOO_MANY_REQUESTS),
+            ("insufficient_quota", StatusCode::PAYMENT_REQUIRED),
+            ("unknown_upstream_error", StatusCode::BAD_GATEWAY),
+        ] {
+            let error = stream_error(
+                "error",
+                &json!({"error":{"code":code,"message":"Too many requests in the quota window"}})
+                    .to_string(),
+                &HeaderMap::new(),
+            )
+            .unwrap();
+            assert_eq!(error.status, expected);
+            assert!(!context_limit_error(Some(code), &error.message));
+        }
+    }
 }
 
 fn safe_error(value: &Value) -> String {
@@ -420,13 +676,36 @@ async fn project(
     credentials: &Value,
     client: &reqwest::Client,
 ) -> Result<(String, Option<String>), ProxyError> {
-    let load_base = credentials["loadBaseUrl"].as_str().unwrap_or_else(|| {
-        if credentials["baseUrl"].is_string() {
-            base(AccountProvider::Antigravity, credentials)
-        } else {
-            "https://cloudcode-pa.googleapis.com"
-        }
-    });
+    prepared_project(credentials, client, false).await
+}
+
+async fn prepared_project(
+    credentials: &Value,
+    client: &reqwest::Client,
+    refresh: bool,
+) -> Result<(String, Option<String>), ProxyError> {
+    let value = prepare_metadata(
+        AccountProvider::Antigravity,
+        credentials,
+        refresh,
+        || async {
+            fetch_project(credentials, client)
+                .await
+                .map(PreparedMetadata::Project)
+        },
+    )
+    .await?;
+    let PreparedMetadata::Project(value) = value else {
+        unreachable!("project cache uses project values")
+    };
+    Ok(value)
+}
+
+async fn fetch_project(
+    credentials: &Value,
+    client: &reqwest::Client,
+) -> Result<(String, Option<String>), ProxyError> {
+    let load_base = project_load_base(credentials);
     let request = client
         .post(format!(
             "{}/v1internal:loadCodeAssist",
@@ -434,12 +713,18 @@ async fn project(
         ))
         .json(&json!({"metadata":{"ideType":"ANTIGRAVITY"}}));
     let value = json_upstream(signed(request, AccountProvider::Antigravity, credentials)?).await?;
+    if !value.is_object() {
+        return Err(ProxyError::new(
+            StatusCode::BAD_GATEWAY,
+            "Account API returned an invalid project response",
+        ));
+    }
     let id = credentials["projectId"]
         .as_str()
         .filter(|id| !id.is_empty())
         .or_else(|| value["cloudaicompanionProject"].as_str())
         .or_else(|| value["cloudaicompanionProject"]["id"].as_str());
-    let Some(id) = id else {
+    let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
         let reason = value["ineligibleTiers"]
             .as_array()
             .into_iter()
@@ -465,15 +750,42 @@ async fn copilot_catalog(
     credentials: &Value,
     client: &reqwest::Client,
 ) -> Result<Value, ProxyError> {
-    json_upstream(signed(
-        client.get(format!(
-            "{}/models",
-            base(AccountProvider::Copilot, credentials)
-        )),
-        AccountProvider::Copilot,
-        credentials,
-    )?)
-    .await
+    prepared_copilot_catalog(credentials, client, false).await
+}
+
+async fn prepared_copilot_catalog(
+    credentials: &Value,
+    client: &reqwest::Client,
+    refresh: bool,
+) -> Result<Value, ProxyError> {
+    let value = prepare_metadata(AccountProvider::Copilot, credentials, refresh, || async {
+        let value = json_upstream(signed(
+            client.get(format!(
+                "{}/models",
+                base(AccountProvider::Copilot, credentials)
+            )),
+            AccountProvider::Copilot,
+            credentials,
+        )?)
+        .await?;
+        if !value["data"].as_array().is_some_and(|rows| {
+            rows.is_empty()
+                || rows
+                    .iter()
+                    .any(|row| row["id"].as_str().is_some_and(|id| !id.trim().is_empty()))
+        }) {
+            return Err(ProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "Account API returned an invalid model directory",
+            ));
+        }
+        Ok(PreparedMetadata::Catalog(value))
+    })
+    .await?;
+    let PreparedMetadata::Catalog(value) = value else {
+        unreachable!("catalog cache uses catalog values")
+    };
+    Ok(value)
 }
 
 pub(super) async fn list_models(
@@ -481,10 +793,27 @@ pub(super) async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    let api = base(provider, &credentials);
+    let result = fetch_models(provider, &credentials, client).await;
+    if result.is_err()
+        && matches!(
+            provider,
+            AccountProvider::Antigravity | AccountProvider::Copilot
+        )
+    {
+        forget_metadata_credentials(provider, &credentials);
+    }
+    result
+}
+
+async fn fetch_models(
+    provider: AccountProvider,
+    credentials: &Value,
+    client: &reqwest::Client,
+) -> Result<Vec<String>, ProxyError> {
+    let api = base(provider, credentials);
     let value = match provider {
         AccountProvider::Antigravity => {
-            let (id, tier) = project(&credentials, client).await?;
+            let (id, tier) = prepared_project(credentials, client, true).await?;
             let mut body = json!({"project":id});
             if let Some(tier) = tier {
                 body["entitlement"] = json!({"userTier":tier});
@@ -494,7 +823,7 @@ pub(super) async fn list_models(
                     .post(format!("{api}/v1internal:fetchAvailableModels"))
                     .json(&body),
                 provider,
-                &credentials,
+                credentials,
             )?)
             .await?
         }
@@ -516,7 +845,7 @@ pub(super) async fn list_models(
                 signed(
                     client.get(format!("{api}/v3/config")),
                     provider,
-                    &credentials,
+                    credentials,
                 )?
                 .headers(headers),
             )
@@ -536,17 +865,17 @@ pub(super) async fn list_models(
             let models = nonempty(models)?;
             remember_free_model_ids(
                 provider,
-                &credentials,
+                credentials,
                 workbuddy_free_model_ids(&value, &models),
             );
             return Ok(models);
         }
-        AccountProvider::Copilot => copilot_catalog(&credentials, client).await?,
+        AccountProvider::Copilot => prepared_copilot_catalog(credentials, client, true).await?,
         AccountProvider::Codex => {
             json_upstream(signed(
                 client.get(format!("{api}/models?client_version=0.159.0")),
                 provider,
-                &credentials,
+                credentials,
             )?)
             .await?
         }
@@ -554,7 +883,7 @@ pub(super) async fn list_models(
             json_upstream(signed(
                 client.get(format!("{api}/models")),
                 provider,
-                &credentials,
+                credentials,
             )?)
             .await?
         }
@@ -604,7 +933,7 @@ pub(super) async fn list_models(
     };
     let ids = nonempty(ids)?;
     if provider == AccountProvider::Kilo {
-        remember_free_model_ids(provider, &credentials, kilo_free_model_ids(&value, &ids));
+        remember_free_model_ids(provider, credentials, kilo_free_model_ids(&value, &ids));
     }
     Ok(ids)
 }
@@ -891,7 +1220,9 @@ pub(super) async fn route(
     if !status.is_success() {
         let headers = response.headers().clone();
         let value = response.json::<Value>().await.unwrap_or(Value::Null);
-        return Err(upstream_error(status, &headers, &value));
+        let error = upstream_error(status, &headers, &value);
+        forget_failed_metadata(provider, &credentials, &error);
+        return Err(error);
     }
     converted(response, protocol, model, streaming, true).await
 }
@@ -974,7 +1305,9 @@ pub(super) async fn route_responses(
     let mut headers = response.headers().clone();
     if !status.is_success() {
         let value = response.json::<Value>().await.unwrap_or(Value::Null);
-        return Err(upstream_error(status, &headers, &value));
+        let error = upstream_error(status, &headers, &value);
+        forget_failed_metadata(provider, &credentials, &error);
+        return Err(error);
     }
     if provider == AccountProvider::Codex && !headers.contains_key(header::CONTENT_TYPE) {
         headers.insert(
@@ -1291,6 +1624,652 @@ pub(super) async fn converted(
             .body(body)
             .expect("fixed response headers")
     })
+}
+
+#[cfg(test)]
+mod metadata_performance_tests {
+    use super::*;
+    use axum::{extract::State, routing::any, Json, Router};
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU16, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    #[derive(Clone)]
+    struct Fixture {
+        calls: Arc<tokio::sync::Mutex<Vec<String>>>,
+        catalog: Arc<tokio::sync::Mutex<Value>>,
+        project: Arc<tokio::sync::Mutex<Value>>,
+        status: Arc<AtomicU16>,
+        error_code: Arc<tokio::sync::Mutex<Option<String>>>,
+        delay: Arc<AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    async fn upstream(State(state): State<Fixture>, uri: axum::http::Uri) -> Response {
+        let path = uri.path().to_owned();
+        let catalog = state.catalog.lock().await.clone();
+        let project = state.project.lock().await.clone();
+        state.calls.lock().await.push(path.clone());
+        if state.delay.load(Ordering::SeqCst) {
+            let release = state.release.notified();
+            state.entered.notify_one();
+            release.await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let status = StatusCode::from_u16(state.status.load(Ordering::SeqCst)).unwrap();
+        if !status.is_success() {
+            let mut response = json_response(
+                &json!({"error":{"message":"fixture failure","code":state.error_code.lock().await.clone()}}),
+            );
+            *response.status_mut() = status;
+            return response;
+        }
+        match path.as_str() {
+            "/models" => Json(catalog).into_response(),
+            "/v1internal:loadCodeAssist" => Json(project).into_response(),
+            "/v1internal:fetchAvailableModels" => json_response(&json!({"models":{"gemini-test":{}}})),
+            "/v1internal:streamGenerateContent" => stream_response(Body::from("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n")),
+            "/chat/completions" => stream_response(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")),
+            _ => StatusCode::NOT_FOUND.into_response(),
+        }
+    }
+
+    use axum::response::IntoResponse;
+
+    async fn fixture() -> (Value, Fixture, tokio::task::JoinHandle<()>) {
+        let state = Fixture {
+            calls: Arc::default(),
+            catalog: Arc::new(tokio::sync::Mutex::new(
+                json!({"data":[{"id":"chat-test","supported_endpoints":["/chat/completions"]}]}),
+            )),
+            project: Arc::new(tokio::sync::Mutex::new(
+                json!({"cloudaicompanionProject":"validated-project","currentTier":{"id":"standard-tier"}}),
+            )),
+            status: Arc::new(AtomicU16::new(200)),
+            error_code: Arc::default(),
+            delay: Arc::new(AtomicBool::new(false)),
+            entered: Arc::default(),
+            release: Arc::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .fallback(any(upstream))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (
+            json!({"accessToken":"fixture-token","baseUrl":base,"_echobird_saved_account_id":format!("fixture-{}", uuid::Uuid::new_v4()),"login":"fixture"}),
+            state,
+            server,
+        )
+    }
+
+    async fn count(state: &Fixture, path: &str) -> usize {
+        state
+            .calls
+            .lock()
+            .await
+            .iter()
+            .filter(|call| *call == path)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn perf_antigravity_warm_generation_reuses_validated_project() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        for _ in 0..2 {
+            let response = route(
+                AccountProvider::Antigravity,
+                credentials.clone(),
+                "gemini-test",
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+                &client,
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8(body.to_vec()).unwrap().contains("ok"));
+        }
+        assert_eq!(count(&state, "/v1internal:loadCodeAssist").await, 1);
+        assert_eq!(count(&state, "/v1internal:streamGenerateContent").await, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_copilot_responses_fallback_and_warm_route_query_catalog_once() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        assert!(route_responses(
+            AccountProvider::Copilot,
+            credentials.clone(),
+            "chat-test",
+            json!({"input":"hello"}),
+            &client
+        )
+        .await
+        .unwrap()
+        .is_none());
+        for _ in 0..2 {
+            let response = route(
+                AccountProvider::Copilot,
+                credentials.clone(),
+                "chat-test",
+                json!({"messages":[{"role":"user","content":"hello"}]}),
+                &client,
+            )
+            .await
+            .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(String::from_utf8(body.to_vec()).unwrap().contains("ok"));
+        }
+        assert_eq!(count(&state, "/models").await, 1);
+        assert_eq!(count(&state, "/chat/completions").await, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_simultaneous_cold_requests_coalesce() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        let results =
+            futures_util::future::join_all((0..8).map(|_| project(&credentials, &client))).await;
+        assert!(results
+            .iter()
+            .all(|result| result.as_ref().unwrap().0 == "validated-project"));
+        assert_eq!(count(&state, "/v1internal:loadCodeAssist").await, 1);
+        let results = futures_util::future::join_all(
+            (0..8).map(|_| wire(AccountProvider::Copilot, &credentials, "chat-test", &client)),
+        )
+        .await;
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(count(&state, "/models").await, 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_identity_and_endpoint_changes_do_not_share_permissions() {
+        let (credentials, state, server) = fixture().await;
+        let (second, other_state, other_server) = fixture().await;
+        let client = reqwest::Client::new();
+        for provider in [AccountProvider::Antigravity, AccountProvider::Copilot] {
+            let mut variants = vec![credentials.clone()];
+            for (field, value) in [
+                ("accessToken", json!("next-token")),
+                ("_echobird_saved_account_id", json!("other-account")),
+                ("login", json!("other-login")),
+                ("credentialSource", json!("other-native-source")),
+                ("headers", json!({"X-Enterprise-Id":"other-enterprise"})),
+            ] {
+                let mut changed = credentials.clone();
+                changed[field] = value;
+                variants.push(changed);
+            }
+            let mut changed_endpoint = credentials.clone();
+            changed_endpoint["baseUrl"] = second["baseUrl"].clone();
+            variants.push(changed_endpoint);
+            for auth in &variants {
+                if provider == AccountProvider::Antigravity {
+                    project(auth, &client).await.unwrap();
+                } else {
+                    wire(provider, auth, "chat-test", &client).await.unwrap();
+                }
+            }
+            if provider == AccountProvider::Antigravity {
+                project(&credentials, &client).await.unwrap();
+            } else {
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+            }
+        }
+        for path in ["/v1internal:loadCodeAssist", "/models"] {
+            assert_eq!(count(&state, path).await, 6);
+            assert_eq!(count(&other_state, path).await, 1);
+        }
+        server.abort();
+        other_server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_failure_and_cancelled_load_can_retry_without_stale_warmth() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        state.status.store(403, Ordering::SeqCst);
+        assert_eq!(
+            project(&credentials, &client).await.unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        state.status.store(200, Ordering::SeqCst);
+        project(&credentials, &client).await.unwrap();
+        project(&credentials, &client).await.unwrap();
+        assert_eq!(count(&state, "/v1internal:loadCodeAssist").await, 2);
+        state.delay.store(true, Ordering::SeqCst);
+        let auth = credentials.clone();
+        let http = client.clone();
+        let pending =
+            tokio::spawn(
+                async move { wire(AccountProvider::Copilot, &auth, "chat-test", &http).await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), state.entered.notified())
+            .await
+            .unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        state.delay.store(false, Ordering::SeqCst);
+        state.release.notify_waiters();
+        wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+            .await
+            .unwrap();
+        wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+            .await
+            .unwrap();
+        assert_eq!(count(&state, "/models").await, 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_explicit_model_refresh_updates_both_preparation_paths() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+            .await
+            .unwrap();
+        *state.catalog.lock().await =
+            json!({"data":[{"id":"new-test","supported_endpoints":["/responses"]}]});
+        assert_eq!(
+            list_models(AccountProvider::Copilot, credentials.clone(), &client)
+                .await
+                .unwrap(),
+            ["new-test"]
+        );
+        assert_eq!(
+            wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            wire(AccountProvider::Copilot, &credentials, "new-test", &client)
+                .await
+                .unwrap()
+                .1,
+            "/responses"
+        );
+        assert_eq!(count(&state, "/models").await, 2);
+        assert_eq!(
+            project(&credentials, &client).await.unwrap().0,
+            "validated-project"
+        );
+        *state.project.lock().await =
+            json!({"cloudaicompanionProject":"refreshed-project","currentTier":{"id":"free-tier"}});
+        list_models(AccountProvider::Antigravity, credentials.clone(), &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            project(&credentials, &client).await.unwrap(),
+            ("refreshed-project".into(), None)
+        );
+        assert_eq!(count(&state, "/v1internal:loadCodeAssist").await, 2);
+        state.status.store(403, Ordering::SeqCst);
+        assert!(
+            list_models(AccountProvider::Copilot, credentials.clone(), &client)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            wire(AccountProvider::Copilot, &credentials, "new-test", &client)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            list_models(AccountProvider::Antigravity, credentials.clone(), &client)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            project(&credentials, &client).await.unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_expiry_and_bad_payloads_require_new_validated_loads() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        for (provider, lifetime, path) in [
+            (
+                AccountProvider::Antigravity,
+                PROJECT_LIFETIME,
+                "/v1internal:loadCodeAssist",
+            ),
+            (
+                AccountProvider::Copilot,
+                COPILOT_CATALOG_LIFETIME,
+                "/models",
+            ),
+        ] {
+            if provider == AccountProvider::Antigravity {
+                project(&credentials, &client).await.unwrap();
+            } else {
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+            }
+            let cell = metadata_cell(provider, &credentials);
+            cell.value.lock().await.as_mut().unwrap().0 =
+                Instant::now() - lifetime - Duration::from_secs(1);
+            if provider == AccountProvider::Antigravity {
+                project(&credentials, &client).await.unwrap();
+            } else {
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(count(&state, path).await, 2);
+        }
+        *state.project.lock().await = Value::Null;
+        *state.catalog.lock().await = json!({"data":[{"unexpected":true}]});
+        for provider in [AccountProvider::Antigravity, AccountProvider::Copilot] {
+            assert!(list_models(provider, credentials.clone(), &client)
+                .await
+                .is_err());
+            if provider == AccountProvider::Antigravity {
+                assert!(project(&credentials, &client).await.is_err());
+            } else {
+                assert!(wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .is_err());
+            }
+        }
+        *state.project.lock().await =
+            json!({"ineligibleTiers":[{"reasonMessage":"Account is not eligible"}]});
+        assert_eq!(
+            project(&credentials, &client).await.unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        *state.project.lock().await = json!({"cloudaicompanionProject":"recovered-project"});
+        *state.catalog.lock().await =
+            json!({"data":[{"id":"recovered","supported_endpoints":["/chat/completions"]}]});
+        assert_eq!(
+            project(&credentials, &client).await.unwrap().0,
+            "recovered-project"
+        );
+        wire(AccountProvider::Copilot, &credentials, "recovered", &client)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_catalogs_distinguish_authoritative_denials_from_malformed_rows() {
+        let (credentials, state, server) = fixture().await;
+        let client = reqwest::Client::new();
+        *state.catalog.lock().await = json!({"data":[]});
+        for _ in 0..2 {
+            assert_eq!(
+                wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap_err()
+                    .status,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(count(&state, "/models").await, 1);
+        assert_eq!(
+            list_models(AccountProvider::Copilot, credentials.clone(), &client)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::BAD_GATEWAY
+        );
+        for invalid in [
+            json!({"data":[{"unexpected":true}]}),
+            json!({"data":[{"id":" "}]}),
+            json!({"data":[{"id":23}]}),
+            json!({"data":{}}),
+        ] {
+            *state.catalog.lock().await = invalid;
+            let before = count(&state, "/models").await;
+            for _ in 0..2 {
+                assert_eq!(
+                    wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+                        .await
+                        .unwrap_err()
+                        .status,
+                    StatusCode::BAD_GATEWAY
+                );
+            }
+            assert_eq!(count(&state, "/models").await, before + 2);
+        }
+        *state.catalog.lock().await = json!({"data":[{"id":"chat-test","supported_endpoints":["/chat/completions"],"policy":{"state":"disabled"}}]});
+        let before = count(&state, "/models").await;
+        for _ in 0..2 {
+            assert_eq!(
+                wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap_err()
+                    .status,
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert_eq!(count(&state, "/models").await, before + 1);
+        *state.catalog.lock().await = json!({"data":[{"unexpected":true},{"id":"chat-test","supported_endpoints":["/chat/completions"]}]});
+        assert_eq!(
+            list_models(AccountProvider::Copilot, credentials.clone(), &client)
+                .await
+                .unwrap(),
+            ["chat-test"]
+        );
+        wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+            .await
+            .unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_inference_rejections_invalidate_permissions_without_replaying() {
+        for provider in [AccountProvider::Antigravity, AccountProvider::Copilot] {
+            let (credentials, state, server) = fixture().await;
+            let client = reqwest::Client::new();
+            let path = if provider == AccountProvider::Antigravity {
+                "/v1internal:loadCodeAssist"
+            } else {
+                "/models"
+            };
+            if provider == AccountProvider::Antigravity {
+                project(&credentials, &client).await.unwrap();
+            } else {
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+            }
+            state.status.store(403, Ordering::SeqCst);
+            assert_eq!(
+                route(
+                    provider,
+                    credentials.clone(),
+                    "chat-test",
+                    json!({"messages":[]}),
+                    &client
+                )
+                .await
+                .unwrap_err()
+                .status,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(count(&state, path).await, 1);
+            state.status.store(200, Ordering::SeqCst);
+            if provider == AccountProvider::Antigravity {
+                project(&credentials, &client).await.unwrap();
+            } else {
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(count(&state, path).await, 2);
+            if provider == AccountProvider::Copilot {
+                state.status.store(404, Ordering::SeqCst);
+                *state.error_code.lock().await = Some("model_not_found".into());
+                assert_eq!(
+                    route(
+                        provider,
+                        credentials.clone(),
+                        "chat-test",
+                        json!({"messages":[]}),
+                        &client
+                    )
+                    .await
+                    .unwrap_err()
+                    .error_code
+                    .as_deref(),
+                    Some("model_not_found")
+                );
+                state.status.store(200, Ordering::SeqCst);
+                wire(provider, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap();
+                assert_eq!(count(&state, path).await, 3);
+                *state.catalog.lock().await = json!({"data":[{"id":"chat-test","supported_endpoints":["/responses", "/chat/completions"]}]});
+                list_models(provider, credentials.clone(), &client)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    route_responses(
+                        provider,
+                        credentials.clone(),
+                        "chat-test",
+                        json!({"input":"hello"}),
+                        &client
+                    )
+                    .await
+                    .unwrap_err()
+                    .status,
+                    StatusCode::NOT_FOUND
+                );
+                let response = route(
+                    provider,
+                    credentials.clone(),
+                    "chat-test",
+                    json!({"messages":[]}),
+                    &client,
+                )
+                .await
+                .unwrap();
+                axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(count(&state, path).await, 4);
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn perf_metadata_invalidation_and_refresh_never_warm_from_late_old_loads() {
+        for force_refresh in [false, true] {
+            let (credentials, state, server) = fixture().await;
+            let client = reqwest::Client::new();
+            state.delay.store(true, Ordering::SeqCst);
+            let auth = credentials.clone();
+            let http = client.clone();
+            let pending = tokio::spawn(async move {
+                wire(AccountProvider::Copilot, &auth, "chat-test", &http).await
+            });
+            tokio::time::timeout(Duration::from_secs(2), state.entered.notified())
+                .await
+                .unwrap();
+            *state.catalog.lock().await =
+                json!({"data":[{"id":"new-test","supported_endpoints":["/responses"]}]});
+            let refresh = if force_refresh {
+                let cell = metadata_cell(AccountProvider::Copilot, &credentials);
+                let auth = credentials.clone();
+                let http = client.clone();
+                let refresh = tokio::spawn(async move {
+                    list_models(AccountProvider::Copilot, auth, &http).await
+                });
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while cell.generation.load(Ordering::SeqCst) == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                Some(refresh)
+            } else {
+                forget_metadata(
+                    AccountProvider::Copilot,
+                    credentials["_echobird_saved_account_id"].as_str().unwrap(),
+                );
+                None
+            };
+            state.delay.store(false, Ordering::SeqCst);
+            state.release.notify_waiters();
+            assert_eq!(pending.await.unwrap().unwrap().1, "/chat/completions");
+            if let Some(refresh) = refresh {
+                assert_eq!(refresh.await.unwrap().unwrap(), ["new-test"]);
+            }
+            assert_eq!(
+                wire(AccountProvider::Copilot, &credentials, "chat-test", &client)
+                    .await
+                    .unwrap_err()
+                    .status,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                wire(AccountProvider::Copilot, &credentials, "new-test", &client)
+                    .await
+                    .unwrap()
+                    .1,
+                "/responses"
+            );
+            assert_eq!(count(&state, "/models").await, 2);
+            server.abort();
+        }
+    }
+
+    #[test]
+    fn perf_metadata_map_is_bounded_and_does_not_evict_inflight_cells() {
+        let mut cells = BTreeMap::new();
+        let mut held = Vec::new();
+        for id in 0..METADATA_CACHE_LIMIT {
+            let credentials = json!({"accessToken":"fixture-secret","_echobird_saved_account_id":format!("account-{id}")});
+            held.push(metadata_cell_at(
+                &mut cells,
+                AccountProvider::Copilot,
+                &credentials,
+            ));
+        }
+        assert_eq!(cells.len(), METADATA_CACHE_LIMIT);
+        assert!(cells
+            .keys()
+            .all(|key| key.len() == 64 && key.bytes().all(|byte| byte.is_ascii_hexdigit())));
+        let overflow =
+            json!({"accessToken":"other-secret","_echobird_saved_account_id":"overflow"});
+        let first = metadata_cell_at(&mut cells, AccountProvider::Copilot, &overflow);
+        let second = metadata_cell_at(&mut cells, AccountProvider::Copilot, &overflow);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(cells.len(), METADATA_CACHE_LIMIT);
+        drop(held);
+        let cached = metadata_cell_at(&mut cells, AccountProvider::Copilot, &overflow);
+        assert!(Arc::ptr_eq(
+            &cached,
+            &metadata_cell_at(&mut cells, AccountProvider::Copilot, &overflow)
+        ));
+        assert_eq!(cells.len(), METADATA_CACHE_LIMIT);
+    }
 }
 
 #[cfg(test)]
@@ -1996,11 +2975,10 @@ mod tests {
             vec![
                 "/v1internal:loadCodeAssist",
                 "/v1internal:fetchAvailableModels",
-                "/v1internal:loadCodeAssist",
                 "/v1internal:streamGenerateContent?alt=sse"
             ]
         );
-        assert_eq!(recorded[3].2["project"], "test-project");
+        assert_eq!(recorded[2].2["project"], "test-project");
         server.abort();
     }
 
@@ -3156,25 +4134,22 @@ mod tests {
                     assert_eq!(continuation["choices"][0]["message"]["content"], "probe-ok");
                     assert_eq!(continuation["choices"][0]["finish_reason"], "stop");
                     let recorded = calls.lock().await;
-                    let stages = &recorded[recorded.len() - 6..];
+                    let stages = &recorded[recorded.len() - 3..];
                     assert_eq!(
                         stages
                             .iter()
                             .map(|call| (call.0.clone(), call.1.as_str()))
                             .collect::<Vec<_>>(),
                         vec![
-                            (Method::GET, "/models"),
                             (Method::POST, path),
-                            (Method::GET, "/models"),
                             (Method::POST, path),
-                            (Method::GET, "/models"),
                             (Method::POST, path)
                         ]
                     );
                     for call in stages {
                         assert_eq!(call.2["authorization"], "Bearer fixture-copilot");
                     }
-                    let request = &stages[3].3;
+                    let request = &stages[1].3;
                     assert_eq!(request["model"], model);
                     assert_eq!(request["stream"], true);
                     match path {
@@ -3183,8 +4158,8 @@ mod tests {
                                 request["tool_choice"],
                                 json!({"type":"function","function":{"name":"echo_probe"}})
                             );
-                            assert_eq!(stages[5].3["messages"][3]["tool_call_id"], "call_fixture");
-                            assert_eq!(stages[5].3["messages"][3]["content"], "probe-ok");
+                            assert_eq!(stages[2].3["messages"][3]["tool_call_id"], "call_fixture");
+                            assert_eq!(stages[2].3["messages"][3]["content"], "probe-ok");
                         }
                         "/responses" => {
                             assert_eq!(request["tools"][0]["type"], "function");
@@ -3192,7 +4167,7 @@ mod tests {
                                 request["tool_choice"],
                                 json!({"type":"function","name":"echo_probe"})
                             );
-                            let input = stages[5].3["input"].as_array().unwrap();
+                            let input = stages[2].3["input"].as_array().unwrap();
                             assert!(input.iter().any(|item| item["type"] == "function_call"
                                 && item["call_id"] == "call_fixture"
                                 && item["arguments"] == "{\"value\":\"probe-ok\"}"));
@@ -3203,7 +4178,7 @@ mod tests {
                                     && item["output"] == "probe-ok"));
                         }
                         _ => {
-                            assert_eq!(stages[3].2["anthropic-version"], "2023-06-01");
+                            assert_eq!(stages[1].2["anthropic-version"], "2023-06-01");
                             assert_eq!(request["system"], "Original system");
                             assert_eq!(request["max_tokens"], 128);
                             assert_eq!(
@@ -3212,26 +4187,26 @@ mod tests {
                             );
                             assert!(request["tools"][0].get("description").is_none());
                             assert_eq!(
-                                stages[5].3["messages"][1]["content"][0]["type"],
+                                stages[2].3["messages"][1]["content"][0]["type"],
                                 "tool_use"
                             );
                             assert_eq!(
-                                stages[5].3["messages"][1]["content"][0]["id"],
+                                stages[2].3["messages"][1]["content"][0]["id"],
                                 "call_fixture"
                             );
                             assert_eq!(
-                                stages[5].3["messages"][1]["content"][0]["input"],
+                                stages[2].3["messages"][1]["content"][0]["input"],
                                 json!({"value":"probe-ok"})
                             );
                             assert_eq!(
-                                stages[5].3["messages"][2]["content"][0],
+                                stages[2].3["messages"][2]["content"][0],
                                 json!({"type":"tool_result","tool_use_id":"call_fixture","content":"probe-ok"})
                             );
                         }
                     }
                 }
             }
-            assert_eq!(calls.lock().await.len(), 60);
+            assert_eq!(calls.lock().await.len(), 31);
             server.abort();
         }
 
@@ -3262,7 +4237,7 @@ mod tests {
                 assert_eq!(error.status, status);
             }
             let calls = calls.lock().await;
-            assert_eq!(calls.len(), 9);
+            assert_eq!(calls.len(), 1);
             assert!(calls
                 .iter()
                 .all(|call| call.0 == Method::GET && call.1 == "/models"));
