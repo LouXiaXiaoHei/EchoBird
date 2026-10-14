@@ -90,6 +90,7 @@ pub(super) fn cipher_with_name(dir: &Path, name: &str) -> Result<Cipher, String>
     }
     #[cfg(target_os = "macos")]
     {
+        let _ = dir;
         let output = crate::utils::process::command("/usr/bin/security")
             .args([
                 "find-generic-password",
