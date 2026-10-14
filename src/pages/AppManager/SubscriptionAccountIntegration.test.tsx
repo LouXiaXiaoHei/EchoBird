@@ -99,7 +99,7 @@ async function mount(tool: Tool, installed = true) {
       name: id,
       category: id === 'minimaxcode' ? 'CLI Code' : 'Desktop',
       installed: installed && id === tool,
-      noModelConfig: !id.startsWith('minimax'),
+      noModelConfig: false,
       launchFile: 'fixture',
     }))
   );
@@ -233,6 +233,21 @@ it('Qoder editions retain separate rows and cached selection after a passive fai
   expect(calls('refresh_qoder_account_quota')).toHaveLength(0);
   expect(confirm).not.toHaveBeenCalled();
 });
+
+it.each(['qoder', 'qodercn'] as const)(
+  '%s: selecting an API model and an account are mutually exclusive',
+  async (tool) => {
+    await mount(tool);
+    act(() => state.handleSelectModel(tool, 'api-model'));
+    expect(state.qoderAccounts.selectedId).toBeNull();
+    expect(state.toolModelConfig[tool]).toBe('api-model');
+    act(() => state.qoderAccounts.select('same-id'));
+    expect(state.toolModelConfig[tool]).toBeNull();
+    expect(state.qoderAccounts.selectedId).toBe('same-id');
+    expect(calls('switch_qoder_account')).toHaveLength(0);
+    expect(calls('apply_model_to_tool')).toHaveLength(0);
+  }
+);
 
 it('MiniMax login uses the selected region and cannot change it while authorization is pending', async () => {
   await mount('minimaxcode');

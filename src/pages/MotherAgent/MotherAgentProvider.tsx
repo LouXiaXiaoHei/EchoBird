@@ -288,14 +288,12 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const createConversation = useCallback(() => {
     if (resettingRef.current || runningRef.current || isProcessing) return;
     createStoredConversation(selectedServerId);
-    setChatInput('');
   }, [isProcessing, selectedServerId, createStoredConversation]);
   const selectConversation = useCallback(
     (id: string) => {
       if (resettingRef.current || runningRef.current || isProcessing || id === activeConversationId)
         return;
       selectStoredConversation(id);
-      setChatInput('');
     },
     [isProcessing, activeConversationId, selectStoredConversation]
   );

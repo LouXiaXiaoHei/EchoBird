@@ -96,7 +96,7 @@ it('updates zero, singular, plural and unknown account counts across all languag
         .findAllByType('span')
         .filter((span) => span.children.includes(translate('accountProxy.highRisk', language)));
       expect(labels).toHaveLength(
-        ['antigravity', 'qoder', 'qoderCn'].includes(provider.id) ? 1 : 0
+        ['antigravity', 'claudeCode', 'qoder', 'qoderCn'].includes(provider.id) ? 1 : 0
       );
     }
   }

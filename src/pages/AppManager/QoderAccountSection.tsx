@@ -9,8 +9,9 @@ import {
 import { QuotaCountdown } from './QuotaCountdown';
 import { qoderPlanLabel } from './accountPlanLabel';
 import { qoderExpiry, qoderRewardStatus, qoderSubscriptionExpiry } from './qoderAccountDisplay';
+import { ModelSwitchDivider } from './ModelSwitchDivider';
 
-export function QoderAccountSection() {
+export function QoderAccountSection({ showDivider = false }: { showDivider?: boolean }) {
   const { qoderAccounts: group, isLaunching } = useAppManager();
   const { t, locale } = useI18n();
   const now = useUsageClock(group.accounts.some((account) => account.dailyReward != null));
@@ -77,6 +78,7 @@ export function QoderAccountSection() {
           />
         ))}
       </div>
+      {showDivider && <ModelSwitchDivider />}
     </section>
   );
 }

@@ -5,14 +5,16 @@ import { qoderRewardStatus } from './qoderAccountDisplay';
 export function useQoderAccounts(
   edition: api.QoderEdition,
   enabled: boolean,
+  hasModel: boolean,
+  clearModel: () => void,
   showError: (error: string) => void,
   navigationKey: string
 ) {
   const managed = useManagedAccounts<api.QoderAccount, api.QoderLogin>(
     edition,
     enabled,
-    false,
-    () => {},
+    hasModel,
+    clearModel,
     showError,
     {
       list: () => api.listQoderAccounts(edition),

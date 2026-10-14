@@ -546,6 +546,28 @@ describe('Mother Agent saved conversation workflow', () => {
     expect(state.conversations).toHaveLength(2);
   });
 
+  it('keeps an unsent draft when creating or selecting a conversation, then clears it on send', async () => {
+    await mount();
+    const first = state.activeConversationId;
+    act(() => state.setChatInput('Unsent draft'));
+    act(() => state.createConversation());
+    const second = state.activeConversationId;
+    expect(state.chatInput).toBe('Unsent draft');
+    act(() => state.selectConversation(first));
+    expect(state.chatInput).toBe('Unsent draft');
+    act(() => state.selectConversation(second));
+    expect(state.chatInput).toBe('Unsent draft');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(api.resetConversationContext).not.toHaveBeenCalled();
+
+    const session = activeSession();
+    await act(async () => state.handleChatSend());
+    expect(state.chatInput).toBe('');
+    expect(api.sendAgentMessage).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ conversation_id: session, message: 'Unsent draft' })
+    );
+  });
+
   it('sends independent session keys while preserving the selected server as the execution target', async () => {
     await mount();
     act(() => state.selectServer('remote'));

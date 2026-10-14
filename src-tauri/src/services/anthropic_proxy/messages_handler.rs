@@ -20,10 +20,12 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 const RELAY_FILENAME: &str = "claudedesktop.json";
 const RELAY_FILENAME_CLAUDECODE: &str = "claudecode.json";
+const RELAY_FILENAME_CLAUDESCIENCE: &str = "claudescience.json";
 
 struct Relay {
     base_url: String,
     api_key: String,
+    model_name: Option<String>,
     /// Upstream's actual model id (e.g. "mimo-v2.5-pro"). When present
     /// we rewrite Claude Desktop's request model field to this. When
     /// absent the request goes through unchanged — works fine for
@@ -43,6 +45,35 @@ pub async fn handle_messages(state: State<AppState>, body: Bytes) -> Response {
 /// same Anthropic Messages API and would otherwise collide on /v1/messages.
 pub async fn handle_messages_claudecode(state: State<AppState>, body: Bytes) -> Response {
     handle_messages_with(state, body, RELAY_FILENAME_CLAUDECODE).await
+}
+
+pub async fn handle_messages_claudescience(state: State<AppState>, body: Bytes) -> Response {
+    handle_messages_with(state, body, RELAY_FILENAME_CLAUDESCIENCE).await
+}
+
+pub async fn handle_models_claudescience() -> Response {
+    let Some(relay) = read_relay(RELAY_FILENAME_CLAUDESCIENCE) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    science_models_response(&relay)
+}
+
+fn science_models_response(relay: &Relay) -> Response {
+    let Some(id) = relay.real_model_id.as_deref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    Json(json!({
+        "data": [{
+            "type": "model",
+            "id": id,
+            "display_name": relay.model_name.as_deref().unwrap_or(id),
+            "created_at": "1970-01-01T00:00:00Z"
+        }],
+        "first_id": id,
+        "last_id": id,
+        "has_more": false
+    }))
+    .into_response()
 }
 
 async fn handle_messages_with(
@@ -237,10 +268,16 @@ fn read_relay(filename: &str) -> Option<Relay> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string());
+    let model_name = parsed
+        .get("modelName")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     Some(Relay {
         base_url,
         api_key,
+        model_name,
         real_model_id,
     })
 }
@@ -252,6 +289,25 @@ fn relay_path(filename: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn science_catalog_exposes_the_applied_model() {
+        let relay = Relay {
+            base_url: "https://example.test/anthropic".into(),
+            api_key: "secret".into(),
+            model_name: Some("DeepSeek Flash".into()),
+            real_model_id: Some("deepseek-flash".into()),
+        };
+        let response = science_models_response(&relay);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let catalog: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(catalog["data"][0]["id"], "deepseek-flash");
+        assert_eq!(catalog["data"][0]["display_name"], "DeepSeek Flash");
+        assert_eq!(catalog["has_more"], false);
+    }
 
     #[test]
     fn native_supported_xhigh_reaches_the_outbound_payload_unchanged() {

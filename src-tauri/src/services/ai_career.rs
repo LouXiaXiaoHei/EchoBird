@@ -1602,18 +1602,18 @@ mod sqlite_cache_read_tests {
 // ─── DeepSeek Harness (dsh) ──────────────────────────────────────────────
 //
 // DeepSeek Harness persists each session as an append-only event log under
-// `<dshHome>/sessions/<project-key>/<session-id>/session.jsonl[.zstd]` (the
-// JSONL backend; default compression is checksummed concatenated Zstandard
-// frames — `.zstd`, plain `.jsonl` when `persistenceCompression: 'none'`).
-// The first line is the session header (`{"type":"session","version":0,
+// `<dshHome>/sessions/<project-key>/<session-id>/session.v4.jsonl[.zstd]`
+// (or the older `session.jsonl[.zstd]`). The default compression is
+// checksummed concatenated Zstandard frames; plain `.jsonl` is also supported.
+// The first line is the session header (`{"type":"session","version":4,
 // "id":...,"cwd":...,"createdAt":...}`); each following line is a
 // `SessionEvent` (`type`, monotonic `seq`, epoch-ms `time`, `data`). We read
 // the store directly like the other families — independent of EchoBird's dsh
 // model config.
 
 /// Collect every DeepSeek Harness session log under `root`, i.e. all
-/// `<project>/<session>/session.jsonl` / `session.jsonl.zstd` files (depth 3).
-/// Both physical encodings are matched; the mtime tags the last append.
+/// `<project>/<session>/session.v4.jsonl[.zstd]` or legacy logs (depth 3).
+/// Prefer v4 when both versions remain in the same session directory.
 fn collect_dsh_paths(
     root: &Path,
     family: Family,
@@ -1640,6 +1640,7 @@ fn collect_dsh_paths(
             let Some(files) = read_directory(&sp)? else {
                 continue;
             };
+            let mut selected: Option<(u8, SystemTime, PathBuf)> = None;
             for f in files {
                 let f = f?;
                 let path = f.path();
@@ -1650,10 +1651,20 @@ fn collect_dsh_paths(
                     continue;
                 }
                 let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name == "session.jsonl" || name == "session.jsonl.zstd" {
-                    let mtime = metadata.modified()?;
-                    out.push((mtime, path, family));
+                let priority = match name {
+                    "session.v4.jsonl" | "session.v4.jsonl.zstd" => 2,
+                    "session.jsonl" | "session.jsonl.zstd" => 1,
+                    _ => continue,
+                };
+                let mtime = metadata.modified()?;
+                if selected.as_ref().map_or(true, |(current, time, _)| {
+                    priority > *current || (priority == *current && mtime > *time)
+                }) {
+                    selected = Some((priority, mtime, path));
                 }
+            }
+            if let Some((_, mtime, path)) = selected {
+                out.push((mtime, path, family));
             }
         }
     }
@@ -3886,5 +3897,48 @@ mod tests {
             .iter()
             .any(|s| s.id == "deepseek_native_session-abcd" && s.name == "plain prompt"));
         let _ = std::fs::remove_dir_all(&dsh);
+    }
+
+    #[test]
+    fn dsh_family_history_reads_v4_without_duplicating_legacy_log() {
+        let dsh = fixture_dir();
+        let session_dir = dsh.join("sessions").join("--proj--").join("session-v4");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let v4 = session_dir.join("session.v4.jsonl.zstd");
+        let rows = [
+            serde_json::json!({"type":"session","version":4,"id":"session-v4","cwd":"E:\\proj","createdAt":1786841051863i64}),
+            serde_json::json!({"type":"turn/start","data":{"turn":1}}),
+            serde_json::json!({"type":"user/message","data":{"content":[{"type":"text","text":"new prompt"}]}}),
+            serde_json::json!({"type":"assistant/message","data":{"turn":1,"step":1,"message":{"source":{"model":"deepseek-v4-flash"}},"usage":{"inputTokens":10,"outputTokens":5}}}),
+            serde_json::json!({"type":"session/title","data":{"title":"New session"}}),
+        ];
+        let contents = rows
+            .iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>();
+        std::fs::write(
+            &v4,
+            zstd::stream::encode_all(contents.as_bytes(), 1).unwrap(),
+        )
+        .unwrap();
+        write_jsonl(
+            &session_dir.join("session.jsonl"),
+            &[
+                serde_json::json!({"type":"session","version":0,"id":"session-v4","cwd":"E:\\proj"}),
+                serde_json::json!({"type":"session/title","data":{"title":"Old session"}}),
+            ],
+        );
+
+        let cache = Mutex::new(HashMap::new());
+        let sessions =
+            family_history_files_at(&dsh.join("sessions"), Family::DeepSeek, 0, 30, &cache)
+                .unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "New session");
+        assert_eq!(sessions[0].model_id.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(sessions[0].message_count, Some(2));
+        assert_eq!(sessions[0].file_path.as_deref(), Some(v4.to_str().unwrap()));
+        assert_eq!(count_dsh_event_lines(&v4), 4);
+        std::fs::remove_dir_all(&dsh).unwrap();
     }
 }

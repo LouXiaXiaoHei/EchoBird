@@ -366,15 +366,25 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
   );
   const qoderEdition: api.QoderEdition = selectedTool === 'qodercn' ? 'qodercn' : 'qoder';
+  const clearQoderGlobalModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, qoder: null }));
+  }, []);
+  const clearQoderCnModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, qodercn: null }));
+  }, []);
   const qoderGlobalAccounts = useQoderAccounts(
     'qoder',
     accountGroupEnabled('qoder'),
+    !!toolModelConfig.qoder,
+    clearQoderGlobalModel,
     setApplyError,
     activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
   );
   const qoderCnAccounts = useQoderAccounts(
     'qodercn',
     accountGroupEnabled('qodercn'),
+    !!toolModelConfig.qodercn,
+    clearQoderCnModel,
     setApplyError,
     activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
   );
@@ -514,6 +524,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       clineAccounts.select(null);
     }
     if (toolId === 'minimaxcode' || toolId === 'minimaxdesktop') minimaxAccounts.select(null);
+    if (toolId === 'qoder' || toolId === 'qodercn') qoderAccounts.select(null);
     if (toolId === 'zcode') zcodeAccounts.select(null);
     if (toolId === 'cursor') cursorAccounts.select(null);
     if (toolId === 'grokbot') grokBotAccounts.select(null);
@@ -1015,14 +1026,13 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       return;
     } else if (['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) {
       try {
-        const shouldLaunch = launchAfterApply || noModelConfig;
         await api.switchQoderAccount(
           qoderEdition,
           qoderAccounts.selectedId,
           selectedTool as api.QoderTool
         );
         await qoderAccounts.reload();
-        if (shouldLaunch) await api.startTool(selectedTool, toolData?.startCommand);
+        await api.startTool(selectedTool, toolData?.startCommand);
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
@@ -1126,7 +1136,11 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       if (readBool('echobird_easter_egg', true) && isMimoModel(appliedModel)) firePulse(pending);
     }
     // Launch tool when "launch directly" is checked, or unconditionally for desktop apps
-    if (launchAfterApply || noModelConfig) {
+    if (
+      launchAfterApply ||
+      noModelConfig ||
+      ['qoder', 'qodercn', 'claudescience'].includes(selectedTool)
+    ) {
       if (isLaunchable) {
         // Launchable tool (e.g. game): open independent window with model config
         const selectedModelId = toolModelConfig[selectedTool];

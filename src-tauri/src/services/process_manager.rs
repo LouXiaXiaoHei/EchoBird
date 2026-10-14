@@ -226,8 +226,12 @@ impl ProcessManager {
         // invocation and are never touched. (A lone multi-open request once
         // removed this; the silent-switch failures it caused hit far more
         // users — so kill is the default, no toggle.)
+        // Claude Science keeps work in a daemon. Reopening its browser must
+        // leave that daemon alone unless its model or login actually changed.
         if restart
             && crate::services::tool_manager::is_managed_desktop_tool(tool_id)
+            && (tool_id != "claudescience"
+                || crate::services::tool_config_manager::claude_science_restart_file().exists())
             && self.kill_desktop_instances(tool_id)
         {
             // Let the OS release the app's single-instance lock so the relaunch
@@ -264,6 +268,16 @@ impl ProcessManager {
                     log::warn!("[ProcessManager] bypass_onboarding failed (non-fatal): {error}");
                 }
             }
+        }
+
+        if tool_id == "claudescience" {
+            self.start_claude_science().await?;
+            let path = crate::services::tool_config_manager::claude_science_restart_file();
+            if path.exists() {
+                std::fs::remove_file(path)
+                    .map_err(|e| format!("Failed to clear Claude Science restart state: {e}"))?;
+            }
+            return Ok(());
         }
 
         // Priority 1: If explicit command is given from frontend, use it
@@ -417,6 +431,48 @@ impl ProcessManager {
         );
 
         is_third_party
+    }
+
+    async fn start_claude_science(&mut self) -> Result<(), String> {
+        let executable = crate::services::tool_manager::get_tool_exe_path("claudescience")
+            .ok_or("Claude Science is not installed")?;
+        let mut command = crate::utils::process::async_command(&executable);
+        command.args(["serve", "--detached", "--no-browser"]);
+        if dirs::home_dir().is_some_and(|home| home.join(".echobird/claudescience.json").exists()) {
+            command.env(
+                "ANTHROPIC_BASE_URL",
+                format!(
+                    "http://127.0.0.1:{}/claudescience",
+                    crate::services::anthropic_proxy::port()
+                ),
+            );
+        } else {
+            command.env_remove("ANTHROPIC_BASE_URL");
+        }
+        let status = tokio::time::timeout(std::time::Duration::from_secs(20), command.status())
+            .await
+            .map_err(|_| "Claude Science took too long to start")?
+            .map_err(|e| format!("Failed to start Claude Science: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "Claude Science could not start (exit code {status})"
+            ));
+        }
+        let output = crate::utils::process::async_command(&executable)
+            .arg("status")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to read Claude Science status: {e}"))?;
+        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            if let Some(pid) = value["pid"]
+                .as_u64()
+                .and_then(|pid| u32::try_from(pid).ok())
+            {
+                self.processes
+                    .insert("claudescience".into(), ProcessInfo::new(pid));
+            }
+        }
+        Ok(())
     }
 
     /// Start a CLI tool via terminal
@@ -1541,6 +1597,30 @@ pub async fn start_tool(
     let mgr = get_manager().await;
     let mut mgr = mgr.lock().await;
     mgr.start_tool(tool_id, start_command, cwd).await
+}
+
+pub async fn claude_science_url() -> Result<url::Url, String> {
+    let executable = crate::services::tool_manager::get_tool_exe_path("claudescience")
+        .ok_or("Claude Science is not installed")?;
+    for _ in 0..15 {
+        let output = crate::utils::process::async_command(&executable)
+            .arg("url")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to open Claude Science: {e}"))?;
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let url = url::Url::parse(raw.trim())
+                .map_err(|_| "Claude Science returned an invalid local URL")?;
+            if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost"))
+            {
+                return Err("Claude Science returned a non-local URL".into());
+            }
+            return Ok(url);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Err("Claude Science did not provide a login link".into())
 }
 
 /// Open the native login surface without terminating an existing login or task.

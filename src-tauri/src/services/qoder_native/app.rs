@@ -121,6 +121,35 @@ fn cipher(directory: &Path, product: &Value) -> Result<electron_storage::Cipher,
         .ok_or("accountError.format")?;
     electron_storage::cipher_with_name(directory, name)
 }
+fn active_user_id_at(
+    directory: &Path,
+    cipher: &electron_storage::Cipher,
+) -> Result<String, String> {
+    let bytes = files::read_optional(&directory.join("auth.v1.dat"))?
+        .ok_or("Sign in to Qoder before configuring its model")?;
+    let plain = electron_storage::decrypt_bytes(cipher, &bytes)?;
+    let auth: Value = serde_json::from_slice(&plain).map_err(|_| "accountError.format")?;
+    if auth["schemaVersion"] != 1
+        || !auth["token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    {
+        return Err("accountError.format".into());
+    }
+    auth["user"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| "accountError.format".into())
+}
+pub(crate) fn active_user_id(edition: Edition, executable: &Path) -> Result<String, String> {
+    let product = metadata(executable, edition)?;
+    let directory = data_dir(&product)?;
+    if !directory.join("auth.v1.dat").is_file() {
+        return Err("Sign in to Qoder before configuring its model".into());
+    }
+    active_user_id_at(&directory, &cipher(&directory, &product)?)
+}
 struct AuthLock {
     path: PathBuf,
     _file: fs::File,
@@ -271,6 +300,29 @@ mod tests {
             device_expires_at: 2_000_000_000_000,
             device_chat: false,
         }
+    }
+    #[test]
+    fn model_selection_uses_native_signed_in_user_without_saved_account() {
+        let root = std::env::temp_dir().join(format!("qoder-app-model-{}", uuid::Uuid::new_v4()));
+        let cipher = test_cipher(11);
+        assert_eq!(
+            active_user_id_at(&root, &cipher).unwrap_err(),
+            "Sign in to Qoder before configuring its model"
+        );
+        assert!(!root.exists());
+
+        store_auth(
+            &root,
+            &cipher,
+            &auth(&credentials(), &json!({"id":"fixture"})).unwrap(),
+        );
+        assert_eq!(active_user_id_at(&root, &cipher).unwrap(), "fixture");
+
+        let mut signed_out = read_auth(&root, &cipher);
+        signed_out["token"] = json!("");
+        store_auth(&root, &cipher, &signed_out);
+        assert!(active_user_id_at(&root, &cipher).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn standalone_schema_uses_raw_safe_storage_device_auth_and_iso_expiry() {

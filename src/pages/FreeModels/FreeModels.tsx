@@ -947,11 +947,16 @@ function RouterRemoveDropZone({
     if (!stage) return;
     const update = () => {
       const rect = stage.getBoundingClientRect();
-      setPosition({
+      const next = {
         left: rect.left + NODE_SIDE_PADDING,
         width: Math.max(0, rect.width - NODE_SIDE_PADDING * 2),
         bottom: Math.max(12, window.innerHeight - rect.bottom + 12),
-      });
+      };
+      setPosition((current) =>
+        current.left === next.left && current.width === next.width && current.bottom === next.bottom
+          ? current
+          : next
+      );
     };
     update();
     const observer = new ResizeObserver(update);
@@ -963,10 +968,10 @@ function RouterRemoveDropZone({
       window.removeEventListener('resize', update);
       window.removeEventListener('scroll', update, true);
     };
-  }, [stageRef]);
+  }, [stageRef, visible]);
 
   useLayoutEffect(() => {
-    if (visible) measureDroppableContainers([ROUTER_REMOVE_DROP_ID]);
+    if (visible && position.width > 0) measureDroppableContainers([ROUTER_REMOVE_DROP_ID]);
   }, [visible, position, measureDroppableContainers]);
 
   return (

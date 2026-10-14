@@ -4,6 +4,11 @@
 mod aider;
 mod claudecode;
 mod claudedesktop;
+mod claudescience;
+
+pub(crate) fn claude_science_restart_file() -> std::path::PathBuf {
+    echobird_dir().join(claudescience::RESTART_FILE)
+}
 pub(crate) mod cline;
 mod codex;
 mod copilot;
@@ -22,6 +27,7 @@ mod opencode;
 mod openscience;
 mod pi;
 mod proxy_ports;
+mod qoder;
 mod qwencode;
 mod relay;
 mod vibe_trading;
@@ -319,6 +325,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         "cline" | "clinedesktop" => {
             return cline::apply(&model_info, tool_id == "clinedesktop").await
         }
+        "qoder" | "qodercn" => return qoder::apply(tool_id, &model_info).await,
         "kimidesktop" => return apply_kimidesktop(&model_info),
 
         // Kilo Code (Kilo fork of OpenCode): same provider schema,
@@ -342,6 +349,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 
         // Claude Desktop 3P profile (Anthropic-native providers only)
         "claudedesktop" => return apply_claudedesktop(&model_info),
+        "claudescience" => return claudescience::apply(&model_info),
 
         // Claude Code — same model-id-rewrite proxy path as Claude Desktop,
         // but writes ~/.claude/settings.json env vars + its own relay file.
@@ -391,6 +399,9 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 /// the tool itself regenerates a fresh, vendor-default config on next launch.
 /// Used by the App Desktop "restore to official" flow.
 pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
+    if tool_id == "claudescience" {
+        return claudescience::restore();
+    }
     if tool_id == "vscode" {
         return vscode::restore();
     }
@@ -536,6 +547,7 @@ pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
         "zcode" => return read_zcode(),
         "codex" | "chatgptdesktop" => return read_codex(),
         "claudedesktop" => return read_claudedesktop(),
+        "claudescience" => return claudescience::read(),
         "claudecode" => return read_claudecode(),
         "aider" => return read_aider(),
         "grok" => return read_grok(),

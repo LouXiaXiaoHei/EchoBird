@@ -4,6 +4,9 @@ import { describe, expect, it, vi } from 'vitest';
 import type { LocalTool, ModelConfig } from '../../api/types';
 import type { TKey } from '../../i18n';
 import vscodeDefinition from '../../../tools/vscode/paths.json';
+import qoderDefinition from '../../../tools/qoder/paths.json';
+import qoderCnDefinition from '../../../tools/qodercn/paths.json';
+import claudeScienceDefinition from '../../../tools/claudescience/paths.json';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { AppManagerContext, type AppManagerContextType } from './context';
 import { AccountSectionRow } from './AccountSectionPrimitives';
@@ -52,6 +55,43 @@ const labels: Partial<Record<TKey, string>> = {
 };
 
 describe('ModelListSection', () => {
+  it.each([
+    ['qoder', qoderDefinition],
+    ['qodercn', qoderCnDefinition],
+  ])('shows configured API models for %s', async (toolId, definition) => {
+    vi.stubGlobal('__APP_EDITION__', 'full');
+    const { ModelListSection } = await import('./AppManagerComponents');
+    expect(definition.noModelConfig).toBe(false);
+    const markup = renderToStaticMarkup(
+      <ModelListSection
+        selectedToolData={{ ...tool, ...definition, id: toolId }}
+        userModels={models}
+        toolModelConfig={{}}
+        selectedTool={toolId}
+        handleSelectModel={vi.fn()}
+        t={(key) => key}
+      />
+    );
+    expect(markup).toContain('Cloud Model');
+    expect(markup).toContain('deepseek-flash');
+  });
+  it('shows Anthropic models and the official login for Claude Science', async () => {
+    vi.stubGlobal('__APP_EDITION__', 'full');
+    const { ModelListSection } = await import('./AppManagerComponents');
+    expect(claudeScienceDefinition.noModelConfig).toBe(false);
+    const markup = renderToStaticMarkup(
+      <ModelListSection
+        selectedToolData={{ ...tool, ...claudeScienceDefinition, id: 'claudescience' }}
+        userModels={[{ ...models[0], anthropicUrl: 'https://cloud.example/anthropic' }]}
+        toolModelConfig={{}}
+        selectedTool="claudescience"
+        handleSelectModel={vi.fn()}
+        t={(key) => key}
+      />
+    );
+    expect(markup).toContain('Cloud Model');
+    expect(markup).toContain('Anthropic Official');
+  });
   it('hides the router when smart routing is turned off', async () => {
     vi.stubGlobal('__APP_EDITION__', 'full');
     const { ModelListSection } = await import('./AppManagerComponents');

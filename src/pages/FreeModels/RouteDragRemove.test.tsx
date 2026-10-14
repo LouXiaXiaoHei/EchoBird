@@ -98,12 +98,8 @@ describe('Remove router candidates by dragging', () => {
     });
     return <FreeModelsMain />;
   }
-  function app() {
-    return (
-      <FreeModelsProvider>
-        <Harness />
-      </FreeModelsProvider>
-    );
+  function app(showMain = true) {
+    return <FreeModelsProvider>{showMain && <Harness />}</FreeModelsProvider>;
   }
   async function open() {
     await act(async () => {
@@ -255,6 +251,46 @@ describe('Remove router candidates by dragging', () => {
     expect(target().props['aria-hidden']).toBe(true);
     expect(zone().props.className).not.toContain('is-visible');
     expect(zone().props.className).not.toContain('is-over');
+    expectNoRemoval();
+  });
+
+  it('positions the removal target after returning with cached models', async () => {
+    const stage = {
+      getBoundingClientRect: () => ({ left: 100, width: 800, bottom: 750 }),
+    };
+    vi.stubGlobal('window', {
+      setInterval,
+      clearInterval,
+      setTimeout,
+      innerHeight: 900,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe = vi.fn();
+        disconnect = vi.fn();
+      }
+    );
+    await act(async () => {
+      renderer = create(app(), {
+        createNodeMock: (element) =>
+          element.type === 'div' &&
+          String(element.props.className).includes('relative overflow-hidden')
+            ? stage
+            : null,
+      });
+    });
+    await act(async () => renderer.update(app(false)));
+    await act(async () => renderer.update(app()));
+    expectNoRemoval();
+    const measuredPositions: unknown[] = [];
+    measure.mockImplementation(() => measuredPositions.push({ ...target().props.style }));
+    await start();
+    expect(target().props.style).toEqual({ left: 120, width: 760, bottom: 162 });
+    expect(measure).toHaveBeenCalledWith([REMOVE_TARGET]);
+    expect(measuredPositions).toEqual([{ left: 120, width: 760, bottom: 162 }]);
     expectNoRemoval();
   });
 

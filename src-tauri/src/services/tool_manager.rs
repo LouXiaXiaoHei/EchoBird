@@ -2315,7 +2315,8 @@ pub fn is_managed_desktop_tool(tool_id: &str) -> bool {
         .iter()
         .find(|d| d.id == tool_id)
         .map(|d| {
-            (d.paths_config.category.eq_ignore_ascii_case("desktop") || d.id == "openscience")
+            (d.paths_config.category.eq_ignore_ascii_case("desktop")
+                || matches!(d.id.as_str(), "openscience" | "claudescience"))
                 && !d.paths_config.no_model_config
         })
         .unwrap_or(false)
@@ -2753,7 +2754,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn qoder_catalog_has_independent_account_only_desktop_entries() {
+    fn qoder_catalog_has_independent_account_and_api_model_desktop_entries() {
         for (id, name, contents) in [
             (
                 "qoder",
@@ -2768,8 +2769,8 @@ mod tests {
         ] {
             let config: PathsConfig = serde_json::from_str(contents).unwrap();
             assert_eq!(config.name, name);
-            assert!(config.api_protocol.is_empty());
-            assert!(config.no_model_config);
+            assert_eq!(config.api_protocol, vec!["openai", "anthropic"]);
+            assert!(!config.no_model_config);
             assert!(super::has_authoritative_detector(&config));
             assert!(!config.detect_by_config_dir);
             for paths in [
@@ -3119,7 +3120,7 @@ mod tests {
             ToolCategory::Science
         );
         assert!(super::is_managed_desktop_tool("openscience"));
-        assert!(!super::is_managed_desktop_tool("claudescience"));
+        assert!(super::is_managed_desktop_tool("claudescience"));
     }
 
     #[test]

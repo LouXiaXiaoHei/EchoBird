@@ -1,8 +1,8 @@
 {
     "name": "Qoder",
     "category": "Desktop",
-    "noModelConfig": true,
-    "apiProtocol": [],
+    "noModelConfig": false,
+    "apiProtocol": ["openai", "anthropic"],
     "docs": "https://docs.qoder.com/qoder/quickstart",
     "website": "https://qoder.com/download",
     "command": "",

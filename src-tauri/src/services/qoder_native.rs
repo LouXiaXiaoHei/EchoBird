@@ -1,6 +1,8 @@
 mod app;
 pub(crate) mod desktop;
 
+pub(crate) use app::active_user_id as active_app_user_id;
+
 use super::qoder_accounts::{self, Account, Edition};
 use std::path::Path;
 

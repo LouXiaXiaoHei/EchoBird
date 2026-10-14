@@ -1092,8 +1092,6 @@ export const AppManagerPanel: React.FC = () => {
             <KiroAccountSection />
           ) : selectedTool === 'trae' || selectedTool === 'traecn' ? (
             <TraeAccountSection />
-          ) : ['qoder', 'qodercn'].includes(selectedTool ?? '') ? (
-            <QoderAccountSection />
           ) : selectedToolData.noModelConfig ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
               <BoxIcon size={28} className="text-cyber-text opacity-25" />
@@ -1120,6 +1118,9 @@ export const AppManagerPanel: React.FC = () => {
               {selectedTool === 'zcode' && <ZCodeAccountSection showDivider={hasVisibleModels} />}
               {(selectedTool === 'minimaxcode' || selectedTool === 'minimaxdesktop') && (
                 <MinimaxAccountSection showDivider={hasVisibleModels} />
+              )}
+              {(selectedTool === 'qoder' || selectedTool === 'qodercn') && (
+                <QoderAccountSection showDivider={hasVisibleModels} />
               )}
               {(selectedTool === 'workbuddy' || selectedTool === 'workbuddyai') && (
                 <WorkBuddyAccountSection showDivider={hasVisibleModels} />
@@ -1258,7 +1259,10 @@ export const AppManagerBottom: React.FC = () => {
   // forcing model selection just to start a CLI was the long-standing bug.
   const willApply =
     hasAccountSelected || (!noModelConfig && agreedConfigPolicy && hasModelSelected);
-  const willLaunch = launchAfterApply || noModelConfig;
+  const willLaunch =
+    launchAfterApply ||
+    noModelConfig ||
+    ['qoder', 'qodercn', 'claudescience'].includes(selectedTool ?? '');
   const buttonDisabled =
     !selectedToolData ||
     isLaunching ||

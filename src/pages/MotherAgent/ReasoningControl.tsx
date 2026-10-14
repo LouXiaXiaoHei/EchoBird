@@ -48,7 +48,7 @@ export function ReasoningControl({ levels, value, disabled, onChange }: Props) {
         aria-expanded={isOpen && !unavailable}
         aria-haspopup="dialog"
         onClick={() => !unavailable && setIsOpen((open) => !open)}
-        className={`inline-grid whitespace-nowrap px-2 py-1 text-xs font-mono rounded-button border border-cyber-border transition-colors hover:bg-cyber-surface disabled:opacity-50 ${value === 'max' ? 'text-cyber-accent' : 'text-cyber-text-secondary'}`}
+        className={`inline-grid whitespace-nowrap px-2 py-1 text-xs font-mono rounded-button border border-cyber-border transition-all disabled:opacity-50 ${value === 'max' ? 'text-cyber-accent hover:bg-cyber-accent/10 hover:brightness-110' : 'text-cyber-text-secondary hover:bg-cyber-text/10 hover:text-cyber-text'}`}
       >
         {choices.map((effort) => (
           <span
