@@ -2813,7 +2813,11 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
                 value["handles"],
                 serde_json::json!([independent, independent, independent])
             );
-            assert_eq!(value["cwd"], cwd.to_string_lossy().as_ref());
+            assert_eq!(
+                std::fs::canonicalize(std::path::Path::new(value["cwd"].as_str().unwrap()))
+                    .unwrap(),
+                std::fs::canonicalize(&cwd).unwrap()
+            );
             assert_eq!(value["label"], if independent { marker } else { "" });
             assert_eq!(value["marker"], "preserved");
         }
@@ -2848,8 +2852,9 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
     fn muse_unix_launch_uses_detected_executable_outside_path() {
         use std::os::unix::fs::PermissionsExt;
 
-        let root =
-            std::env::temp_dir().join(format!("echobird-muse-launch-{}", uuid::Uuid::new_v4()));
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("echobird-muse-launch-{}", uuid::Uuid::new_v4()));
         let bin = root.join("user's tools");
         let cwd = root.join("项目 folder");
         let config = root.join("selected config");

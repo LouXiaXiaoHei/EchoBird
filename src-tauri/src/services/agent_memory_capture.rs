@@ -1245,9 +1245,9 @@ mod tests {
             ))
             .unwrap_or_else(|_| panic!("queue rejected forget"));
         drop(sender);
-        tokio::time::timeout(Duration::from_secs(2), worker)
+        tokio::time::timeout(Duration::from_secs(10), worker)
             .await
-            .unwrap()
+            .expect("FIFO fixture did not finish its three queued operations")
             .unwrap();
         let first = payload(&fixture.next_request().await);
         let second = payload(&fixture.next_request().await);

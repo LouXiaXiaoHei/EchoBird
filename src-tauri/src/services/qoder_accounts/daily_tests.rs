@@ -12,6 +12,7 @@ use std::sync::{
 };
 
 struct Fixture {
+    root: PathBuf,
     path: PathBuf,
     credentials: Credentials,
     id: String,
@@ -45,7 +46,11 @@ impl Fixture {
             expires_at: None,
         }];
         let id = account.id.clone();
-        let path = std::env::temp_dir().join(format!("qoder-daily-{nonce}.json"));
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("qoder-daily-{nonce}"));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("accounts.json");
         super::super::cursor_auth::write(
             &path,
             &Store::from([(
@@ -58,6 +63,7 @@ impl Fixture {
         )
         .unwrap();
         Self {
+            root,
             path,
             credentials,
             id,
@@ -67,7 +73,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 

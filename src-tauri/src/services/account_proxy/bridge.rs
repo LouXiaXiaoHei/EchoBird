@@ -1108,10 +1108,18 @@ mod tests {
     async fn canceled_windows_cmd_kills_its_owned_heartbeat_child() {
         let dir = TempDir::new().unwrap();
         let script = dir.0.join("parent.cmd");
+        let heartbeat_script = dir.0.join("heartbeat.cmd");
         let heartbeat = dir.0.join("heartbeat.txt");
-        let destination = heartbeat.to_string_lossy().replace('\'', "''");
-        let source=format!("@echo off\r\nstart \"\" /b powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command \"$i=0; while($true){{ [IO.File]::WriteAllText('{destination}',($i++).ToString()); Start-Sleep -Milliseconds 50 }}\"\r\nping -t 127.0.0.1 > nul\r\n");
-        std::fs::write(&script, source).unwrap();
+        std::fs::write(
+            &heartbeat_script,
+            "@echo off\r\nsetlocal\r\nset /a heartbeat=0 > nul\r\n:heartbeat\r\nset /a heartbeat+=1 > nul\r\n> \"%~dp0heartbeat.txt\" echo %heartbeat%\r\ngoto heartbeat\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &script,
+            "@echo off\r\nstart \"\" /b \"%ComSpec%\" /d /c \"\"%~dp0heartbeat.cmd\"\"\r\nping -t 127.0.0.1 > nul\r\n",
+        )
+        .unwrap();
         let mut child = OwnedChild(
             crate::utils::process::async_command(&script)
                 .stdout(Stdio::null())
@@ -1125,7 +1133,7 @@ mod tests {
             loop {
                 if let Some(value) = std::fs::read_to_string(&heartbeat)
                     .ok()
-                    .and_then(|text| text.parse::<u64>().ok())
+                    .and_then(|text| text.trim().parse::<u64>().ok())
                 {
                     match first {
                         Some(first) if value > first => break,
