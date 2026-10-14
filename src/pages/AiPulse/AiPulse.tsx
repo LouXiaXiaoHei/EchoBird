@@ -12,6 +12,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { ChevronDown, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
+import { ViewModeTabs } from '../../components/ViewModeTabs';
 import { fetchFeed, filterNewsItems, type NewsItem } from './feed';
 import type { TKey } from '../../i18n';
 
@@ -356,28 +357,14 @@ export function AiPulseTitleActions() {
           (they're pinned to the en feed by the Provider). Avoids
           adding two i18n keys that would never be translated. */}
       {isZhLocale && (
-        <div className="flex items-center rounded-md border border-cyber-border/50 overflow-hidden">
-          <button
-            onClick={() => setFeedSource('zh')}
-            className={`text-sm px-3 py-1.5 transition-colors ${
-              feedSource === 'zh'
-                ? 'bg-cyber-text/10 text-cyber-text'
-                : 'text-cyber-text-secondary hover:bg-cyber-text/5'
-            }`}
-          >
-            国内
-          </button>
-          <button
-            onClick={() => setFeedSource('en')}
-            className={`text-sm px-3 py-1.5 transition-colors border-l border-cyber-border/50 ${
-              feedSource === 'en'
-                ? 'bg-cyber-text/10 text-cyber-text'
-                : 'text-cyber-text-secondary hover:bg-cyber-text/5'
-            }`}
-          >
-            全球
-          </button>
-        </div>
+        <ViewModeTabs
+          value={feedSource}
+          onChange={setFeedSource}
+          options={[
+            { value: 'zh', label: '国内' },
+            { value: 'en', label: '全球' },
+          ]}
+        />
       )}
       <button
         onClick={retry}
@@ -480,9 +467,7 @@ function ItemFeed() {
   if ((initialLoading || syncing) && visible.length === 0 && newsItems.length === 0) {
     return (
       <div className="space-y-2">
-        <div className="sticky top-0 z-20 h-0.5 overflow-hidden pointer-events-none">
-          <div className="h-full w-1/3 bg-cyber-accent/70 animate-pulse" />
-        </div>
+        <div aria-hidden="true" className="h-0.5" />
         {Array.from({ length: 8 }).map((_, i) => (
           <div key={i} className="p-3 bg-cyber-surface rounded-card animate-pulse">
             <div className="h-3 w-full bg-cyber-border/50 rounded mb-2" />
@@ -517,13 +502,7 @@ function ItemFeed() {
           {t('pulse.fetchFailed')}
         </div>
       )}
-      <div className="sticky top-0 z-20 h-0.5 overflow-hidden pointer-events-none">
-        <div
-          className={`h-full w-1/3 bg-cyber-accent/70 transition-opacity duration-150 ${
-            syncing ? 'opacity-100 animate-pulse' : 'opacity-0'
-          }`}
-        />
-      </div>
+      <div aria-hidden="true" className="h-0.5" />
       {visible.length === 0 ? (
         <div className="p-8 text-center text-sm text-cyber-text-secondary font-mono">
           {t('pulse.empty')}
