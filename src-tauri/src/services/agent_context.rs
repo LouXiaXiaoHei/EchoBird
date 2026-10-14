@@ -235,7 +235,7 @@ pub fn render_history(messages: &[Message], start_index: usize) -> String {
                             tool_use_id,
                             content,
                         } => text.push_str(&format!("Tool result {tool_use_id}:\n{content}\n")),
-                        ContentBlock::Thinking { .. } => {}
+                        ContentBlock::Thinking { .. } | ContentBlock::RedactedThinking { .. } => {}
                     }
                 }
             }
@@ -465,6 +465,7 @@ mod tests {
                         signature: "signed".into(),
                         origin: None,
                     },
+                    serde_json::from_value(serde_json::json!({"type":"redacted_thinking","data":"opaque-private-reasoning"})).unwrap(),
                     ContentBlock::Text {
                         text: "你好🙂".repeat(2000),
                     },
@@ -479,6 +480,7 @@ mod tests {
             let page = history_page(&snapshot, offset, 6000).unwrap();
             assert!(page.len() <= 8000);
             assert!(!page.contains("private reasoning"));
+            assert!(!page.contains("opaque-private-reasoning"));
             recovered.push_str(page.split_once("--- content ---\n").unwrap().1);
             let next = page
                 .lines()

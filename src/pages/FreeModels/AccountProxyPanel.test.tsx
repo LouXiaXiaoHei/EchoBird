@@ -164,6 +164,32 @@ it('keeps TRAE regional counts and add sources separate while passive pool navig
   expect(invoke).not.toHaveBeenCalled();
 });
 
+it('counts the shared Kiro account pool once and opens its existing account form', async () => {
+  vi.mocked(api.listProxyAccounts).mockImplementation(async (provider) =>
+    accounts(provider, provider === 'kiro' ? 2 : 0)
+  );
+  await open();
+  expect(count('kiro')).toBe('2 个账号');
+  expect(vi.mocked(api.listProxyAccounts).mock.calls.filter(([id]) => id === 'kiro')).toHaveLength(
+    1
+  );
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(context.setNewModelForm).not.toHaveBeenCalled();
+  act(() => row('kiro').props.onClick());
+  expect(context.setNewModelForm).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ accountSource: { provider: 'kiro', accountId: '' }, apiKey: '' })
+  );
+  expect(context.setModelModalDestination).toHaveBeenCalledWith('freeRouter');
+  await navigate('accounts');
+  vi.mocked(api.listProxyAccounts).mockResolvedValue([]);
+  await navigate('freeModels');
+  expect(count('kiro')).toBe('0 个账号');
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+});
+
 it('reloads counts when returning from account management, preserves known counts on failure and updates after deletion', async () => {
   await open();
   await navigate('accounts');

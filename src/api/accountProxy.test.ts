@@ -23,8 +23,8 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it.each(['trae', 'traecn'] as const)(
-  'reads saved %s accounts and model choices using the exact regional source',
+it.each(['trae', 'traecn', 'kiro'] as const)(
+  'reads saved %s accounts and model choices using the exact saved source',
   async (provider) => {
     const source: AccountSource = { provider, accountId: 'shared-id' };
     const account = { source, label: 'Saved identity', plan: 'Pro' };

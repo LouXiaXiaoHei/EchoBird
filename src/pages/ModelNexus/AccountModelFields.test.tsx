@@ -131,29 +131,46 @@ it('defaults to the first saved account and automatically reads and caches its m
   });
 });
 
-it.each(['trae', 'traecn'] as const)(
+it.each(['trae', 'traecn', 'kiro'] as const)(
   'defaults to the first saved %s identity and plan, then caches its model directory',
   async (provider) => {
     const source = { provider, accountId: 'first' };
-    const savedLabel = provider === 'trae' ? 'Global identity' : 'CN identity';
+    const savedLabel =
+      provider === 'kiro'
+        ? 'Kiro identity'
+        : provider === 'trae'
+          ? 'Global identity'
+          : 'CN identity';
+    const plan = provider === 'kiro' ? 'Pro+' : 'pro';
     vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
-      { source, label: savedLabel, plan: 'pro' },
+      { source, label: savedLabel, plan },
       { source: { provider, accountId: 'second' }, label: 'Other identity', plan: 'free' },
     ]);
+    if (provider === 'kiro')
+      vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+        { source, label: savedLabel, plan, modelLabels: { 'kiro-model': 'Claude Sonnet Fixture' } },
+        { source: { provider, accountId: 'second' }, label: 'Other identity', plan: 'free' },
+      ]);
     vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce([`${provider}-model`]);
     await open('', '', provider);
-    expect(api.listProxyAccounts).toHaveBeenCalledExactlyOnceWith(provider);
+    expect(api.listProxyAccounts).toHaveBeenCalledTimes(provider === 'kiro' ? 2 : 1);
+    expect(api.listProxyAccounts).toHaveBeenCalledWith(provider);
     expect(current.accountSource).toEqual(source);
     expect(current.name).toBe(savedLabel);
     expect(current.apiKey).toBe('');
     expect(field('accountProxy.account').props).toMatchObject({
       value: 'first',
-      optionLabels: { first: `${savedLabel} · Pro`, second: 'Other identity · Free' },
+      optionLabels: {
+        first: `${savedLabel} · ${provider === 'kiro' ? 'Pro+' : 'Pro'}`,
+        second: 'Other identity · Free',
+      },
     });
     expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
     expect(current.modelIdOptions).toEqual([`${provider}-model`]);
     expect(current.modelId).toBe(`${provider}-model`);
     expect(api.getCachedAccountProxyModels(source)).toEqual([`${provider}-model`]);
+    if (provider === 'kiro')
+      expect(renderer.root.findByType('input').props.value).toBe('Claude Sonnet Fixture');
   }
 );
 
@@ -505,28 +522,35 @@ it('renders an old Qoder native selection through cached labels without fetching
   expect(showToast).not.toHaveBeenCalled();
 });
 
-it('refreshes Qoder labels from local metadata without rewriting an equivalent native selection', async () => {
-  const source = { provider: 'qoder' as const, accountId: 'saved' };
-  api.cacheAccountProxyModels(source, ['cmodel', 'other']);
-  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
-    { source, label: 'Qoder identity', modelLabels: { cmodel: 'Cantus' } },
-  ]);
-  await open('saved', 'cmodel', 'qoder');
-  vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['Updated Cantus', 'Qwen3.8-Max']);
-  vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
-    { source, label: 'Qoder identity', modelLabels: { cmodel: 'Updated Cantus' } },
-  ]);
-  setItem.mockClear();
-  await act(async () => field('model.modelId').props.onRefresh());
-  expect(current.modelId).toBe('cmodel');
-  expect(current.modelIdOptions).toEqual(['cmodel', 'Qwen3.8-Max']);
-  expect(renderer.root.findByType('input').props.value).toBe('Updated Cantus');
-  expect(api.getCachedAccountProxyModels(source)).toEqual(['Updated Cantus', 'Qwen3.8-Max']);
-  expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
-  expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
-  expect(setItem).toHaveBeenCalledOnce();
-  expect(showToast).not.toHaveBeenCalled();
-});
+it.each(['qoder', 'kiro'] as const)(
+  'refreshes %s labels from local metadata without rewriting an equivalent native selection',
+  async (provider) => {
+    const source = { provider, accountId: 'saved' };
+    const nativeId = provider === 'qoder' ? 'cmodel' : 'native-kiro-model';
+    api.cacheAccountProxyModels(source, [nativeId, 'other']);
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+      { source, label: 'Saved identity', modelLabels: { [nativeId]: 'Catalog model' } },
+    ]);
+    await open('saved', nativeId, provider);
+    expect(renderer.root.findByType('input').props.value).toBe('Catalog model');
+    expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+    const models = [provider === 'qoder' ? 'Updated catalog model' : nativeId, 'other-model'];
+    vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(models);
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+      { source, label: 'Saved identity', modelLabels: { [nativeId]: 'Updated catalog model' } },
+    ]);
+    setItem.mockClear();
+    await act(async () => field('model.modelId').props.onRefresh());
+    expect(current.modelId).toBe(nativeId);
+    expect(current.modelIdOptions).toEqual([nativeId, 'other-model']);
+    expect(renderer.root.findByType('input').props.value).toBe('Updated catalog model');
+    expect(api.getCachedAccountProxyModels(source)).toEqual(models);
+    expect(api.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+    expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+    expect(setItem).toHaveBeenCalledOnce();
+    expect(showToast).not.toHaveBeenCalled();
+  }
+);
 
 it('ignores late Qoder label rereads after switching editions and preserves snapshots on local read failure', async () => {
   const global = { provider: 'qoder' as const, accountId: 'shared' };

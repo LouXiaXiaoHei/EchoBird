@@ -3,6 +3,7 @@
 mod bridge;
 mod cline;
 mod grok;
+mod kiro;
 mod minimax;
 mod protocol;
 mod providers;
@@ -30,6 +31,12 @@ pub(crate) fn cached_qoder_model_labels(
     account_id: &str,
 ) -> std::collections::BTreeMap<String, String> {
     qoder::cached_model_labels(provider, account_id)
+}
+
+pub(crate) fn cached_kiro_model_labels(
+    account_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    kiro::cached_model_labels(account_id)
 }
 
 /// Internal Responses state belongs only on a Responses-capable account hop.
@@ -129,6 +136,8 @@ pub async fn route(
 ) -> Result<Response, ProxyError> {
     if provider == AccountProvider::Grok {
         grok::route(credentials, model, body, client).await
+    } else if provider == AccountProvider::Kiro {
+        kiro::route(credentials, model, body, client).await
     } else if provider == AccountProvider::Minimax {
         minimax::route(credentials, model, body, client).await
     } else if matches!(provider, AccountProvider::Qoder | AccountProvider::QoderCn) {
@@ -164,6 +173,8 @@ pub async fn list_models(
 ) -> Result<Vec<String>, ProxyError> {
     if provider == AccountProvider::Grok {
         grok::list_models(credentials, client).await
+    } else if provider == AccountProvider::Kiro {
+        kiro::list_models(credentials, client).await
     } else if provider == AccountProvider::Cline {
         cline::list_models(credentials, client).await
     } else if provider == AccountProvider::Minimax {

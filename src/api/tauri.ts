@@ -356,6 +356,50 @@ export function deleteZCodeAccount(accountId: string): Promise<void> {
   return invoke('delete_zcode_account', { accountId });
 }
 
+export type KiroEdition = 'kirocrew' | 'kirocli';
+export interface KiroAccount {
+  id: string;
+  edition: KiroEdition;
+  name: string;
+  plan?: string | null;
+  active: boolean;
+  quota: {
+    label: string;
+    remaining?: number | null;
+    total?: number | null;
+    resetAt?: number | null;
+  }[];
+}
+export interface KiroLogin {
+  loginId: string;
+  verificationUri: string;
+  expiresAt: number;
+}
+export async function listKiroAccounts(edition: KiroEdition): Promise<KiroAccount[]> {
+  return invoke('list_kiro_accounts', { edition });
+}
+export async function startKiroLogin(edition: KiroEdition): Promise<KiroLogin> {
+  return invoke('start_kiro_login', { edition });
+}
+export async function pollKiroLogin(loginId: string): Promise<KiroAccount | null> {
+  return invoke('poll_kiro_login', { loginId });
+}
+export async function cancelKiroLogin(loginId: string): Promise<void> {
+  return invoke('cancel_kiro_login', { loginId });
+}
+export async function switchKiroAccount(edition: KiroEdition, accountId: string): Promise<void> {
+  return invoke('switch_kiro_account', { edition, accountId });
+}
+export async function refreshKiroAccountQuota(
+  edition: KiroEdition,
+  accountId: string
+): Promise<KiroAccount> {
+  return invoke('refresh_kiro_account_quota', { edition, accountId });
+}
+export async function deleteKiroAccount(edition: KiroEdition, accountId: string): Promise<void> {
+  return invoke('delete_kiro_account', { edition, accountId });
+}
+
 export type TraeEdition = 'trae' | 'traecn';
 export interface TraeAccount {
   id: string;

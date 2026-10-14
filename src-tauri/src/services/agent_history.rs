@@ -289,6 +289,7 @@ fn validate_snapshot(snapshot: &HistorySnapshot) -> Result<(), String> {
                             signature,
                             ..
                         } => thinking.len().saturating_add(signature.len()),
+                        ContentBlock::RedactedThinking { data, .. } => data.len(),
                         ContentBlock::ToolUse { id, name, .. } => {
                             id.len().saturating_add(name.len())
                         }
@@ -481,7 +482,16 @@ mod tests {
     #[test]
     fn summary_roundtrip_preserves_full_original_messages() {
         let dir = TestDir::new();
-        let original = snapshot("用户的完整原始消息");
+        let mut original = snapshot("用户的完整原始消息");
+        if let MessageContent::Blocks(blocks) = &mut original.messages[1].content {
+            blocks.insert(
+                0,
+                serde_json::from_value(
+                    json!({"type":"redacted_thinking","data":"opaque-native-block"}),
+                )
+                .unwrap(),
+            );
+        }
         dir.store().save("conversation-a", &original).unwrap();
         assert_eq!(
             encoded(&dir.store().load("conversation-a").unwrap()),
@@ -507,6 +517,17 @@ mod tests {
             summary: None,
         };
         assert!(store.save("a", &large).is_err());
+        let opaque = HistorySnapshot {
+            messages: vec![Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![serde_json::from_value(
+                    json!({"type":"redacted_thinking","data":"x".repeat(MAX_STORE_BYTES + 1)}),
+                )
+                .unwrap()]),
+            }],
+            summary: None,
+        };
+        assert!(store.save("a", &opaque).is_err());
         assert!(!dir.0.exists());
     }
 

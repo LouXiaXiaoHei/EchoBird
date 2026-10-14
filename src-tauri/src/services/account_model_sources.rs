@@ -112,6 +112,16 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
                 option(provider, a.id, label, a.plan)
             })
             .collect(),
+        Kiro => super::kiro_accounts::list_saved_accounts()
+            .await?
+            .into_iter()
+            .map(|a| {
+                let labels = super::account_proxy::cached_kiro_model_labels(&a.id);
+                let mut saved = option(provider, a.id, a.name, a.plan);
+                saved.model_labels = labels;
+                saved
+            })
+            .collect(),
     })
 }
 
@@ -199,6 +209,7 @@ pub(crate) async fn credentials(
         }
         Grok => super::grok_accounts::proxy::credentials(&source.account_id, force_refresh).await,
         Cline => super::cline_accounts::proxy_credentials(&source.account_id, force_refresh).await,
+        Kiro => super::kiro_accounts::proxy_credentials(&source.account_id, force_refresh).await,
     }
 }
 
@@ -244,6 +255,13 @@ pub(crate) async fn credentials_after_rejection(
         }
         Cline => {
             super::cline_accounts::proxy_credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
+        Kiro => {
+            super::kiro_accounts::proxy_credentials_after_rejection(
                 &source.account_id,
                 rejected_credentials,
             )
@@ -346,6 +364,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
                     | AccountProvider::QoderCn
                     | AccountProvider::Grok
                     | AccountProvider::Cline
+                    | AccountProvider::Kiro
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
             let refreshed = credentials_after_rejection(source, &secret).await?;
@@ -364,6 +383,19 @@ mod tests {
 
     #[test]
     fn account_sources_keep_new_provider_regions_and_wire_names_distinct() {
+        assert_eq!(serde_json::to_value(AccountProvider::Kiro).unwrap(), "kiro");
+        let kiro = option(
+            AccountProvider::Kiro,
+            "saved-kiro-account".into(),
+            "Kiro account".into(),
+            Some("Pro+".into()),
+        );
+        let source = serde_json::to_value(&kiro).unwrap();
+        assert_eq!(source["source"]["provider"], "kiro");
+        assert_eq!(source["source"]["accountId"], "saved-kiro-account");
+        assert_eq!(source["plan"], "Pro+");
+        assert!(source.get("accessToken").is_none());
+        assert!(source.get("credentialGeneration").is_none());
         assert_eq!(
             qoder_edition(AccountProvider::Qoder),
             qoder_accounts::Edition::Qoder

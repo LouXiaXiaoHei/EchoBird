@@ -50,6 +50,7 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             }
             AccountProvider::Grok
             | AccountProvider::Cline
+            | AccountProvider::Kiro
             | AccountProvider::Minimax
             | AccountProvider::Qoder
             | AccountProvider::QoderCn => {
@@ -148,6 +149,7 @@ fn signed(
             unreachable!("Trae uses its own gateway")
         }
         AccountProvider::Grok
+        | AccountProvider::Kiro
         | AccountProvider::Minimax
         | AccountProvider::Qoder
         | AccountProvider::QoderCn => {
@@ -459,6 +461,7 @@ pub(super) async fn list_models(
         }
         AccountProvider::Grok
         | AccountProvider::Cline
+        | AccountProvider::Kiro
         | AccountProvider::Minimax
         | AccountProvider::Qoder
         | AccountProvider::QoderCn => {

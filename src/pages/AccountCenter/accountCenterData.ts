@@ -194,6 +194,7 @@ export function accountCenterProviders(
         metrics:
           id !== 'trae' &&
           id !== 'traecn' &&
+          id !== 'kiro' &&
           free &&
           summary.metrics.every(
             (metric) => metric.value === '—' && metric.percent == null && metric.resetAt == null
@@ -321,6 +322,33 @@ export function accountCenterProviders(
             : {}),
         })
       )
+    ),
+    provider(
+      'kiro',
+      'Kiro',
+      '/icons/tools/kirocrew.svg',
+      ['kirocrew', 'kirocli'],
+      context.kiroAccounts,
+      (account) => ({
+        identity: account.name,
+        plan: account.plan,
+        metrics: account.quota.length
+          ? account.quota.map((quota) =>
+              credits(
+                t(
+                  quota.label === 'credits'
+                    ? 'agent.baseCredits'
+                    : quota.label === 'trial' || quota.label === 'bonus'
+                      ? 'agent.rewardCredits'
+                      : 'agent.credits'
+                ),
+                quota.remaining,
+                quota.total,
+                quota.resetAt
+              )
+            )
+          : [credits(t('agent.credits'), undefined, undefined)],
+      })
     ),
     ...(['trae', 'traecn'] as const).map((edition) =>
       provider(

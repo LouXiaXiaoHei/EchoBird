@@ -91,6 +91,14 @@ vi.mock('../../api/tauri', () => {
     'completeClaudeCodeLogin',
     'refreshClaudeCodeAccountQuota',
     'listWorkBuddyAccounts',
+    'listKiroAccounts',
+    'startKiroLogin',
+    'pollKiroLogin',
+    'cancelKiroLogin',
+    'switchKiroAccount',
+    'refreshKiroAccountQuota',
+    'deleteKiroAccount',
+    'applyModelToTool',
     'listTraeAccounts',
     'startTraeLogin',
     'pollTraeLogin',
@@ -211,6 +219,7 @@ const listNames = [
   'listClaudeCodeAccounts',
   'listClaudeDesktopAccounts',
   'listWorkBuddyAccounts',
+  'listKiroAccounts',
   'listTraeAccounts',
   'listDeepSeekAccounts',
   'listGrokAccounts',
@@ -230,6 +239,8 @@ const listFor = {
   workbuddyai: 'listWorkBuddyAccounts',
   trae: 'listTraeAccounts',
   traecn: 'listTraeAccounts',
+  kirocrew: 'listKiroAccounts',
+  kirocli: 'listKiroAccounts',
   dsh: 'listDeepSeekAccounts',
   grok: 'listGrokAccounts',
   manus: 'listManusAccounts',
@@ -250,10 +261,19 @@ async function mount(tool: Tool | api.KiloTool | api.CopilotTool, installed = tr
     {
       id: tool,
       name: tool,
-      category: ['grok', 'antigravity', 'kilo', 'copilot'].includes(tool) ? 'CLI Code' : 'Desktop',
-      noModelConfig: ['antigravity', 'antigravitydesktop', 'cursor', 'trae', 'traecn'].includes(
-        tool
-      ),
+      category: ['grok', 'antigravity', 'kilo', 'copilot', 'kirocli'].includes(tool)
+        ? 'CLI Code'
+        : 'Desktop',
+      noModelConfig: [
+        'antigravity',
+        'antigravitydesktop',
+        'cursor',
+        'cursor',
+        'trae',
+        'traecn',
+        'kirocrew',
+        'kirocli',
+      ].includes(tool),
       installed,
     },
   ]);
@@ -1039,6 +1059,8 @@ const refreshFor = {
   workbuddyai: 'refreshWorkBuddyAccountQuota',
   trae: 'refreshTraeAccountQuota',
   traecn: 'refreshTraeAccountQuota',
+  kirocrew: 'refreshKiroAccountQuota',
+  kirocli: 'refreshKiroAccountQuota',
   antigravity: 'refreshAntigravityAccount',
   antigravitydesktop: 'refreshAntigravityAccount',
   cursor: 'refreshCursorAccount',
@@ -1060,7 +1082,7 @@ it.each(Object.keys(listFor) as Tool[])(
       email: 'saved@example.test',
       active: true,
       edition:
-        tool === 'trae' || tool === 'traecn'
+        tool === 'trae' || tool === 'traecn' || tool === 'kirocrew' || tool === 'kirocli'
           ? tool
           : tool === 'workbuddyai'
             ? 'workbuddyai'
@@ -1076,6 +1098,7 @@ it.each(Object.keys(listFor) as Tool[])(
       sevenDay: { remainingPercent: 64, resetAt },
       balances: [{ currency: 'CNY', amount: 12.34 }],
       quotas: [{ name: 'gemini-pro', remainingPercent: 64, resetAt }],
+      quota: [{ label: 'credits', remaining: 64, total: 100, resetAt }],
       usage: { remainingPercent: 64, resetAt, plan: 'Plus' },
       credits: { total: 500 },
     };
@@ -3185,3 +3208,90 @@ it.each(['failure', 'success'] as const)(
     expect(api.switchTraeAccount).not.toHaveBeenCalled();
   }
 );
+
+it.each(['kirocrew', 'kirocli'] as const)(
+  '%s: passive navigation loads accounts without quota, login, account writes or dialogs',
+  async (edition) => {
+    const row: api.KiroAccount = {
+      id: 'kiro-user',
+      edition,
+      name: 'Kiro user',
+      plan: 'Free',
+      active: true,
+      quota: [],
+    };
+    vi.mocked(api.listKiroAccounts).mockResolvedValue([row]);
+    await mount(edition);
+    expect(state.kiroAccounts.accounts).toEqual([row]);
+    expect(state.kiroAccounts.selectedId).toBe(row.id);
+    for (const page of ['accounts', 'models', 'apps'] as const) {
+      act(() => useNavigationStore.getState().setActivePage(page));
+      await tick();
+    }
+    for (const method of [
+      api.startKiroLogin,
+      api.refreshKiroAccountQuota,
+      api.switchKiroAccount,
+      api.deleteKiroAccount,
+      api.startTool,
+    ])
+      expect(method).not.toHaveBeenCalled();
+    expect(folderPicker).not.toHaveBeenCalled();
+    expect(state.applyError).toBeNull();
+  }
+);
+
+it.each(['kirocrew', 'kirocli'] as const)(
+  '%s: applying an account reuses the existing launch and directory flow',
+  async (edition) => {
+    const row: api.KiroAccount = {
+      id: 'kiro-user',
+      edition,
+      name: 'Kiro user',
+      active: true,
+      quota: [],
+    };
+    vi.mocked(api.listKiroAccounts).mockResolvedValue([row]);
+    vi.mocked(api.switchKiroAccount).mockResolvedValue(undefined);
+    await mount(edition);
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(api.switchKiroAccount).toHaveBeenCalledExactlyOnceWith(edition, row.id);
+    if (edition === 'kirocli') {
+      expect(folderPicker).toHaveBeenCalledExactlyOnceWith({ directory: true, multiple: false });
+      expect(api.startTool).toHaveBeenCalledExactlyOnceWith(
+        edition,
+        undefined,
+        'E:/fixture-project'
+      );
+    } else {
+      expect(folderPicker).not.toHaveBeenCalled();
+      expect(api.startTool).toHaveBeenCalledExactlyOnceWith(edition, undefined, undefined);
+    }
+    expect(state.isLaunching).toBe(false);
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.refreshKiroAccountQuota).not.toHaveBeenCalled();
+  }
+);
+
+it('Kiro: an explicit switch failure preserves rows and prevents launch', async () => {
+  const row: api.KiroAccount = {
+    id: 'kiro-user',
+    edition: 'kirocrew',
+    name: 'Kiro user',
+    active: true,
+    quota: [],
+  };
+  vi.mocked(api.listKiroAccounts).mockResolvedValue([row]);
+  vi.mocked(api.switchKiroAccount).mockRejectedValueOnce(new Error('accountError.closeClient'));
+  await mount('kirocrew');
+  await act(async () => {
+    await state.handleLaunch();
+  });
+  expect(state.applyError).toBe('accountError.closeClient');
+  expect(state.kiroAccounts.accounts).toEqual([row]);
+  expect(api.startTool).not.toHaveBeenCalled();
+  expect(folderPicker).not.toHaveBeenCalled();
+});

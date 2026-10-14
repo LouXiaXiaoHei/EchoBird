@@ -167,6 +167,8 @@ pub const INSTALLABLE_TOOL_IDS: &[&str] = &[
     "clashverge",
     "trae",
     "traecn",
+    "kirocrew",
+    "kirocli",
     "grok",
     "grokbot",
     "manus",

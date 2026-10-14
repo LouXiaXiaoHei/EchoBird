@@ -11,6 +11,7 @@ import { QuotaCountdown } from './QuotaCountdown';
 import { codexPlanLabel } from './codexPlanLabel';
 import { WorkBuddyAccountSection } from './WorkBuddyAccountSection';
 import { TraeAccountSection } from './TraeAccountSection';
+import { KiroAccountSection } from './KiroAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
@@ -1087,6 +1088,8 @@ export const AppManagerPanel: React.FC = () => {
             <AntigravityAccountSection />
           ) : selectedTool === 'grokbot' || selectedTool === 'cursor' ? (
             <CursorAccountSection tool={selectedTool} />
+          ) : selectedTool === 'kirocrew' || selectedTool === 'kirocli' ? (
+            <KiroAccountSection />
           ) : selectedTool === 'trae' || selectedTool === 'traecn' ? (
             <TraeAccountSection />
           ) : ['qoder', 'qodercn'].includes(selectedTool ?? '') ? (
@@ -1192,6 +1195,7 @@ export const AppManagerBottom: React.FC = () => {
     claudeDesktopAccounts,
     workBuddyAccounts,
     traeAccounts,
+    kiroAccounts,
     zcodeAccounts,
     minimaxAccounts,
     qoderAccounts,
@@ -1245,7 +1249,8 @@ export const AppManagerBottom: React.FC = () => {
       !!antigravityAccounts.selectedId) ||
     ((selectedTool === 'workbuddy' || selectedTool === 'workbuddyai') &&
       !!workBuddyAccounts.selectedId) ||
-    ((selectedTool === 'trae' || selectedTool === 'traecn') && !!traeAccounts.selectedId);
+    ((selectedTool === 'trae' || selectedTool === 'traecn') && !!traeAccounts.selectedId) ||
+    ((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && !!kiroAccounts.selectedId);
   // What will a click actually do?
   //  - "Apply" runs only when the user picked a model AND agreed to the config-write policy.
   //  - "Launch" runs whenever launchAfterApply is on, or unconditionally for desktop/no-config apps.
@@ -1270,6 +1275,7 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'grokbot' && grokBotAccounts.busy) ||
     (selectedTool === 'cursor' && cursorAccounts.busy) ||
     ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) ||
+    ((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.busy) ||
     (!isUninstalled && !willApply && !willLaunch);
 
   // Uninstalled → install flow; otherwise the existing launch/apply flow.

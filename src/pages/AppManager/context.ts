@@ -4,6 +4,7 @@ import type { useDeepSeekAccounts } from './useDeepSeekAccounts';
 import type { useGrokAccounts } from './useGrokAccounts';
 import type { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
 import type { useTraeAccounts } from './useTraeAccounts';
+import type { useKiroAccounts } from './useKiroAccounts';
 import type { useZCodeAccounts } from './useZCodeAccounts';
 import type { useMinimaxAccounts } from './useMinimaxAccounts';
 import type { useClineAccounts } from './useClineAccounts';
@@ -37,6 +38,7 @@ export interface AppManagerContextType {
   claudeCodeAccounts: ReturnType<typeof useClaudeCodeAccounts>;
   claudeDesktopAccounts: ReturnType<typeof useClaudeDesktopAccounts>;
   workBuddyAccounts: ReturnType<typeof useWorkBuddyAccounts>;
+  kiroAccounts: ReturnType<typeof useKiroAccounts>;
   traeAccounts: ReturnType<typeof useTraeAccounts>;
   traeAccountGroups: Record<'trae' | 'traecn', ReturnType<typeof useTraeAccounts>>;
   workBuddyAccountGroups: Record<

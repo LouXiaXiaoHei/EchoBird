@@ -43,6 +43,7 @@ pub enum AccountProvider {
     QoderCn,
     Grok,
     Cline,
+    Kiro,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

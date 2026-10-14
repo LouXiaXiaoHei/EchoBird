@@ -1866,7 +1866,7 @@ pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     }
     #[cfg(windows)]
     {
-        let script = "$ErrorActionPreference='Stop'; try { $root=$env:ECHOBIRD_DESKTOP_ROOT; $family=$env:ECHOBIRD_DESKTOP_FAMILY; $hits=Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $_.Name -eq $env:ECHOBIRD_DESKTOP_NAME -and $_.ExecutablePath -and (($root -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or ($family -and $_.ExecutablePath -match ('\\\\WindowsApps\\\\'+[regex]::Escape($family)+'_[^\\\\]+\\\\'))) }; if($hits){exit 0}else{exit 1} } catch { exit 2 }";
+        let script = "$ErrorActionPreference='Stop'; try { $root=$env:ECHOBIRD_DESKTOP_ROOT; $family=$env:ECHOBIRD_DESKTOP_FAMILY; $hits=Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { ($_.Name -eq $env:ECHOBIRD_DESKTOP_NAME -or ($env:ECHOBIRD_KIRO_CLI_RUNTIME -eq '1' -and $_.Name -match '^chat-cli-[0-9.]+\\.exe$')) -and $_.ExecutablePath -and (($root -and $_.ExecutablePath.StartsWith($root,[StringComparison]::OrdinalIgnoreCase)) -or ($family -and $_.ExecutablePath -match ('\\\\WindowsApps\\\\'+[regex]::Escape($family)+'_[^\\\\]+\\\\'))) }; if($hits){exit 0}else{exit 1} } catch { exit 2 }";
         let root = std::path::Path::new(&path)
             .parent()
             .map(|p| format!("{}\\", p.display()))
@@ -1891,6 +1891,10 @@ pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
             )
             .env("ECHOBIRD_DESKTOP_ROOT", root)
             .env("ECHOBIRD_DESKTOP_FAMILY", family)
+            .env(
+                "ECHOBIRD_KIRO_CLI_RUNTIME",
+                if tool_id == "kirocli" { "1" } else { "0" },
+            )
             .status()
             .await
             .map_err(|_| "accountError.closeClient")?;
@@ -1937,7 +1941,19 @@ pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
                 .file_name()
                 .to_str()
                 .is_some_and(|s| s.bytes().all(|c| c.is_ascii_digit()))
-                && std::fs::read_link(entry.path().join("exe")).is_ok_and(|p| p == executable)
+                && std::fs::read_link(entry.path().join("exe")).is_ok_and(|p| {
+                    p == executable
+                        || (tool_id == "kirocli" && p == executable.with_file_name("kiro-cli-chat"))
+                        || (tool_id == "kirocrew"
+                            && super::tool_manager::get_tool_process_names(tool_id)
+                                .iter()
+                                .any(|name| {
+                                    p.file_name().is_some_and(|value| value == name.as_str())
+                                })
+                            && std::fs::read(entry.path().join("environ")).is_ok_and(
+                                |environment| appimage_matches(&environment, &executable),
+                            ))
+                })
             {
                 return Ok(true);
             }
@@ -1949,6 +1965,18 @@ pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
         let _ = path;
         Err("accountError.unavailable".into())
     }
+}
+
+#[cfg(target_os = "linux")]
+fn appimage_matches(environment: &[u8], executable: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    environment
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| entry.strip_prefix(b"APPIMAGE="))
+        .any(|path| {
+            std::fs::canonicalize(std::ffi::OsStr::from_bytes(path))
+                .is_ok_and(|path| path == executable)
+        })
 }
 
 /// Release native desktop storage before an explicit model change. Uses the same

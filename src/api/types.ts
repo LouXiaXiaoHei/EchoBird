@@ -39,6 +39,7 @@ export type AccountProvider =
   | 'workBuddy'
   | 'workBuddyAi'
   | 'antigravity'
+  | 'kiro'
   | 'copilot'
   | 'kilo'
   | 'trae'

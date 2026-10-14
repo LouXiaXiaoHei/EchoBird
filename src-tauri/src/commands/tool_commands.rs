@@ -1001,3 +1001,37 @@ pub async fn refresh_cue_account(
 pub async fn delete_cue_account(account_id: String) -> Result<(), String> {
     crate::services::cue_accounts::delete(&account_id).await
 }
+
+use crate::services::kiro_accounts::{self, Account as KiroAccount, Edition as KiroEdition};
+
+#[tauri::command]
+pub async fn list_kiro_accounts(edition: KiroEdition) -> Result<Vec<KiroAccount>, String> {
+    kiro_accounts::list_accounts(edition).await
+}
+#[tauri::command]
+pub async fn start_kiro_login(edition: KiroEdition) -> Result<kiro_accounts::LoginStart, String> {
+    kiro_accounts::start_login(edition).await
+}
+#[tauri::command]
+pub async fn poll_kiro_login(login_id: String) -> Result<Option<KiroAccount>, String> {
+    kiro_accounts::poll_login(&login_id).await
+}
+#[tauri::command]
+pub async fn cancel_kiro_login(login_id: String) -> Result<(), String> {
+    kiro_accounts::cancel_login(&login_id)
+}
+#[tauri::command]
+pub async fn switch_kiro_account(edition: KiroEdition, account_id: String) -> Result<(), String> {
+    kiro_accounts::activate_account(edition, &account_id).await
+}
+#[tauri::command]
+pub async fn refresh_kiro_account_quota(
+    edition: KiroEdition,
+    account_id: String,
+) -> Result<KiroAccount, String> {
+    kiro_accounts::refresh_quota(edition, &account_id).await
+}
+#[tauri::command]
+pub async fn delete_kiro_account(edition: KiroEdition, account_id: String) -> Result<(), String> {
+    kiro_accounts::delete_account(edition, &account_id).await
+}

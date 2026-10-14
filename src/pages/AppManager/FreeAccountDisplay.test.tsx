@@ -116,6 +116,7 @@ beforeEach(() => {
     workBuddyAccounts: group,
     workBuddyAccountGroups: { workbuddy: group, workbuddyai: group },
     traeAccountGroups: { trae: { ...group, accounts: [] }, traecn: { ...group, accounts: [] } },
+    kiroAccounts: { ...group, accounts: [] },
     zcodeAccounts: { ...group, provider: 'bigmodel', setProvider: vi.fn() },
     minimaxAccounts: { ...group, region: 'cn', setRegion: vi.fn() },
     qoderAccounts: group,

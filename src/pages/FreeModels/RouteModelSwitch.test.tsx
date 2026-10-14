@@ -341,6 +341,44 @@ describe('Direct route card model selection', () => {
     expectNoPassiveChanges();
   });
 
+  it.each([undefined, 'Pro+'])(
+    'keeps the shared Kiro source, provider icon and optional plan when changing models (%s)',
+    async (plan) => {
+      const source = { provider: 'kiro' as const, accountId: 'shared-kiro' };
+      savedModels = [{ ...account, modelId: 'claude-sonnet-fixture', accountSource: source }];
+      savedOrder = [account.internalId];
+      vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+        { source, label: 'kiro@example.test', plan },
+      ]);
+      vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue([
+        'claude-sonnet-fixture',
+        'claude-opus-fixture',
+      ]);
+      await open();
+      const content = textOf(card('claude-sonnet-fixture'));
+      expect(content).toContain('kiro@example.test');
+      expect(content).not.toContain('—');
+      expect(content.includes('Pro+')).toBe(Boolean(plan));
+      expect(card('claude-sonnet-fixture').findByType('img').props.src).toBe(
+        '/icons/tools/kirocrew.svg'
+      );
+      expect(accountApi.listProxyAccounts).toHaveBeenCalledExactlyOnceWith('kiro');
+      expectNoPassiveChanges();
+      await select('claude-sonnet-fixture', 'claude-opus-fixture');
+      expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(account.internalId, {
+        modelId: 'claude-opus-fixture',
+      });
+      expect(savedModels[0].accountSource).toEqual(source);
+      expect(savedModels[0].apiKey).toBe('');
+      expect(card('claude-opus-fixture').findByType('img').props.src).toBe(
+        '/icons/tools/kirocrew.svg'
+      );
+      expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+      expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+      expect(nexus.setShowAddModelModal).not.toHaveBeenCalled();
+    }
+  );
+
   it('renders readable Qoder labels while keeping native selections and region caches unchanged', async () => {
     savedModels = [
       { ...account, modelId: 'cmodel', accountSource: { provider: 'qoder', accountId: 'shared' } },

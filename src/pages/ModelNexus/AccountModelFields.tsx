@@ -35,7 +35,8 @@ export function AccountModelFields({
   const accountsRef = useRef<ProxyAccount[]>([]);
   const [loadedProvider, setLoadedProvider] = useState<AccountProvider | null>(null);
   const loading = loadedProvider !== provider;
-  const waitingForLabels = (provider === 'qoder' || provider === 'qoderCn') && loading;
+  const waitingForLabels =
+    (provider === 'qoder' || provider === 'qoderCn' || provider === 'kiro') && loading;
   const [fetching, setFetching] = useState(false);
   const fetchingRef = useRef(false);
   const revision = useRef(0);
@@ -109,7 +110,7 @@ export function AccountModelFields({
     try {
       const models = await getAccountProxyModels({ provider, accountId });
       if (attempt !== revision.current) return;
-      if (provider === 'qoder' || provider === 'qoderCn') {
+      if (provider === 'qoder' || provider === 'qoderCn' || provider === 'kiro') {
         try {
           const rows = await listProxyAccounts(provider);
           if (attempt !== revision.current) return;
