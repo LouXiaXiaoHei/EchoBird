@@ -1,6 +1,7 @@
 pub mod mod_stub;
 pub mod model_commands;
 pub mod process_commands;
+pub mod pulse_commands;
 pub mod settings_commands;
 pub mod smart_router_commands;
 pub mod tool_commands;

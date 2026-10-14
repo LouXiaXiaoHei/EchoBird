@@ -5,6 +5,7 @@ import {
   Server,
   FolderHeart,
   Trophy,
+  Newspaper,
   Monitor,
   Waypoints,
   Sparkles,
@@ -26,6 +27,7 @@ export type PageType =
   | 'accounts'
   | 'freeModels'
   | 'apps'
+  | 'aiNews'
   | 'aiCareer'
   | 'myProjects'
   | 'localLlm'
@@ -82,7 +84,7 @@ export const Sidebar = ({
 
   return (
     <nav ref={sidebarRef} className="relative w-64 flex flex-col px-6 pb-6">
-      <div className="mb-7 flex items-center gap-2 overflow-hidden">
+      <div className="mb-7 flex-shrink-0 flex items-center gap-2 overflow-hidden">
         <BirdEasterEgg sidebarRef={sidebarRef} perchRef={perchRef} />
         <span className="brand-mark flex-shrink-0 text-cyber-text">{t('app.name')}</span>
         {updateAvailable && (
@@ -94,7 +96,7 @@ export const Sidebar = ({
           </button>
         )}
       </div>
-      <div className="flex-1 space-y-5 text-[15px]">
+      <div className="flex-1 min-h-0 overflow-y-auto page-scroll space-y-5 text-[15px]">
         <NavItem
           icon={<Monitor size={20} />}
           label={t('nav.appManager')}
@@ -130,8 +132,14 @@ export const Sidebar = ({
             )
           }
         />
-        {/* Divider — primary actions above; career and project tools below */}
+        {/* Divider — primary actions above; news, career and project tools below */}
         <div ref={perchRef} className="border-t border-cyber-border/50" />
+        <NavItem
+          icon={<Newspaper size={20} />}
+          label={t('nav.aiNews')}
+          active={activePage === 'aiNews'}
+          onClick={() => onPageChange('aiNews')}
+        />
         <NavItem
           icon={<Trophy size={20} />}
           label={t('nav.aiCareer')}
@@ -154,7 +162,7 @@ export const Sidebar = ({
         )}
       </div>
 
-      <div className="pt-4 text-[14px] text-cyber-text-secondary">
+      <div className="flex-shrink-0 pt-4 text-[14px] text-cyber-text-secondary">
         {hasSmartRouterModels && (
           <div className="flex h-5 items-center gap-2">
             <span className="whitespace-nowrap leading-5">{t('nav.smartRouter')}</span>

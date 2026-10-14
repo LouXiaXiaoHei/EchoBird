@@ -50,6 +50,7 @@ import { MotherAgentProvider, MotherAgentMain, MotherAgentPanel } from './pages/
 import { FeedbackMain } from './pages/Feedback';
 import { MyProjectsMain, MyProjectsPanel, MyProjectsBottom } from './pages/MyProjects';
 import { AiCareerMain, AiCareerPanel, AiCareerTitleActions } from './pages/AiCareer';
+import { AiPulseProvider, AiPulseTitleActions, AiPulsePanel, AiNewsMain } from './pages/AiPulse';
 import { useMyProjectsStore } from './stores/myProjectsStore';
 import {
   AccountCenterMain,
@@ -93,7 +94,7 @@ const page = (active: boolean) => (active ? 'contents' : 'hidden');
 const pageBlock = (active: boolean) => (active ? 'flex-1 flex flex-col overflow-hidden' : 'hidden');
 const pageScroll = (active: boolean) => (active ? 'flex-1 overflow-y-auto page-scroll' : 'hidden');
 
-function App() {
+function AppContent() {
   const { t, locale, setLocale } = useI18n();
   const [showSettings, setShowSettings] = useState(false);
   const [showChangelog, setShowChangelog] = useState(false);
@@ -280,6 +281,7 @@ function App() {
                                       {is('apps') && t('page.appManager')}
                                       {is('myProjects') && t('page.myProjects')}
                                       {is('aiCareer') && t('page.aiCareer')}
+                                      {is('aiNews') && t('page.aiNews')}
                                       {is('localLlm') && t('page.localServer')}
                                       {is('mother') && t('page.motherAgent')}
                                       {is('feedback') && t('page.feedback')}
@@ -291,6 +293,7 @@ function App() {
                                       {is('apps') && 'DESKTOP'}
                                       {is('myProjects') && 'VIBE CODING'}
                                       {is('aiCareer') && 'CAREER'}
+                                      {is('aiNews') && 'NEWS'}
                                       {is('localLlm') && 'RUNTIME'}
                                       {is('mother') && 'AGENT'}
                                       {is('feedback') && 'SUPPORT'}
@@ -308,6 +311,9 @@ function App() {
                                   </span>
                                   <span className={page(is('aiCareer'))}>
                                     <AiCareerTitleActions />
+                                  </span>
+                                  <span className={page(is('aiNews'))}>
+                                    <AiPulseTitleActions />
                                   </span>
                                   <span className={page(is('apps'))}>
                                     <AppManagerTitleActions />
@@ -345,6 +351,9 @@ function App() {
                                 <div className={pageScroll(is('aiCareer'))}>
                                   <AiCareerMain />
                                 </div>
+                                <div className={pageBlock(is('aiNews'))}>
+                                  <AiNewsMain />
+                                </div>
                                 {/* MotherAgent: always mounted, hidden via CSS to preserve chat state */}
                                 <div
                                   className={`flex-1 flex flex-col overflow-hidden ${is('mother') ? '' : 'hidden'}`}
@@ -376,6 +385,9 @@ function App() {
                               </div>
                               <div className={page(is('aiCareer'))}>
                                 <AiCareerPanel />
+                              </div>
+                              <div className={page(is('aiNews'))}>
+                                <AiPulsePanel />
                               </div>
                               {/* MotherAgent panel: always mounted, hidden via CSS */}
                               <div className={!is('mother') ? 'hidden' : 'contents'}>
@@ -422,6 +434,15 @@ function App() {
         </ConfirmDialogProvider>
       </FreeModelsProvider>
     </ToastProvider>
+  );
+}
+
+function App() {
+  const activePage = useNavigationStore((s) => s.activePage);
+  return (
+    <AiPulseProvider active={activePage === 'aiNews'}>
+      <AppContent />
+    </AiPulseProvider>
   );
 }
 

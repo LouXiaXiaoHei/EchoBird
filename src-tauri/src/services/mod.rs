@@ -41,6 +41,7 @@ pub mod model_manager;
 pub(crate) mod msix;
 pub mod parasite;
 pub mod process_manager;
+pub mod pulse_archive;
 pub mod reasoning_effort;
 pub mod self_update;
 pub mod smart_router;

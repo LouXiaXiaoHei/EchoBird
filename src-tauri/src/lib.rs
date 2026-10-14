@@ -14,6 +14,7 @@ pub mod utils;
 use commands::mod_stub;
 use commands::model_commands;
 use commands::process_commands;
+use commands::pulse_commands;
 use commands::settings_commands;
 use commands::smart_router_commands;
 use commands::tool_commands;
@@ -1196,6 +1197,8 @@ pub fn run() {
             ai_career_commands::ai_career_family_history,
             ai_career_commands::ai_career_heatmap,
             ai_career_commands::ai_career_token_bytes,
+            pulse_commands::pulse_save,
+            pulse_commands::pulse_load_all,
             settings_commands::set_avatar,
             settings_commands::get_avatar,
         ])
