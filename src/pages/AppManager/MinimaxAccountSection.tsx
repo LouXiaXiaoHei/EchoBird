@@ -87,7 +87,7 @@ export function MinimaxAccountSection({ showDivider = true }: { showDivider?: bo
                 <span className="flex h-4 min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] font-semibold">
                   {account.quota?.windows.length ? (
                     account.quota.windows.map((window, index) => (
-                      <span key={index} className="flex flex-shrink-0 items-center gap-1">
+                      <span key={index} className="flex flex-shrink-0 items-baseline gap-1">
                         <span>{window.name}</span>
                         <span>
                           {Math.round(Math.max(0, Math.min(100, 100 - window.usedPercent)))}%
@@ -97,7 +97,7 @@ export function MinimaxAccountSection({ showDivider = true }: { showDivider?: bo
                     ))
                   ) : minimaxCreditBuckets(account.quota).length ? (
                     minimaxCreditBuckets(account.quota).map((bucket) => (
-                      <span key={bucket.label} className="flex flex-shrink-0 items-center gap-1">
+                      <span key={bucket.label} className="flex flex-shrink-0 items-baseline gap-1">
                         <span aria-label={t(bucket.label)}>
                           {bucket.remaining == null
                             ? t('model.noUsageData')

@@ -59,7 +59,7 @@ export function QoderAccountSection() {
             }
             secondary={
               account.remaining == null ? undefined : (
-                <span className="flex h-4 items-center gap-1 text-[12px] font-semibold leading-4">
+                <span className="flex h-4 items-baseline gap-1 text-[12px] font-semibold leading-4">
                   <span>
                     {new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(
                       account.remaining

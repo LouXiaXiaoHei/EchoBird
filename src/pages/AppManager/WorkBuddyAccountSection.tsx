@@ -78,7 +78,7 @@ export const WorkBuddyAccountSection: React.FC<{ showDivider?: boolean }> = ({
                   account.addonRemaining == null ? undefined : (
                     <span className="flex h-[16px] min-w-0 items-center gap-1 overflow-hidden text-[11px] font-semibold whitespace-nowrap">
                       <span
-                        className="flex flex-shrink-0 items-center gap-1"
+                        className="flex flex-shrink-0 items-baseline gap-1"
                         aria-label={t('agent.baseCredits')}
                       >
                         {formatCredits(account.baseRemaining)}

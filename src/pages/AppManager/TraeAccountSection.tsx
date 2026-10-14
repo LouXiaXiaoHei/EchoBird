@@ -125,7 +125,7 @@ export const TraeAccountSection: React.FC = () => {
                         <>
                           {hasBase && (
                             <span
-                              className={`flex items-center gap-1 ${baseDate != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
+                              className={`flex items-baseline gap-1 ${baseDate != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
                               aria-label={t('agent.baseCredits')}
                             >
                               <span className="flex-shrink-0">
@@ -154,7 +154,7 @@ export const TraeAccountSection: React.FC = () => {
                           )}
                           {hasReward && (
                             <span
-                              className={`flex items-center gap-1 ${rewardNextExpiryAt != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
+                              className={`flex items-baseline gap-1 ${rewardNextExpiryAt != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
                               aria-label={t('agent.rewardCredits')}
                             >
                               <span className="flex-shrink-0">
@@ -176,7 +176,7 @@ export const TraeAccountSection: React.FC = () => {
                         </>
                       ) : (
                         <span
-                          className="flex flex-shrink-0 items-center gap-1"
+                          className="flex flex-shrink-0 items-baseline gap-1"
                           aria-label={t(
                             selectedTool === 'trae' ? 'accountCenter.quota' : 'agent.credits'
                           )}

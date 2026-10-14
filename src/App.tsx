@@ -294,7 +294,8 @@ function AppContent() {
                                     <div className="page-kicker truncate" aria-hidden="true">
                                       {is('models') && 'MODELS'}
                                       {is('accounts') && 'ACCOUNTS'}
-                                      {is('freeModels') && 'ROUTER'}
+                                      {is('freeModels') &&
+                                        (locale.startsWith('zh') ? 'ACCESS' : 'ROUTER')}
                                       {is('apps') && 'DESKTOP'}
                                       {is('myProjects') && 'VIBE CODING'}
                                       {is('aiCareer') && 'CAREER'}

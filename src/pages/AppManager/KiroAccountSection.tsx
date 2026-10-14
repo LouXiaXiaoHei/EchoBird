@@ -45,7 +45,7 @@ export const KiroAccountSection: React.FC = () => {
                     ? account.quota.map((quota, index) => (
                         <span
                           key={index}
-                          className="flex min-w-0 items-center gap-1"
+                          className="flex min-w-0 items-baseline gap-1"
                           aria-label={label(quota.label)}
                         >
                           <span className="flex-shrink-0">
