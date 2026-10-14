@@ -25,6 +25,7 @@ export interface ProxyAccount {
   plan?: string;
   region?: 'cn' | 'global';
   modelLabels?: Record<string, string>;
+  freeModelIds?: string[];
 }
 
 export function accountModelPickerOptions(

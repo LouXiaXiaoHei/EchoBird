@@ -487,6 +487,81 @@ it('searches display labels and still commits the selected ID', () => {
   expect(input().props.value).toBe('Codex account');
 });
 
+it('marks only explicitly free choices while preserving plain option and selected labels', () => {
+  mount({
+    value: 'opaque-free',
+    options: ['opaque-free', 'paid-model', 'unknown-model'],
+    optionLabels: { 'opaque-free': 'Hy3' },
+    freeModelIds: ['opaque-free', 'absent-model'],
+    freeLabel: '免费',
+  });
+  expect(input().props.value).toBe('Hy3');
+  act(() => input().props.onFocus());
+  expect(
+    options()[0]
+      .findAllByType('span')
+      .map((node) => node.children)
+  ).toEqual([['Hy3'], ['免费']]);
+  expect(options()[1].children).toEqual(['paid-model']);
+  expect(options()[2].children).toEqual(['unknown-model']);
+  expect(options()).toHaveLength(3);
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('selects a free labelled choice by mouse using its original ID', () => {
+  mount({
+    options: ['opaque-free', 'paid-model'],
+    optionLabels: { 'opaque-free': 'Hy3' },
+    freeModelIds: ['opaque-free'],
+    freeLabel: '免费',
+  });
+  act(() => input().props.onFocus());
+  act(() => options()[0].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('opaque-free');
+  expect(input().props.value).toBe('Hy3');
+  expect(menus()).toHaveLength(0);
+});
+
+it('searches model labels without treating the free badge as searchable model text', () => {
+  mount({
+    options: ['opaque-free', 'paid-model'],
+    optionLabels: { 'opaque-free': 'Hy3' },
+    freeModelIds: ['opaque-free'],
+    freeLabel: '免费',
+  });
+  act(() => input().props.onChange({ target: { value: '免费' } }));
+  expect(menus()).toHaveLength(0);
+  act(() => input().props.onChange({ target: { value: 'hy3' } }));
+  expect(options()).toHaveLength(1);
+  key('ArrowDown');
+  key('Enter');
+  expect(props.onChange).toHaveBeenLastCalledWith('opaque-free');
+  expect(input().props.value).toBe('Hy3');
+});
+
+it('keeps compact free choices on their original IDs through keyboard selection and disabling', async () => {
+  mountControlled({
+    value: 'paid-model',
+    options: ['paid-model', 'opaque-free'],
+    optionLabels: { 'opaque-free': 'Hy3' },
+    freeModelIds: ['opaque-free'],
+    freeLabel: '免费',
+  });
+  act(() => button('Open from card').props.onClick());
+  act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() }));
+  act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() }));
+  act(() => button('Route model').props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('opaque-free');
+  expect(button('Route model').findByType('span').children).toEqual(['Hy3']);
+  expect(menus()).toHaveLength(0);
+  act(() => button('Open from card').props.onClick());
+  await updateControlled({ disabled: true });
+  expect(menus()).toHaveLength(0);
+  act(() => button('Route model').props.onClick());
+  act(() => button('Route model').props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledOnce();
+});
+
 it('allows select-only keyboard selection but disables the chevron without options', () => {
   mount({ options: ['one', 'two'], selectOnly: true });
   key('ArrowDown');

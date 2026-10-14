@@ -15,7 +15,7 @@ vi.mock('../../components/ModelIdCombobox', async (original) => {
   const actual = await original<typeof import('../../components/ModelIdCombobox')>();
   return {
     ModelIdCombobox: (props: ComponentProps<typeof actual.ModelIdCombobox>) =>
-      props.ariaLabel === 'model.modelId' && props.optionLabels ? (
+      props.ariaLabel === 'model.modelId' && (props.optionLabels || props.freeModelIds?.length) ? (
         <actual.ModelIdCombobox {...props} />
       ) : null,
   };
@@ -378,6 +378,30 @@ it('refreshes explicitly, preserves a valid choice, and retains the snapshot whe
   expect(setItem).not.toHaveBeenCalled();
   expect(showToast).toHaveBeenCalledWith('error', 'Error: Directory unavailable');
 });
+
+it.each(['workBuddy', 'workBuddyAi', 'qoder', 'qoderCn', 'kilo', 'cline'] as const)(
+  'updates %s free metadata with the model directory and preserves it on failure',
+  async (provider) => {
+    const source = { provider, accountId: 'saved' };
+    const saved = { source, label: 'Saved identity', freeModelIds: ['hy3'] };
+    api.cacheAccountProxyModels(source, ['auto', 'hy3', 'charged']);
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([saved]);
+    await open('saved', 'auto', provider);
+    expect(field('model.modelId').props.freeModelIds).toEqual(['hy3']);
+    expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+    vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['auto', 'hy3', 'charged']);
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([{ ...saved, freeModelIds: [] }]);
+    await act(async () => field('model.modelId').props.onRefresh());
+    expect(field('model.modelId').props.freeModelIds).toEqual([]);
+    expect(current.modelId).toBe('auto');
+    expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+    vi.mocked(api.getAccountProxyModels).mockRejectedValueOnce(new Error('Directory unavailable'));
+    await act(async () => field('model.modelId').props.onRefresh());
+    expect(field('model.modelId').props.freeModelIds).toEqual([]);
+    expect(current.modelIdOptions).toEqual(['auto', 'hy3', 'charged']);
+    expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+  }
+);
 
 it('ignores old responses when changing accounts or exiting and prevents duplicate refreshes', async () => {
   let resolve!: (models: string[]) => void;

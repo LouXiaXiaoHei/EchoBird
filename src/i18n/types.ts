@@ -156,6 +156,7 @@ export type TKey =
   | 'model.apiKey'
   | 'model.paste'
   | 'model.modelId'
+  | 'model.free'
   | 'model.modelIdPlaceholder'
   | 'model.openaiUrl'
   | 'model.anthropicUrl'

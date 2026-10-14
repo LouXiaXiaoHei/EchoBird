@@ -39,7 +39,7 @@ vi.mock('../../components/ModelIdCombobox', async (original) => {
   const actual = await original<typeof import('../../components/ModelIdCombobox')>();
   return {
     ModelIdCombobox: (props: ComponentProps<typeof actual.ModelIdCombobox>) =>
-      props.optionLabels ? (
+      props.optionLabels || props.freeModelIds?.length ? (
         <actual.ModelIdCombobox {...props} />
       ) : (
         <input value={props.value} disabled={props.disabled} readOnly />
@@ -456,6 +456,48 @@ describe('Direct route card model selection', () => {
       modelId: 'Qwen3.8-Max',
     });
   });
+
+  it.each(['workBuddy', 'workBuddyAi', 'qoder', 'qoderCn', 'kilo', 'cline'] as const)(
+    'shows %s free metadata from the exact saved account without fetching on menu open',
+    async (provider) => {
+      const source = { provider, accountId: 'saved' };
+      savedModels = [{ ...account, modelId: 'auto', accountSource: source }];
+      savedOrder = [account.internalId];
+      vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue(['auto', 'hy3', 'charged']);
+      vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+        {
+          source: {
+            provider: provider === 'workBuddy' ? 'workBuddyAi' : 'workBuddy',
+            accountId: 'saved',
+          },
+          label: 'Other region',
+          freeModelIds: ['charged'],
+        },
+        {
+          source: { provider, accountId: 'other' },
+          label: 'Other account',
+          freeModelIds: ['auto'],
+        },
+        { source, label: 'Saved identity', freeModelIds: ['hy3'] },
+      ]);
+      await open();
+      expect(picker('auto').props.freeModelIds).toEqual(['hy3']);
+      clickCard('auto');
+      const options = renderer.root.findAll(
+        (node) => node.type === 'div' && node.props.onMouseDown
+      );
+      expect(options.map(textOf)).toEqual(['auto', 'hy3 model.free', 'charged']);
+      expectNoPassiveChanges();
+      await act(async () => options[1].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+      expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(account.internalId, {
+        modelId: 'hy3',
+      });
+      expect(savedModels[0].accountSource).toEqual(source);
+      expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+      expect(api.queryModelUsage).not.toHaveBeenCalled();
+      expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    }
+  );
 
   it('keeps unknown native IDs readable as IDs without borrowing another account label', async () => {
     savedModels = [

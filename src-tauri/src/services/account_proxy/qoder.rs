@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Mutex, OnceLock},
     time::Duration,
 };
@@ -149,6 +149,51 @@ pub(super) fn cached_model_labels(
     provider: AccountProvider,
     account_id: &str,
 ) -> BTreeMap<String, String> {
+    model_aliases(&cached_catalog(provider, account_id))
+        .into_iter()
+        .filter(|(alias, key)| alias != key)
+        .map(|(alias, key)| (key, alias))
+        .collect()
+}
+pub(super) fn cached_free_model_ids(provider: AccountProvider, account_id: &str) -> Vec<String> {
+    let models = cached_catalog(provider, account_id);
+    let mut free: BTreeSet<String> = models
+        .iter()
+        .filter(|(_, row)| is_free_model(row))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for (alias, key) in model_aliases(&models) {
+        if free.contains(&key) {
+            free.insert(alias);
+        }
+    }
+    free.into_iter().collect()
+}
+fn is_free_model(row: &Value) -> bool {
+    if let Some(price) = row.get("price_factor").or_else(|| row.get("priceFactor")) {
+        let Some(price) = price.as_f64().filter(|price| price.is_finite()) else {
+            return false;
+        };
+        if price != 0.0 {
+            return false;
+        }
+        let promotion = row.get("promotion").or_else(|| row.get("prommotion"));
+        let discounted = promotion.is_some_and(|promotion| {
+            promotion["active"] == true
+                && promotion
+                    .get("before_promotion_price_factor")
+                    .or_else(|| promotion.get("beforePromotionPriceFactor"))
+                    .and_then(Value::as_f64)
+                    .is_some_and(|before| before.is_finite() && before > 0.0)
+        });
+        return !discounted;
+    }
+    row.get("is_free")
+        .or_else(|| row.get("isFree"))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+fn cached_catalog(provider: AccountProvider, account_id: &str) -> Catalog {
     let edition = match provider {
         AccountProvider::Qoder => Edition::Qoder,
         AccountProvider::QoderCn => Edition::QoderCn,
@@ -169,11 +214,7 @@ pub(super) fn cached_model_labels(
         }
         let cached_account_id = format!("{:x}", Sha256::digest(format!("{tool}\0{user}")));
         if cached_account_id == account_id {
-            return model_aliases(models)
-                .into_iter()
-                .filter(|(alias, key)| alias != key)
-                .map(|(alias, key)| (key, alias))
-                .collect();
+            return models.clone();
         }
     }
     BTreeMap::new()
@@ -729,6 +770,51 @@ mod tests {
         assert!(resolve_model(&models, "Shared Name").is_none());
     }
     #[test]
+    fn free_models_require_explicit_valid_zero_prices_or_an_unpriced_free_flag() {
+        for row in [
+            json!({"price_factor":0}),
+            json!({"priceFactor":0.0}),
+            json!({"price_factor":0,"is_free":false}),
+            json!({"price_factor":0,"original_price_factor":0.1}),
+            json!({"is_free":true}),
+            json!({"isFree":true}),
+        ] {
+            assert!(is_free_model(&row), "{row}");
+        }
+        for row in [
+            json!({}),
+            json!({"is_free":false}),
+            json!({"is_free":"true"}),
+            json!({"price_factor":0.5,"is_free":true}),
+            json!({"priceFactor":1,"isFree":true}),
+            json!({"price_factor":-1,"is_free":true}),
+            json!({"price_factor":null,"is_free":true}),
+            json!({"price_factor":"0","is_free":true}),
+            json!({"price_factor":false,"is_free":true}),
+            json!({"price_factor":[],"is_free":true}),
+            json!({"price_factor":{},"is_free":true}),
+            json!({"price_factor":null,"priceFactor":0,"is_free":true}),
+        ] {
+            assert!(!is_free_model(&row), "{row}");
+        }
+    }
+    #[test]
+    fn active_discounts_are_not_free_and_expired_discounts_preserve_zero_prices() {
+        for row in [
+            json!({"price_factor":0,"is_free":true,"promotion":{"active":true,"before_promotion_price_factor":0.5}}),
+            json!({"priceFactor":0,"isFree":true,"prommotion":{"active":true,"beforePromotionPriceFactor":1}}),
+        ] {
+            assert!(!is_free_model(&row), "{row}");
+        }
+        for row in [
+            json!({"price_factor":0,"promotion":{"active":false,"before_promotion_price_factor":0.5}}),
+            json!({"price_factor":0,"promotion":{"active":true,"before_promotion_price_factor":0}}),
+            json!({"price_factor":0,"promotion":{"active":true}}),
+        ] {
+            assert!(is_free_model(&row), "{row}");
+        }
+    }
+    #[test]
     fn passive_cached_labels_are_bound_to_the_saved_account_and_edition() {
         let user = uuid::Uuid::new_v4().to_string();
         let other_user = uuid::Uuid::new_v4().to_string();
@@ -739,9 +825,11 @@ mod tests {
             (Edition::Qoder, other_user.as_str(), "Other User Model"),
         ] {
             let models = directory(&json!({"app":[
-                {"key":"cmodel","display_name":name,"enable":true},
-                {"key":"first","display_name":"Shared Name","enable":true},
+                {"key":"cmodel","display_name":name,"enable":true,"price_factor":0},
+                {"key":"first","display_name":"Shared Name","enable":true,"price_factor":0},
                 {"key":"second","display_name":"Shared Name","enable":true},
+                {"key":"paid","display_name":"cmodel","enable":true,"price_factor":1,"is_free":true},
+                {"key":"self","display_name":"self","enable":true,"price_factor":0},
                 {"key":"unnamed","enable":true},
             ]}));
             let cache_key = format!("{}\0{user}\0{}", edition.tool(), edition.gateway());
@@ -782,15 +870,29 @@ mod tests {
                 cached_model_labels(provider, &opaque_id(edition, user)),
                 BTreeMap::from([("cmodel".into(), name.into())])
             );
+            assert_eq!(
+                cached_free_model_ids(provider, &opaque_id(edition, user)),
+                vec![name, "cmodel", "first", "self"]
+            );
         }
         assert!(
             cached_model_labels(AccountProvider::Qoder, &opaque_id(Edition::QoderCn, &user))
                 .is_empty()
         );
+        assert!(
+            cached_free_model_ids(AccountProvider::Qoder, &opaque_id(Edition::QoderCn, &user))
+                .is_empty()
+        );
         assert!(cached_model_labels(AccountProvider::Qoder, &user).is_empty());
         assert!(cached_model_labels(AccountProvider::Qoder, "invalid-opaque-id").is_empty());
+        assert!(cached_free_model_ids(AccountProvider::Qoder, &user).is_empty());
+        assert!(cached_free_model_ids(AccountProvider::Qoder, "invalid-opaque-id").is_empty());
         assert!(
             cached_model_labels(AccountProvider::Kilo, &opaque_id(Edition::Qoder, &user))
+                .is_empty()
+        );
+        assert!(
+            cached_free_model_ids(AccountProvider::Kilo, &opaque_id(Edition::Qoder, &user))
                 .is_empty()
         );
         let mut cached = cache().lock().unwrap();
@@ -803,7 +905,7 @@ mod tests {
         let user = uuid::Uuid::new_v4().to_string();
         let account_id = format!("{:x}", Sha256::digest(format!("qoder\0{user}")));
         let models = directory(&json!({"app":[
-            {"key":"cmodel","display_name":"Private Endpoint Model","enable":true},
+            {"key":"cmodel","display_name":"Private Endpoint Model","enable":true,"price_factor":0},
         ]}));
         let keys = [
             format!("qoder\0{user}\0http://127.0.0.1:54321"),
@@ -817,6 +919,7 @@ mod tests {
             }
         }
         assert!(cached_model_labels(AccountProvider::Qoder, &account_id).is_empty());
+        assert!(cached_free_model_ids(AccountProvider::Qoder, &account_id).is_empty());
         let mut cached = cache().lock().unwrap();
         for key in &keys {
             assert_eq!(cached.0.remove(key).unwrap(), models);

@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Mutex, OnceLock},
+};
 
 use axum::{
     body::Body,
@@ -19,6 +22,100 @@ use super::{stream_response, ProxyError};
 
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const CODE_ASSIST_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
+
+type AccountFreeModels = BTreeMap<String, Vec<String>>;
+
+fn free_models() -> &'static Mutex<AccountFreeModels> {
+    static CACHE: OnceLock<Mutex<AccountFreeModels>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        #[cfg(not(test))]
+        let saved = crate::services::cursor_auth::read(&free_models_path()).unwrap_or_default();
+        #[cfg(test)]
+        let saved = AccountFreeModels::default();
+        Mutex::new(saved)
+    })
+}
+
+#[cfg(not(test))]
+fn free_models_path() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".echobird/cache/account-free-models.json")
+}
+
+fn free_model_cache_key(provider: AccountProvider, account_id: &str) -> String {
+    json!([provider, account_id]).to_string()
+}
+
+pub(super) fn cached_free_model_ids(provider: AccountProvider, account_id: &str) -> Vec<String> {
+    free_models()
+        .lock()
+        .ok()
+        .and_then(|cache| {
+            cache
+                .get(&free_model_cache_key(provider, account_id))
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+fn workbuddy_free_model_ids(value: &Value, available: &[String]) -> Vec<String> {
+    value["data"]["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row["id"].as_str()?;
+            if !available.iter().any(|model| model == id) {
+                return None;
+            }
+            let credits = row["credits"].as_f64().or_else(|| {
+                let text = row["credits"].as_str()?.trim();
+                text.strip_prefix('x')
+                    .or_else(|| text.strip_prefix('X'))
+                    .unwrap_or(text)
+                    .parse::<f64>()
+                    .ok()
+            })?;
+            (credits.is_finite() && credits >= 0.0 && credits == 0.0).then(|| id.to_string())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+pub(super) fn remember_free_model_ids(
+    provider: AccountProvider,
+    credentials: &Value,
+    free_ids: Vec<String>,
+) {
+    let Some(account_id) = credentials["_echobird_saved_account_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .or_else(|| {
+            if matches!(
+                provider,
+                AccountProvider::WorkBuddy | AccountProvider::WorkBuddyAi
+            ) {
+                credentials["accountId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+            } else {
+                None
+            }
+        })
+    else {
+        return;
+    };
+    let Ok(mut cache) = free_models().lock() else {
+        return;
+    };
+    cache.insert(free_model_cache_key(provider, account_id), free_ids);
+    #[cfg(not(test))]
+    if crate::services::cursor_auth::write(&free_models_path(), &*cache).is_err() {
+        log::warn!("[AccountProxy] Could not persist free model metadata");
+    }
+}
 
 fn access_token(credentials: &Value) -> Result<&str, ProxyError> {
     credentials["accessToken"]
@@ -436,7 +533,13 @@ pub(super) async fn list_models(
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect();
-            return nonempty(models);
+            let models = nonempty(models)?;
+            remember_free_model_ids(
+                provider,
+                &credentials,
+                workbuddy_free_model_ids(&value, &models),
+            );
+            return Ok(models);
         }
         AccountProvider::Copilot => copilot_catalog(&credentials, client).await?,
         AccountProvider::Codex => {
@@ -499,7 +602,45 @@ pub(super) async fn list_models(
             .map(str::to_string)
             .collect()
     };
-    nonempty(ids)
+    let ids = nonempty(ids)?;
+    if provider == AccountProvider::Kilo {
+        remember_free_model_ids(provider, &credentials, kilo_free_model_ids(&value, &ids));
+    }
+    Ok(ids)
+}
+
+fn kilo_free_model_ids(value: &Value, available: &[String]) -> Vec<String> {
+    value["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let id = row["id"].as_str()?;
+            if !available.iter().any(|model| model == id) {
+                return None;
+            }
+            let free = match row.get("isFree") {
+                Some(value) => value.as_bool() == Some(true),
+                None => {
+                    kilo_zero_price(&row["pricing"]["prompt"])
+                        && kilo_zero_price(&row["pricing"]["completion"])
+                        && row["pricing"]
+                            .as_object()
+                            .is_some_and(|pricing| pricing.values().all(kilo_zero_price))
+                }
+            };
+            free.then(|| id.to_string())
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn kilo_zero_price(value: &Value) -> bool {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+        .is_some_and(|price| price.is_finite() && price == 0.0)
 }
 
 fn nonempty(ids: Vec<String>) -> Result<Vec<String>, ProxyError> {
@@ -1356,7 +1497,7 @@ mod tests {
         let body = json!({"stream":false,"messages":[{"role":"user","content":"hello"}]});
         let response = route(
             AccountProvider::Codex,
-            json!({"accessToken":"fixture","accountId":"own-account","baseUrl":base}),
+            json!({"accessToken":"fixture","accountId":"own-account","_echobird_saved_account_id":"saved-echo-account","baseUrl":base}),
             "gpt-test",
             body.clone(),
             &client,
@@ -1372,6 +1513,7 @@ mod tests {
         let recorded = requests.lock().await;
         assert_eq!(recorded[0].0, "/responses");
         assert_eq!(recorded[0].1["chatgpt-account-id"], "own-account");
+        assert!(!recorded[0].1.contains_key("_echobird_saved_account_id"));
         assert_eq!(recorded[0].2["store"], false);
         assert_eq!(recorded[1].0, "/v2/chat/completions");
         assert_eq!(recorded[1].1["x-user-id"], "own-uid");
@@ -1492,6 +1634,272 @@ mod tests {
             .2
             .get(super::super::tools::RESPONSES_REQUEST)
             .is_none());
+        server.abort();
+    }
+
+    #[test]
+    fn workbuddy_free_metadata_requires_an_explicit_zero_price_in_the_cli_directory() {
+        let free_prices = [json!(0), json!("0"), json!("x0.00"), json!("X0.00")];
+        let unknown_or_paid = [
+            Value::Null,
+            json!(false),
+            json!(""),
+            json!("unknown"),
+            json!("NaN"),
+            json!("inf"),
+            json!("Infinity"),
+            json!("xNaN"),
+            json!(-1),
+            json!("-0.1"),
+            json!(0.79),
+            json!("x1.62"),
+        ];
+        for credits in free_prices {
+            let value = json!({"data":{"models":[
+                {"id":"allowed","credits":credits},
+                {"id":"unavailable","credits":0},
+                {"id":"allowed","credits":credits},
+                {"id":"missing"}
+            ]}});
+            assert_eq!(
+                workbuddy_free_model_ids(&value, &["allowed".into(), "missing".into()]),
+                ["allowed"]
+            );
+        }
+        for credits in unknown_or_paid {
+            assert!(workbuddy_free_model_ids(
+                &json!({"data":{"models":[{"id":"allowed","credits":credits}]}}),
+                &["allowed".into()]
+            )
+            .is_empty());
+        }
+        assert!(workbuddy_free_model_ids(&json!({"data":{}}), &["allowed".into()]).is_empty());
+    }
+
+    #[test]
+    fn kilo_free_metadata_obeys_the_flag_and_requires_explicit_zero_for_every_fee() {
+        for (row, expected) in [
+            (
+                json!({"isFree":true,"pricing":{"prompt":"1","completion":"1"}}),
+                true,
+            ),
+            (
+                json!({"isFree":false,"pricing":{"prompt":0,"completion":"0"}}),
+                false,
+            ),
+            (
+                json!({"isFree":null,"pricing":{"prompt":0,"completion":0}}),
+                false,
+            ),
+            (json!({"isFree":"true"}), false),
+            (json!({"pricing":{"prompt":0,"completion":"0"}}), true),
+            (
+                json!({"pricing":{"prompt":"0.00","completion":0,"request":"0"}}),
+                true,
+            ),
+            (
+                json!({"pricing":{"prompt":0,"completion":0,"request":"0.1"}}),
+                false,
+            ),
+            (
+                json!({"pricing":{"prompt":0,"completion":0,"image":null}}),
+                false,
+            ),
+            (
+                json!({"pricing":{"prompt":0,"completion":0,"request":"unknown"}}),
+                false,
+            ),
+            (json!({"pricing":{"prompt":0}}), false),
+            (json!({"pricing":{"prompt":null,"completion":0}}), false),
+            (json!({"pricing":{"prompt":"NaN","completion":0}}), false),
+            (json!({"pricing":{"prompt":"inf","completion":0}}), false),
+            (json!({"pricing":{"prompt":-1,"completion":0}}), false),
+            (json!({"pricing":{"prompt":0,"completion":"x0"}}), false),
+            (json!({}), false),
+        ] {
+            let mut row = row;
+            row["id"] = json!("allowed");
+            let value = json!({"data":[row,{"id":"unavailable","isFree":true}]});
+            let free = kilo_free_model_ids(&value, &["allowed".into()]);
+            assert_eq!(free == ["allowed"], expected, "{value}");
+        }
+    }
+
+    #[test]
+    fn free_metadata_cache_binds_to_the_saved_identity_and_isolates_provider_and_account() {
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let second_id = uuid::Uuid::new_v4().to_string();
+        let native_id = uuid::Uuid::new_v4().to_string();
+        let credentials = json!({"_echobird_saved_account_id":account_id,"accountId":native_id});
+        for (provider, model) in [
+            (AccountProvider::WorkBuddy, "workbuddy-free"),
+            (AccountProvider::Kilo, "kilo-free"),
+            (AccountProvider::Cline, "cline-free"),
+        ] {
+            remember_free_model_ids(provider, &credentials, vec![model.into()]);
+            assert_eq!(cached_free_model_ids(provider, &account_id), [model]);
+            assert!(cached_free_model_ids(provider, &native_id).is_empty());
+            assert!(cached_free_model_ids(provider, &second_id).is_empty());
+        }
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::WorkBuddy, &account_id),
+            ["workbuddy-free"]
+        );
+        remember_free_model_ids(
+            AccountProvider::Codex,
+            &json!({"accountId":native_id}),
+            vec!["untrusted".into()],
+        );
+        assert!(cached_free_model_ids(AccountProvider::Codex, &native_id).is_empty());
+        let mut cache = free_models().lock().unwrap();
+        for provider in [
+            AccountProvider::WorkBuddy,
+            AccountProvider::Kilo,
+            AccountProvider::Cline,
+        ] {
+            cache.remove(&free_model_cache_key(provider, &account_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn workbuddy_free_metadata_refreshes_only_after_a_successful_account_directory() {
+        type CatalogState = Arc<Mutex<(StatusCode, Value)>>;
+        async fn catalog(State(state): State<CatalogState>) -> Response {
+            let (status, value) = state.lock().await.clone();
+            let mut response = json_response(&value);
+            *response.status_mut() = status;
+            response
+        }
+        let free = json!({"code":0,"data":{
+            "agents":[{"name":"cli","models":["free-model","paid-model"]}],
+            "models":[{"id":"free-model","credits":"x0.00"},{"id":"paid-model","credits":"x0.79"}],
+            "accessToken":"must-not-be-cached"
+        }});
+        let state = Arc::new(Mutex::new((StatusCode::OK, free.clone())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/v3/config", axum::routing::get(catalog))
+            .route("/models", axum::routing::get(catalog))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let account_id = uuid::Uuid::new_v4().to_string();
+        let second_id = uuid::Uuid::new_v4().to_string();
+        let credentials = json!({"accountId":account_id,"accessToken":"fixture-secret","uid":"fixture-user","baseUrl":base});
+        let client = reqwest::Client::new();
+        list_models(AccountProvider::WorkBuddy, credentials.clone(), &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::WorkBuddy, &account_id),
+            ["free-model"]
+        );
+        assert!(cached_free_model_ids(AccountProvider::WorkBuddyAi, &account_id).is_empty());
+        assert!(cached_free_model_ids(AccountProvider::WorkBuddy, &second_id).is_empty());
+        for (status, value) in [
+            (StatusCode::FORBIDDEN, json!({"error":"rejected"})),
+            (StatusCode::OK, json!({"code":1,"message":"unavailable"})),
+            (
+                StatusCode::OK,
+                json!({"code":0,"data":{"agents":[{"name":"cli","models":[]}]}}),
+            ),
+        ] {
+            *state.lock().await = (status, value);
+            assert!(
+                list_models(AccountProvider::WorkBuddy, credentials.clone(), &client)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                cached_free_model_ids(AccountProvider::WorkBuddy, &account_id),
+                ["free-model"]
+            );
+        }
+        let mut paid = free.clone();
+        paid["data"]["models"][0]["credits"] = json!("x0.79");
+        *state.lock().await = (StatusCode::OK, paid.clone());
+        list_models(AccountProvider::WorkBuddyAi, credentials.clone(), &client)
+            .await
+            .unwrap();
+        let mut second_credentials = credentials.clone();
+        second_credentials["accountId"] = json!(second_id);
+        list_models(AccountProvider::WorkBuddy, second_credentials, &client)
+            .await
+            .unwrap();
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::WorkBuddy, &account_id),
+            ["free-model"]
+        );
+        list_models(AccountProvider::WorkBuddy, credentials.clone(), &client)
+            .await
+            .unwrap();
+        assert!(cached_free_model_ids(AccountProvider::WorkBuddy, &account_id).is_empty());
+        *state.lock().await = (StatusCode::OK, free);
+        list_models(AccountProvider::WorkBuddy, credentials, &client)
+            .await
+            .unwrap();
+
+        let kilo_credentials = json!({"_echobird_saved_account_id":account_id,"accessToken":"fixture-secret","baseUrl":base});
+        *state.lock().await = (
+            StatusCode::OK,
+            json!({"data":[
+                {"id":"kilo-free","isFree":true},
+                {"id":"disabled-free","isFree":true,"policy":{"state":"disabled"}}
+            ]}),
+        );
+        assert_eq!(
+            list_models(AccountProvider::Kilo, kilo_credentials.clone(), &client)
+                .await
+                .unwrap(),
+            ["kilo-free"]
+        );
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::Kilo, &account_id),
+            ["kilo-free"]
+        );
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::WorkBuddy, &account_id),
+            ["free-model"]
+        );
+        *state.lock().await = (StatusCode::FORBIDDEN, json!({"error":"unavailable"}));
+        assert!(
+            list_models(AccountProvider::Kilo, kilo_credentials.clone(), &client)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            cached_free_model_ids(AccountProvider::Kilo, &account_id),
+            ["kilo-free"]
+        );
+        *state.lock().await = (
+            StatusCode::OK,
+            json!({"data":[{"id":"kilo-free","isFree":false}]}),
+        );
+        list_models(AccountProvider::Kilo, kilo_credentials, &client)
+            .await
+            .unwrap();
+        assert!(cached_free_model_ids(AccountProvider::Kilo, &account_id).is_empty());
+
+        let mut cache = free_models().lock().unwrap();
+        let serialized = serde_json::to_string(&*cache).unwrap();
+        for secret in [
+            "fixture-secret",
+            "fixture-user",
+            "must-not-be-cached",
+            "accessToken",
+            "baseUrl",
+            "credits",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        for (provider, id) in [
+            (AccountProvider::WorkBuddy, &account_id),
+            (AccountProvider::WorkBuddyAi, &account_id),
+            (AccountProvider::WorkBuddy, &second_id),
+            (AccountProvider::Kilo, &account_id),
+        ] {
+            cache.remove(&free_model_cache_key(provider, id));
+        }
         server.abort();
     }
 

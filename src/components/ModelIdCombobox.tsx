@@ -12,6 +12,8 @@ interface ModelIdComboboxProps {
   selectOnly?: boolean;
   compact?: boolean;
   optionLabels?: Record<string, string>;
+  freeModelIds?: readonly string[];
+  freeLabel?: string;
   disabled?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -58,6 +60,8 @@ export function ModelIdCombobox({
   selectOnly = false,
   compact = false,
   optionLabels,
+  freeModelIds,
+  freeLabel = 'Free',
   disabled = false,
   open,
   onOpenChange,
@@ -92,6 +96,7 @@ export function ModelIdCombobox({
   // Dedupe defensively so duplicate ids in the directory data can't collide on
   // the React `key` below.
   const opts = useMemo(() => Array.from(new Set(options)), [options]);
+  const freeIds = useMemo(() => new Set(freeModelIds), [freeModelIds]);
   const hasOptions = opts.length > 0;
   const hasChevron = hasOptions || selectOnly;
   const label = (id: string) => optionLabels?.[id] ?? id;
@@ -363,7 +368,7 @@ export function ModelIdCombobox({
                   pick(opt);
                 }}
                 onMouseEnter={() => setActiveIdx(idx)}
-                className={`px-2 py-1.5 text-xs font-mono truncate transition-colors ${
+                className={`px-2 py-1.5 text-xs font-mono transition-colors ${freeIds.has(opt) ? 'flex items-center gap-2' : 'truncate'} ${
                   opt === value
                     ? 'bg-cyber-text/15 text-cyber-text'
                     : idx === activeIdx
@@ -371,7 +376,14 @@ export function ModelIdCombobox({
                       : 'text-cyber-text hover:bg-cyber-text/10'
                 }`}
               >
-                {label(opt)}
+                {freeIds.has(opt) ? (
+                  <>
+                    <span className="min-w-0 truncate">{label(opt)}</span>
+                    <span className="shrink-0 font-sans text-cyber-accent">{freeLabel}</span>
+                  </>
+                ) : (
+                  label(opt)
+                )}
               </div>
             ))}
           </div>,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::minimax_accounts::test_support::{json as response_json, MockServer};
 use axum::{
     body::{to_bytes, Body},
     extract::{Request, State},
@@ -8,7 +9,109 @@ use axum::{
     Router,
 };
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
+
+#[tokio::test]
+async fn free_metadata_uses_the_account_directory_and_preserves_it_on_failure() {
+    let catalog = json!({"data":[
+        {"id":"native/flag-free","free":true},
+        {"id":"native/string-free","free":"true"},
+        {"id":"native/paid","free":false,"pricing":{"prompt":"0.01","completion":"0.02"}},
+        {"id":"native/unknown-free"},
+        {"id":"native/malformed","free":" true "},
+        {"id":"native/denied-recommendation"},
+        {"id":"native/disabled","free":true,"disabled":true},
+        {"id":"native/image","free":true,"architecture":{"output_modalities":["image"]}},
+        {"id":"native/no-api","free":true,"supported_in_api":false},
+        {"id":"cline-cloud/exclusive","free":true}
+    ]});
+    let recommended = json!({"recommended":[{"id":"native/recommended-flag","free":true}],
+        "clinePass":[{"id":"native/pass-flag","free":"true"}],"free":[
+        {"id":"native/group-free"},
+        {"id":"native/flag-free"},
+        {"id":"native/disabled"},
+        {"id":"native/image"},
+        {"id":"native/no-api"},
+        {"id":"native/denied-recommendation","disabled":true},
+        {"id":"cline-cloud/exclusive"}
+    ]});
+    let state = Arc::new(Mutex::new((StatusCode::OK, catalog, recommended)));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = calls.clone();
+    let directory = state.clone();
+    let server = MockServer::start(move |request| {
+        requests.fetch_add(1, Ordering::SeqCst);
+        let (status, catalog, recommended) = directory.lock().unwrap().clone();
+        async move {
+            assert_eq!(
+                request.headers[header::AUTHORIZATION],
+                "Bearer workos:fixture"
+            );
+            let body = match request.path.as_str() {
+                "/api/v1/ai/cline/models" => catalog,
+                "/api/v1/ai/cline/recommended-models" => recommended,
+                _ => panic!("Unexpected directory request"),
+            };
+            response_json(status.as_u16(), body)
+        }
+    })
+    .await;
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let credentials = json!({"accessToken":"workos:fixture","baseUrl":server.url,
+        "_echobird_saved_account_id":account_id});
+    let client = reqwest::Client::new();
+    let models = list_models(credentials.clone(), &client).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        models,
+        [
+            "native/denied-recommendation",
+            "native/flag-free",
+            "native/group-free",
+            "native/malformed",
+            "native/paid",
+            "native/pass-flag",
+            "native/recommended-flag",
+            "native/string-free",
+            "native/unknown-free"
+        ]
+    );
+    let expected = [
+        "native/flag-free",
+        "native/group-free",
+        "native/pass-flag",
+        "native/recommended-flag",
+        "native/string-free",
+    ];
+    assert_eq!(
+        providers::cached_free_model_ids(AccountProvider::Cline, &account_id),
+        expected
+    );
+    assert!(providers::cached_free_model_ids(AccountProvider::Kilo, &account_id).is_empty());
+    assert!(providers::cached_free_model_ids(AccountProvider::Cline, "another-account").is_empty());
+    state.lock().unwrap().0 = StatusCode::INTERNAL_SERVER_ERROR;
+    assert!(list_models(credentials.clone(), &client).await.is_err());
+    assert_eq!(
+        providers::cached_free_model_ids(AccountProvider::Cline, &account_id),
+        expected
+    );
+    *state.lock().unwrap() = (StatusCode::OK, json!({"data":[]}), json!({"free":[]}));
+    assert!(list_models(credentials.clone(), &client).await.is_err());
+    assert_eq!(
+        providers::cached_free_model_ids(AccountProvider::Cline, &account_id),
+        expected
+    );
+    *state.lock().unwrap() = (
+        StatusCode::OK,
+        json!({"data":[{"id":"native/paid"}]}),
+        json!({"free":[]}),
+    );
+    list_models(credentials, &client).await.unwrap();
+    assert!(providers::cached_free_model_ids(AccountProvider::Cline, &account_id).is_empty());
+}
 
 #[tokio::test]
 async fn catalog_preserves_native_namespaces_and_chat_preserves_tools_and_errors() {

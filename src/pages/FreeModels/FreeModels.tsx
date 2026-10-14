@@ -869,6 +869,8 @@ function RouteModelCard({
                 value={model.modelId}
                 options={modelIdOptions}
                 optionLabels={account?.modelLabels}
+                freeModelIds={account?.freeModelIds}
+                freeLabel={t('model.free')}
                 disabled={saving || dragging}
                 open={pickerOpen}
                 onOpenChange={setPickerOpen}

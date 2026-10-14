@@ -283,6 +283,7 @@ const ja: Partial<Translations> = {
   'model.apiKey': 'API キー',
   'model.paste': '貼り付け',
   'model.modelId': 'モデル ID',
+  'model.free': '無料',
   'model.modelIdPlaceholder': 'モデル ID を検索または入力…',
   'model.openaiUrl': 'OpenAI URL',
   'model.anthropicUrl': 'Anthropic URL',

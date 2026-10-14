@@ -110,7 +110,15 @@ export function AccountModelFields({
     try {
       const models = await getAccountProxyModels({ provider, accountId });
       if (attempt !== revision.current) return;
-      if (provider === 'qoder' || provider === 'qoderCn' || provider === 'kiro') {
+      if (
+        provider === 'qoder' ||
+        provider === 'qoderCn' ||
+        provider === 'kiro' ||
+        provider === 'workBuddy' ||
+        provider === 'workBuddyAi' ||
+        provider === 'kilo' ||
+        provider === 'cline'
+      ) {
         try {
           const rows = await listProxyAccounts(provider);
           if (attempt !== revision.current) return;
@@ -173,9 +181,8 @@ export function AccountModelFields({
     }));
   };
   const savedAccounts = accounts.filter((account) => account.source.provider === provider);
-  const modelLabels = savedAccounts.find(
-    (account) => account.source.accountId === accountId
-  )?.modelLabels;
+  const selectedAccount = savedAccounts.find((account) => account.source.accountId === accountId);
+  const modelLabels = selectedAccount?.modelLabels;
   return (
     <>
       <div>
@@ -227,6 +234,8 @@ export function AccountModelFields({
           value={modelId}
           options={accountModelPickerOptions(modelIdOptions ?? [], modelId, modelLabels)}
           optionLabels={modelLabels}
+          freeModelIds={selectedAccount?.freeModelIds}
+          freeLabel={t('model.free')}
           placeholder="—"
           disabled={!active || !accountId || waitingForLabels || fetching}
           onChange={(value) => {

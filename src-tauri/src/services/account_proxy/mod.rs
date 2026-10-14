@@ -39,6 +39,17 @@ pub(crate) fn cached_kiro_model_labels(
     kiro::cached_model_labels(account_id)
 }
 
+pub(crate) fn cached_free_model_ids(provider: AccountProvider, account_id: &str) -> Vec<String> {
+    providers::cached_free_model_ids(provider, account_id)
+}
+
+pub(crate) fn cached_qoder_free_model_ids(
+    provider: AccountProvider,
+    account_id: &str,
+) -> Vec<String> {
+    qoder::cached_free_model_ids(provider, account_id)
+}
+
 /// Internal Responses state belongs only on a Responses-capable account hop.
 pub fn strip_response_metadata(body: &mut Value) {
     if let Some(object) = body.as_object_mut() {

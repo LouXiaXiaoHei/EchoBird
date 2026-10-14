@@ -253,6 +253,7 @@ const en: Translations = {
   'model.apiKey': 'API Key',
   'model.paste': 'Paste',
   'model.modelId': 'Model ID',
+  'model.free': 'Free',
   'model.modelIdPlaceholder': 'Search or enter model ID…',
   'model.openaiUrl': 'OpenAI URL',
   'model.anthropicUrl': 'Anthropic URL',

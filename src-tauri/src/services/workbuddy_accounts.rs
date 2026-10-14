@@ -320,6 +320,7 @@ async fn proxy_credentials_with_rejection_at(
     let auth = &saved.session["auth"];
     let profile = &saved.session["account"];
     Ok(json!({
+        "accountId":saved.summary.id,
         "accessToken":text(auth,"accessToken").ok_or("accountError.loginRequired")?,
         "uid":text(profile,"uid").or_else(||text(profile,"id")).ok_or("accountError.invalidAccount")?,
         "domain":text(auth,"domain").unwrap_or_default(),
@@ -942,6 +943,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(secret["accessToken"], "token");
+        assert_eq!(secret["accountId"], saved.summary.id);
         assert_eq!(secret["baseUrl"], "https://copilot.tencent.com");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(fs::read(&own_path).unwrap(), own_before);

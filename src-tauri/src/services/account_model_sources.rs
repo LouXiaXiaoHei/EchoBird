@@ -17,6 +17,8 @@ pub struct SavedAccountOption {
     pub region: Option<minimax_accounts::Region>,
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub model_labels: std::collections::BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub free_model_ids: Vec<String>,
 }
 
 fn option(
@@ -34,13 +36,14 @@ fn option(
         plan,
         region: None,
         model_labels: Default::default(),
+        free_model_ids: Default::default(),
     }
 }
 
 /// This directory reads only EchoBird's saved accounts; it never probes a native client.
 pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccountOption>, String> {
     use AccountProvider::*;
-    Ok(match provider {
+    let mut accounts: Vec<SavedAccountOption> = match provider {
         ClaudeCode => claude_code_accounts::list_saved_accounts()
             .await?
             .into_iter()
@@ -122,7 +125,17 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
                 saved
             })
             .collect(),
-    })
+    };
+    for account in &mut accounts {
+        account.free_model_ids = match provider {
+            Qoder | QoderCn => super::account_proxy::cached_qoder_free_model_ids(
+                provider,
+                &account.source.account_id,
+            ),
+            _ => super::account_proxy::cached_free_model_ids(provider, &account.source.account_id),
+        };
+    }
+    Ok(accounts)
 }
 
 fn edition(provider: AccountProvider) -> workbuddy_accounts::Edition {
@@ -345,8 +358,13 @@ pub(crate) fn oauth_refresh_error(status: u16, body: &Value) -> String {
     }
 }
 
+fn model_directory_credentials(mut credentials: Value, source: &AccountSource) -> Value {
+    credentials["_echobird_saved_account_id"] = Value::String(source.account_id.clone());
+    credentials
+}
+
 pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> {
-    let secret = credentials(source, false).await?;
+    let secret = model_directory_credentials(credentials(source, false).await?, source);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -367,7 +385,10 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
                     | AccountProvider::Kiro
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
-            let refreshed = credentials_after_rejection(source, &secret).await?;
+            let refreshed = model_directory_credentials(
+                credentials_after_rejection(source, &secret).await?,
+                source,
+            );
             super::account_proxy::list_models(source.provider, refreshed, &client).await
         }
         result => result,
@@ -475,6 +496,47 @@ mod tests {
                 .as_deref(),
             Some("accountError.rateLimited")
         );
+    }
+
+    #[test]
+    fn free_model_metadata_is_optional_and_contains_no_credentials() {
+        let mut saved = option(
+            AccountProvider::WorkBuddy,
+            "saved-id".into(),
+            "Fixture".into(),
+            Some("Free".into()),
+        );
+        assert!(serde_json::to_value(&saved)
+            .unwrap()
+            .get("freeModelIds")
+            .is_none());
+        saved.free_model_ids = vec!["free-model".into()];
+        assert_eq!(
+            serde_json::to_value(&saved).unwrap(),
+            serde_json::json!({
+                "source":{"provider":"workBuddy","accountId":"saved-id"},
+                "label":"Fixture",
+                "plan":"Free",
+                "freeModelIds":["free-model"]
+            })
+        );
+    }
+
+    #[test]
+    fn model_directory_binding_preserves_codex_identity_for_initial_and_refreshed_credentials() {
+        let source = AccountSource {
+            provider: AccountProvider::Codex,
+            account_id: "saved-echo-account".into(),
+        };
+        for token in ["initial-token", "refreshed-token"] {
+            let credentials = model_directory_credentials(
+                json!({"accountId":"native-chatgpt-account","accessToken":token,"_echobird_saved_account_id":"old-id"}),
+                &source,
+            );
+            assert_eq!(credentials["accountId"], "native-chatgpt-account");
+            assert_eq!(credentials["_echobird_saved_account_id"], source.account_id);
+            assert_eq!(credentials["accessToken"], token);
+        }
     }
 
     #[test]

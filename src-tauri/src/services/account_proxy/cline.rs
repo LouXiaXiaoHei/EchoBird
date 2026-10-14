@@ -1,4 +1,5 @@
 use super::{providers, ProxyError};
+use crate::models::model::AccountProvider;
 use axum::http::StatusCode;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -58,6 +59,23 @@ pub(super) async fn list_models(
             "Cline returned no chat models",
         ));
     }
+    let free_ids = rows
+        .iter()
+        .chain(
+            ["recommended", "clinePass"]
+                .into_iter()
+                .flat_map(|bucket| recommended[bucket].as_array().into_iter().flatten()),
+        )
+        .filter(|row| row["free"] == true || row["free"] == "true")
+        .chain(recommended["free"].as_array().into_iter().flatten())
+        .filter(|row| chat_model(row))
+        .filter_map(|row| row["id"].as_str())
+        .filter(|id| ids.contains(*id))
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    providers::remember_free_model_ids(AccountProvider::Cline, &credentials, free_ids);
     Ok(ids.into_iter().collect())
 }
 fn add(ids: &mut BTreeSet<String>, row: &Value) {
