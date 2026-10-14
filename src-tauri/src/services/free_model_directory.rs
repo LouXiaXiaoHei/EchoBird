@@ -9,7 +9,6 @@ const BUNDLED_CATALOG: &str = include_str!("../../../docs/api/free-models/index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeylessAuth {
     Anonymous,
-    PublicBearer,
 }
 
 pub(crate) fn bundled_free_model_directory() -> Result<Value, String> {
@@ -85,7 +84,6 @@ fn keyless_endpoint(raw: &str) -> Option<KeylessAuth> {
     }
     match (url.host_str()?, url.path().trim_end_matches('/')) {
         ("api.kilo.ai", "/api/gateway") => Some(KeylessAuth::Anonymous),
-        ("opencode.ai", "/zen/v1") => Some(KeylessAuth::PublicBearer),
         _ => None,
     }
 }
@@ -150,7 +148,15 @@ fn read_cached_catalog(path: &Path) -> Value {
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .filter(has_catalog_shape)
+        .map(without_restricted_free_models)
         .unwrap_or(Value::Null)
+}
+
+fn without_restricted_free_models(mut catalog: Value) -> Value {
+    if let Some(models) = catalog["models"].as_array_mut() {
+        models.retain(|model| model["providerId"] != "opencode-zen");
+    }
+    catalog
 }
 
 pub async fn fetch_free_model_directory() -> Value {
@@ -174,7 +180,7 @@ pub async fn fetch_free_model_directory() -> Value {
                             let _ = std::fs::create_dir_all(&cache_dir);
                             let _ = std::fs::write(&cache_path, &text);
                             log::info!("[FreeModels] Loaded from remote");
-                            return parsed;
+                            return without_restricted_free_models(parsed);
                         }
                     }
                 }
@@ -218,7 +224,7 @@ mod tests {
                 "https://opencode.ai:443/zen/v1/",
                 "space-bunny-free"
             ),
-            Some(KeylessAuth::PublicBearer)
+            None
         );
         assert_eq!(
             keyless_auth_in_catalog(&catalog, "https://opencode.ai/zen/v1", "claude-opus-5"),
@@ -317,6 +323,25 @@ mod tests {
         std::fs::write(&cache.0, &text).unwrap();
 
         assert_eq!(read_cached_catalog(&cache.0), catalog);
+        assert_eq!(std::fs::read_to_string(&cache.0).unwrap(), text);
+    }
+
+    #[test]
+    fn old_cached_zen_free_model_is_hidden_without_rewriting_cache() {
+        let cache = CacheFile::new();
+        let catalog = serde_json::json!({
+            "version": 1,
+            "models": [
+                {"id": "kilo:kilo-auto/free", "providerId": "kilo"},
+                {"id": "opencode-zen:space-bunny-free", "providerId": "opencode-zen"}
+            ]
+        });
+        let text = serde_json::to_string(&catalog).unwrap();
+        std::fs::write(&cache.0, &text).unwrap();
+
+        let loaded = read_cached_catalog(&cache.0);
+        assert_eq!(loaded["models"].as_array().unwrap().len(), 1);
+        assert_eq!(loaded["models"][0]["providerId"], "kilo");
         assert_eq!(std::fs::read_to_string(&cache.0).unwrap(), text);
     }
 

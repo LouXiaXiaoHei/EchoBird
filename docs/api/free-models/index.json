@@ -1,7 +1,7 @@
 {
   "$schema-comment": "Remote-updatable free model catalog.",
   "version": 1,
-  "updatedAt": "2026-10-10",
+  "updatedAt": "2026-10-15",
   "models": [
     {
       "id": "kilo:kilo-auto/free",
@@ -254,22 +254,6 @@
       "rateLimits": "200 requests per hour per IP across all free models; excess requests return HTTP 429.",
       "notes": "Leave the API key empty. Upstream providers may log prompts and outputs and use them to improve their services; unsuitable for sensitive data. Free access is subject to upstream limits and policies.",
       "docsUrl": "https://kilo.ai/gateway",
-      "cardRequired": false,
-      "phoneRequired": false,
-      "commercialOk": null,
-      "verifiedAt": "2026-10-11"
-    },
-    {
-      "id": "opencode-zen:space-bunny-free",
-      "providerId": "opencode-zen",
-      "provider": "OpenCode Zen",
-      "modelId": "space-bunny-free",
-      "baseUrl": "https://opencode.ai/zen/v1",
-      "freeType": "renewing-quota",
-      "freeTier": "Space Bunny is free for a limited promotional period. Anonymous Chat Completions access was verified without an API key.",
-      "rateLimits": "Upstream-controlled rate and availability limits; no concrete public RPM/TPM figures.",
-      "notes": "Leave the API key empty. The provider states zero retention and no use of data for model training. Other OpenCode free models restricted to the OpenCode client are not included here.",
-      "docsUrl": "https://opencode.ai/zen",
       "cardRequired": false,
       "phoneRequired": false,
       "commercialOk": null,

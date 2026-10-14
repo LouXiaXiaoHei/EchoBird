@@ -438,46 +438,33 @@ fn initial_router_defaults(catalog: &serde_json::Value) -> Result<Vec<ModelConfi
     let entries = catalog["models"]
         .as_array()
         .ok_or_else(|| "Bundled free model catalog has no models".to_string())?;
-    [
-        ("kilo", "kilo-auto/free", "router-default-kilo"),
-        (
-            "opencode-zen",
-            "space-bunny-free",
-            "router-default-opencode-zen",
-        ),
-    ]
-    .into_iter()
-    .map(|(provider, model_id, internal_id)| {
-        let entry = entries
-            .iter()
-            .find(|entry| {
-                entry["providerId"].as_str() == Some(provider)
-                    && entry["modelId"].as_str() == Some(model_id)
-            })
-            .ok_or_else(|| format!("Bundled default model is unavailable: {model_id}"))?;
-        let base_url = entry["baseUrl"]
-            .as_str()
-            .ok_or_else(|| format!("Bundled default model has no endpoint: {model_id}"))?;
-        if super::free_model_directory::keyless_auth_in_catalog(catalog, base_url, model_id)
-            .is_none()
-        {
-            return Err(format!("Bundled default model requires a key: {model_id}"));
-        }
-        let name = entry["provider"]
-            .as_str()
-            .ok_or_else(|| format!("Bundled default model has no provider: {model_id}"))?;
-        Ok(new_model_from(
-            AddModelInput {
-                name: Some(name.to_string()),
-                model_id: Some(model_id.to_string()),
-                base_url: Some(base_url.to_string()),
-                scope: crate::models::model::ModelScope::SmartRouter,
-                ..Default::default()
-            },
-            internal_id.to_string(),
-        ))
-    })
-    .collect()
+    let model_id = "kilo-auto/free";
+    let entry = entries
+        .iter()
+        .find(|entry| {
+            entry["providerId"].as_str() == Some("kilo")
+                && entry["modelId"].as_str() == Some(model_id)
+        })
+        .ok_or_else(|| format!("Bundled default model is unavailable: {model_id}"))?;
+    let base_url = entry["baseUrl"]
+        .as_str()
+        .ok_or_else(|| format!("Bundled default model has no endpoint: {model_id}"))?;
+    if super::free_model_directory::keyless_auth_in_catalog(catalog, base_url, model_id).is_none() {
+        return Err(format!("Bundled default model requires a key: {model_id}"));
+    }
+    let name = entry["provider"]
+        .as_str()
+        .ok_or_else(|| format!("Bundled default model has no provider: {model_id}"))?;
+    Ok(vec![new_model_from(
+        AddModelInput {
+            name: Some(name.to_string()),
+            model_id: Some(model_id.to_string()),
+            base_url: Some(base_url.to_string()),
+            scope: crate::models::model::ModelScope::SmartRouter,
+            ..Default::default()
+        },
+        "router-default-kilo".to_string(),
+    )])
 }
 
 pub(crate) fn persist_initial_router_defaults() -> Result<(), String> {
@@ -1318,9 +1305,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!directory.0.exists());
-        assert_eq!(defaults.len(), 2);
+        assert_eq!(defaults.len(), 1);
         assert_eq!(defaults[0].model_id.as_deref(), Some("kilo-auto/free"));
-        assert_eq!(defaults[1].model_id.as_deref(), Some("space-bunny-free"));
         let catalog = super::super::free_model_directory::bundled_free_model_directory().unwrap();
         for model in defaults {
             assert!(model.api_key.is_empty());
@@ -1470,7 +1456,7 @@ mod tests {
         let models: Vec<ModelConfig> =
             serde_json::from_slice(&fs::read(directory.0.join("config/models.json")).unwrap())
                 .unwrap();
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 1);
     }
 
     #[test]
@@ -1514,7 +1500,7 @@ mod tests {
         persist_initial_router_defaults_at(&directory.0, &catalog).unwrap();
         persist_initial_router_defaults_at(&directory.0, &catalog).unwrap();
         let models: Vec<ModelConfig> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 2);
         assert_eq!(models[0].internal_id, "other-user-model");
         assert!(directory.0.join("cache/free-models.json").is_file());
     }

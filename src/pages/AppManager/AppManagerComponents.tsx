@@ -511,54 +511,53 @@ export const AppManagerMain: React.FC = () => {
           ))}
         </div>
       ) : (
-        <div key={viewMode} className="flex-1 overflow-y-auto">
-          {/* Installed — flat draggable grid, no section header (per spec) */}
-          {viewMode === 'desktop' && installedOrdered.length > 0 && <div>{sortableGrid}</div>}
-
+        <div key={viewMode} className="flex min-h-0 flex-1 flex-col">
           {/* Install view — category tabs filter the uninstalled apps. */}
           {viewMode === 'install' && uninstalled.length > 0 && (
-            <section>
-              <div ref={categoryTabsRef} className="relative mb-5 flex flex-wrap gap-1">
+            <div ref={categoryTabsRef} className="relative mb-5 flex shrink-0 flex-wrap gap-1">
+              <button
+                onClick={() => setActiveUninstalledCat('ALL')}
+                aria-pressed={activeUninstalledCat === 'ALL'}
+                className={`border-b-2 border-transparent px-3 py-1.5 text-[14px] font-bold transition-colors outline-none ${
+                  activeUninstalledCat === 'ALL'
+                    ? 'text-cyber-text'
+                    : 'text-cyber-text-secondary hover:text-cyber-text'
+                }`}
+              >
+                {t('toolCat.all')}
+              </button>
+              {uninstalledCats.map((cat) => (
                 <button
-                  onClick={() => setActiveUninstalledCat('ALL')}
-                  aria-pressed={activeUninstalledCat === 'ALL'}
+                  key={cat}
+                  onClick={() => setActiveUninstalledCat(cat)}
+                  aria-pressed={activeUninstalledCat === cat}
                   className={`border-b-2 border-transparent px-3 py-1.5 text-[14px] font-bold transition-colors outline-none ${
-                    activeUninstalledCat === 'ALL'
+                    activeUninstalledCat === cat
                       ? 'text-cyber-text'
                       : 'text-cyber-text-secondary hover:text-cyber-text'
                   }`}
                 >
-                  {t('toolCat.all')}
+                  {t(catLabelKey(cat))}
                 </button>
-                {uninstalledCats.map((cat) => (
-                  <button
-                    key={cat}
-                    onClick={() => setActiveUninstalledCat(cat)}
-                    aria-pressed={activeUninstalledCat === cat}
-                    className={`border-b-2 border-transparent px-3 py-1.5 text-[14px] font-bold transition-colors outline-none ${
-                      activeUninstalledCat === cat
-                        ? 'text-cyber-text'
-                        : 'text-cyber-text-secondary hover:text-cyber-text'
-                    }`}
-                  >
-                    {t(catLabelKey(cat))}
-                  </button>
-                ))}
-                <span
-                  ref={categoryUnderlineRef}
-                  aria-hidden="true"
-                  className="pointer-events-none absolute left-0 top-0 h-0.5 bg-cyber-border transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
-                  style={{ visibility: 'hidden' }}
-                />
-              </div>
-              {sortableGrid}
-            </section>
+              ))}
+              <span
+                ref={categoryUnderlineRef}
+                aria-hidden="true"
+                className="pointer-events-none absolute left-0 top-0 h-0.5 bg-cyber-border transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+                style={{ visibility: 'hidden' }}
+              />
+            </div>
           )}
-          {(viewMode === 'desktop' ? installed.length === 0 : uninstalled.length === 0) && (
-            <p className="py-12 text-center text-sm text-cyber-text-secondary">
-              {t(viewMode === 'desktop' ? 'aiDesktop.emptyDesktop' : 'aiDesktop.emptyInstall')}
-            </p>
-          )}
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            {/* Installed — flat draggable grid, no section header (per spec) */}
+            {viewMode === 'desktop' && installedOrdered.length > 0 && <div>{sortableGrid}</div>}
+            {viewMode === 'install' && uninstalled.length > 0 && <section>{sortableGrid}</section>}
+            {(viewMode === 'desktop' ? installed.length === 0 : uninstalled.length === 0) && (
+              <p className="py-12 text-center text-sm text-cyber-text-secondary">
+                {t(viewMode === 'desktop' ? 'aiDesktop.emptyDesktop' : 'aiDesktop.emptyInstall')}
+              </p>
+            )}
+          </div>
         </div>
       )}
     </div>

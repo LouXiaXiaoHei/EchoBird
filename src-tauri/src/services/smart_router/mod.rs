@@ -754,18 +754,13 @@ mod tests {
         .unwrap();
         let ids = vec![model.internal_id.clone()];
         let local_server = crate::services::local_llm::LocalServerInfo::default();
-        for (base_url, model_id) in [
-            ("https://api.kilo.ai/api/gateway", "kilo-auto/free"),
-            ("https://opencode.ai/zen/v1", "space-bunny-free"),
-        ] {
-            model.base_url = base_url.into();
-            model.model_id = Some(model_id.into());
-            assert!(model_is_routable(&model));
-            assert_eq!(
-                usable_candidate_count_from(&ids, &[model.clone()], &local_server),
-                1
-            );
-        }
+        model.base_url = "https://api.kilo.ai/api/gateway".into();
+        model.model_id = Some("kilo-auto/free".into());
+        assert!(model_is_routable(&model));
+        assert_eq!(
+            usable_candidate_count_from(&ids, &[model.clone()], &local_server),
+            1
+        );
         for (base_url, model_id) in [
             ("https://example.com/v1", "kilo-auto/free"),
             (
@@ -773,6 +768,7 @@ mod tests {
                 "anthropic/claude-sonnet-4",
             ),
             ("https://opencode.ai/zen/v1", "claude-opus-5"),
+            ("https://opencode.ai/zen/v1", "space-bunny-free"),
             ("https://opencode.ai/zen/v1", ""),
         ] {
             model.base_url = base_url.into();

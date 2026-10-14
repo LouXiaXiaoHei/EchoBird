@@ -980,15 +980,7 @@ async fn send_api_request(
 }
 
 fn upstream_bearer_token(candidate: &Candidate) -> Option<&str> {
-    if !candidate.api_key.trim().is_empty() {
-        Some(&candidate.api_key)
-    } else if free_model_directory::keyless_auth(&candidate.base_url, &candidate.model_id)
-        == Some(free_model_directory::KeylessAuth::PublicBearer)
-    {
-        Some("public")
-    } else {
-        None
-    }
+    (!candidate.api_key.trim().is_empty()).then_some(candidate.api_key.as_str())
 }
 
 async fn route_chat_with_policy(
@@ -3330,10 +3322,10 @@ mod tests {
                 .iter()
                 .map(|item| item.internal_id.as_str())
                 .collect::<Vec<_>>(),
-            ["zen", "account", "kilo"]
+            ["account", "kilo"]
         );
         assert!(resolved.iter().all(|item| item.api_key.trim().is_empty()));
-        assert!(resolved[1].account_source.is_some());
+        assert!(resolved[0].account_source.is_some());
     }
 
     #[tokio::test]
@@ -3394,12 +3386,12 @@ mod tests {
     }
 
     #[test]
-    fn public_bearer_applies_only_to_known_free_models_and_never_replaces_a_user_key() {
+    fn zen_requires_a_user_key_even_for_models_named_free() {
         let mut upstream = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "free");
         upstream.api_key.clear();
         upstream.base_url = "https://opencode.ai/zen/v1".into();
         upstream.model_id = "space-bunny-free".into();
-        assert_eq!(upstream_bearer_token(&upstream), Some("public"));
+        assert_eq!(upstream_bearer_token(&upstream), None);
         upstream.api_key = "real-account-key".into();
         assert_eq!(upstream_bearer_token(&upstream), Some("real-account-key"));
         upstream.api_key.clear();
