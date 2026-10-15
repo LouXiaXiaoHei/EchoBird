@@ -149,7 +149,9 @@ export function ApiModelFields({
     sameEndpoint(initial.anthropicUrl, input.anthropicUrl)
       ? initial.options
       : undefined;
-  const needsKey = catalog?.requiresApiKey && (!input.apiKey || input.apiKey === 'not-needed');
+  const needsKey =
+    (!input.apiKey || input.apiKey === 'not-needed') &&
+    (catalog?.requiresApiKey ?? (validEndpoint && !input.apiKey));
   const options = needsKey
     ? (initialOptions ?? fallback?.modelIds ?? [])
     : (catalog?.models.map((model) => model.id) ?? initialOptions ?? fallback?.modelIds ?? []);

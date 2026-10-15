@@ -191,6 +191,30 @@ it('prompts for a required key and hides the prompt before automatically reading
   expect(showToast).not.toHaveBeenCalled();
 });
 
+it('keeps the missing-key hint when an unkeyed catalog request fails, then retries with the key', async () => {
+  vi.mocked(api.fetchUpstreamModelCatalog).mockRejectedValueOnce('UPSTREAM_MODELS_UNSUPPORTED');
+  await open({ modelIdOptions: ['fallback-fixture'] });
+  expect(field().props.actionHint).toBe('model.catalogKeyRequired');
+  await advance();
+  expect(field().props.actionHint).toBe('model.catalogKeyRequired');
+  expect(field().props.options).toEqual(['fallback-fixture']);
+  await patchForm({ apiKey: 'fixture-key' });
+  expect(field().props.actionHint).toBeUndefined();
+  await advance();
+  expect(api.fetchUpstreamModelCatalog).toHaveBeenLastCalledWith({
+    ...source,
+    apiKey: 'fixture-key',
+  });
+  expect(field().props.options).toEqual(directory.models.map((model) => model.id));
+});
+
+it('removes the provisional key hint when an endpoint provides a keyless catalog', async () => {
+  await open();
+  expect(field().props.actionHint).toBe('model.catalogKeyRequired');
+  await advance();
+  expect(field().props.actionHint).toBeUndefined();
+});
+
 it('treats the no-key sentinel as empty for a key-required directory', async () => {
   vi.mocked(api.getCachedUpstreamModelCatalog).mockResolvedValue({
     models: [],
