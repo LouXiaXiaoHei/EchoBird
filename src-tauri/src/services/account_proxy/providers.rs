@@ -1074,16 +1074,30 @@ async fn wire(
 }
 
 pub(super) fn anthropic_request(body: &Value, model: &str) -> Value {
-    let mut messages = Vec::new();
+    let mut messages: Vec<Value> = Vec::new();
     let mut system = Vec::new();
-    for message in body["messages"].as_array().into_iter().flatten() {
+    for message in super::responses::repaired_chat_messages(body) {
         let role = message["role"].as_str().unwrap_or("user");
         if matches!(role, "system" | "developer") {
             system.push(protocol::text(&message["content"]));
             continue;
         }
         let content = if role == "tool" {
-            json!([{"type":"tool_result","tool_use_id":message["tool_call_id"],"content":message["content"]}])
+            let mut result = json!({"type":"tool_result","tool_use_id":message["tool_call_id"],"content":message["content"]});
+            if message["is_error"] == true {
+                result["is_error"] = json!(true);
+            }
+            if let Some(previous) = messages.last_mut().filter(|previous| {
+                previous["role"] == "user"
+                    && previous["content"].as_array().is_some_and(|blocks| {
+                        !blocks.is_empty()
+                            && blocks.iter().all(|block| block["type"] == "tool_result")
+                    })
+            }) {
+                previous["content"].as_array_mut().unwrap().push(result);
+                continue;
+            }
+            json!([result])
         } else {
             let value = crate::services::local_llm::proxy::openai_to_anthropic(
                 &json!({"choices":[{"message":message}]}),
@@ -1173,7 +1187,7 @@ pub(super) async fn route(
         protocol::reject_structured_output(&body)?;
     }
     let api = base(provider, &credentials);
-    let request = match protocol {
+    let mut request = match protocol {
         WireProtocol::Trae => unreachable!("Trae uses its own gateway"),
         WireProtocol::Responses => protocol::chat_to_responses(&body, model),
         WireProtocol::CodeAssist => {
@@ -1205,6 +1219,11 @@ pub(super) async fn route(
             body
         }
     };
+    if provider == AccountProvider::Codex {
+        if let Some(request) = request.as_object_mut() {
+            request.remove("prompt_cache_options");
+        }
+    }
     let request = signed(
         client
             .post(format!("{api}{path}"))
@@ -1285,7 +1304,9 @@ pub(super) async fn route_responses(
         request
             .entry("include")
             .or_insert_with(|| json!(["reasoning.encrypted_content"]));
+        request.remove("prompt_cache_options");
     }
+    super::responses::repair_responses_tool_history(&mut body);
     let response = signed(
         client
             .post(format!("{}/responses", base(provider, &credentials)))
@@ -2384,6 +2405,123 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         (base, requests, server)
+    }
+
+    #[test]
+    fn tool_history_messages_pairs_parallel_calls_before_followup() {
+        let input = json!({"messages":[
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read","arguments":"{}"}},
+                {"id":"b","type":"function","function":{"name":"write","arguments":"{}"}}
+            ]},
+            {"role":"tool","tool_call_id":"a","content":"first"},
+            {"role":"tool","tool_call_id":"a","content":"duplicate"},
+            {"role":"user","content":"Continue"}
+        ]});
+        let request = anthropic_request(&input, "claude-test");
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let results = messages[1]["content"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["content"], "first");
+        assert_eq!(results[1]["tool_use_id"], "b");
+        assert_eq!(results[1]["is_error"], true);
+        assert_eq!(messages[2]["content"][0]["text"], "Continue");
+    }
+
+    #[tokio::test]
+    async fn tool_history_account_wire_repairs_without_extra_inference_requests() {
+        let (base, requests, server) = fixture().await;
+        let client = reqwest::Client::new();
+        for provider in [AccountProvider::Codex, AccountProvider::Antigravity] {
+            let body = json!({"stream":true,"messages":[
+                {"role":"assistant","content":null,"tool_calls":[{"id":"a","type":"function","function":{"name":"read","arguments":"{}"}}]},
+                {"role":"user","content":"Continue after interruption"}
+            ]});
+            let response = route(
+                provider,
+                json!({"accessToken":"fixture","baseUrl":base}),
+                "tool-history-fixture",
+                body,
+                &client,
+            )
+            .await
+            .unwrap();
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+        }
+        let sent = requests.lock().await;
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _, _)| path == "/responses")
+                .count(),
+            1
+        );
+        assert_eq!(
+            sent.iter()
+                .filter(|(path, _, _)| path.starts_with("/v1internal:streamGenerateContent"))
+                .count(),
+            1
+        );
+        let codex = &sent
+            .iter()
+            .find(|(path, _, _)| path == "/responses")
+            .unwrap()
+            .2;
+        assert_eq!(codex["input"][1]["type"], "function_call_output");
+        assert_eq!(codex["input"][1]["call_id"], "a");
+        let google = &sent
+            .iter()
+            .find(|(path, _, _)| path.starts_with("/v1internal:streamGenerateContent"))
+            .unwrap()
+            .2;
+        assert_eq!(
+            google["request"]["contents"][1]["parts"][0]["functionResponse"]["id"],
+            "a"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_history_codex_native_filters_unsupported_cache_option_only_on_its_backend() {
+        let (base, requests, server) = fixture().await;
+        let client = reqwest::Client::new();
+        let body = json!({"stream":true,"input":[
+            {"type":"custom_tool_call","id":"ctc_fixture","call_id":"a","namespace":"fixture","name":"write","input":"patch"},
+            {"role":"user","content":"Continue"}
+        ],"tools":[{"type":"custom","name":"write","format":{"type":"text"}}],
+            "prompt_cache_options":{"extended_retention":true},"prompt_cache_key":"keep-this-key","metadata":{"keep":true}});
+        for provider in [AccountProvider::Codex, AccountProvider::Copilot] {
+            let response = route_responses(
+                provider,
+                json!({"accessToken":"fixture","baseUrl":base,"protocol":"responses"}),
+                "native",
+                body.clone(),
+                &client,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+        }
+        let sent = requests.lock().await;
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].2.get("prompt_cache_options").is_none());
+        assert_eq!(
+            sent[1].2["prompt_cache_options"],
+            body["prompt_cache_options"]
+        );
+        for (_, _, request) in sent.iter() {
+            assert_eq!(request["prompt_cache_key"], body["prompt_cache_key"]);
+            assert_eq!(request["metadata"], body["metadata"]);
+            assert_eq!(request["input"][0], body["input"][0]);
+            assert_eq!(request["input"][1]["type"], "custom_tool_call_output");
+            assert_eq!(request["input"][1]["call_id"], "a");
+        }
+        server.abort();
     }
 
     #[tokio::test]

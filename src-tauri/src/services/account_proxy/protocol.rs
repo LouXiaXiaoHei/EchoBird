@@ -34,10 +34,6 @@ pub(crate) enum WireProtocol {
     Trae,
 }
 
-fn messages(body: &Value) -> impl Iterator<Item = &Value> {
-    body["messages"].as_array().into_iter().flatten()
-}
-
 pub(crate) fn text(value: &Value) -> String {
     if let Some(value) = value.as_str() {
         return value.to_string();
@@ -63,11 +59,12 @@ pub(crate) fn chat_to_responses(body: &Value, model: &str) -> Value {
         if request.get("include").is_none() {
             request["include"] = json!(["reasoning.encrypted_content"]);
         }
+        super::responses::repair_responses_tool_history(&mut request);
         return request;
     }
     let mut input = Vec::new();
     let mut instructions = Vec::new();
-    for message in messages(body) {
+    for message in super::responses::repaired_chat_messages(body) {
         let role = message["role"].as_str().unwrap_or("user");
         if matches!(role, "system" | "developer") {
             instructions.push(text(&message["content"]));
@@ -146,6 +143,7 @@ pub(crate) fn chat_to_responses(body: &Value, model: &str) -> Value {
             choice.clone()
         };
     }
+    super::responses::normalize_responses_tool_rounds(&mut output);
     output
 }
 
@@ -209,17 +207,16 @@ pub(crate) fn chat_to_code_assist(body: &Value, model: &str, project: &str) -> V
     let mut contents: Vec<Value> = Vec::new();
     let mut system = Vec::new();
     let mut calls = BTreeMap::new();
-    for message in messages(body) {
-        for call in message["tool_calls"].as_array().into_iter().flatten() {
-            let id = call["id"].as_str().unwrap_or_default();
-            calls.insert(id.to_string(), call["function"]["name"].clone());
-        }
-    }
-    for message in messages(body) {
+    let messages = super::responses::repaired_chat_messages(body);
+    for message in &messages {
         let role = message["role"].as_str().unwrap_or("user");
         if matches!(role, "system" | "developer") {
             system.push(json!({"text":text(&message["content"])}));
             continue;
+        }
+        for call in message["tool_calls"].as_array().into_iter().flatten() {
+            let id = call["id"].as_str().unwrap_or_default();
+            calls.insert(id.to_string(), call["function"]["name"].clone());
         }
         let mut parts = if role == "tool" {
             let id = message["tool_call_id"].as_str().unwrap_or_default();
@@ -1184,6 +1181,130 @@ impl ChatDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn interrupted_tool_history() -> Value {
+        json!({"messages":[
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read","arguments":"{}"}},
+                {"id":"b","type":"function","function":{"name":"write","arguments":"{}"}}
+            ]},
+            {"role":"tool","tool_call_id":"a","content":"first answer"},
+            {"role":"tool","tool_call_id":"a","content":"duplicate answer"},
+            {"role":"user","content":"Continue after interruption"},
+            {"role":"assistant","content":null,"tool_calls":[
+                {"id":"a","type":"function","function":{"name":"inspect","arguments":"{}"}}
+            ]},
+            {"role":"tool","tool_call_id":"a","content":"later answer"},
+            {"role":"tool","tool_call_id":"a","content":"later duplicate"}
+        ]})
+    }
+
+    #[test]
+    fn tool_history_responses_repairs_interruption_and_duplicate_answers_per_round() {
+        let body = interrupted_tool_history();
+        let before = body.clone();
+        let request = chat_to_responses(&body, "native");
+        assert_eq!(body, before);
+        let input = request["input"].as_array().unwrap();
+        let answers: Vec<_> = input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect();
+        assert_eq!(answers.len(), 3);
+        assert_eq!(answers[0]["output"], "first answer");
+        assert_eq!(answers[1]["call_id"], "b");
+        assert!(answers[1]["output"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted"));
+        assert_eq!(answers[2]["output"], "later answer");
+        let followup = input
+            .iter()
+            .position(|item| item["role"] == "user")
+            .unwrap();
+        assert!(input[..followup]
+            .iter()
+            .any(|item| item["type"] == "function_call_output" && item["call_id"] == "b"));
+    }
+
+    #[test]
+    fn tool_history_code_assist_has_one_answer_per_call_and_keeps_reused_ids() {
+        let request = chat_to_code_assist(&interrupted_tool_history(), "gemini-test", "project");
+        let contents = request["request"]["contents"].as_array().unwrap();
+        assert_eq!(contents[1]["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["response"]["output"],
+            "first answer"
+        );
+        assert_eq!(contents[1]["parts"][0]["functionResponse"]["name"], "read");
+        assert_eq!(contents[1]["parts"][1]["functionResponse"]["id"], "b");
+        assert!(
+            contents[1]["parts"][1]["functionResponse"]["response"]["output"]
+                .as_str()
+                .unwrap()
+                .contains("interrupted")
+        );
+        assert_eq!(
+            contents[2]["parts"][0]["text"],
+            "Continue after interruption"
+        );
+        assert_eq!(contents[4]["parts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            contents[4]["parts"][0]["functionResponse"]["response"]["output"],
+            "later answer"
+        );
+        assert_eq!(
+            contents[4]["parts"][0]["functionResponse"]["name"],
+            "inspect"
+        );
+    }
+
+    #[test]
+    fn tool_history_messages_to_responses_repairs_a_stopped_tool_turn() {
+        let input = json!({"messages":[
+            {"role":"assistant","content":[{"type":"tool_use","id":"a","name":"read","input":{"path":"fixture"}}]},
+            {"role":"user","content":"Continue after interruption"}
+        ]});
+        let chat = crate::services::local_llm::proxy::anthropic_to_openai(&input);
+        let request = chat_to_responses(&chat, "native");
+        assert_eq!(request["input"][0]["type"], "function_call");
+        assert_eq!(request["input"][1]["type"], "function_call_output");
+        assert_eq!(request["input"][1]["call_id"], "a");
+        assert_eq!(request["input"][2]["role"], "user");
+    }
+
+    #[test]
+    fn tool_history_native_responses_preserves_custom_items_and_continuations() {
+        let original = json!({"model":"auto","input":[
+            {"type":"reasoning","id":"r1","encrypted_content":"opaque","summary":[]},
+            {"type":"custom_tool_call","id":"ctc1","call_id":"a","namespace":"fixture","name":"write","input":"raw patch","future_field":true},
+            {"type":"custom_tool_call_output","call_id":"a","output":[{"type":"input_text","text":"first answer"}]},
+            {"type":"custom_tool_call_output","call_id":"a","output":"duplicate"},
+            {"role":"user","content":"Continue"},
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{}"}
+        ],"tools":[{"type":"namespace","name":"fixture","tools":[{"type":"custom","name":"write","format":{"type":"text"}}]}],"metadata":{"keep":true}});
+        let request = chat_to_responses(&json!({RESPONSES_REQUEST:original}), "native");
+        let items = request["input"].as_array().unwrap();
+        assert_eq!(items.len(), 6);
+        assert_eq!(items[0], original["input"][0]);
+        assert_eq!(items[1], original["input"][1]);
+        assert_eq!(items[2], original["input"][2]);
+        assert_eq!(items[5]["type"], "function_call_output");
+        assert!(items[5]["output"].as_str().unwrap().contains("interrupted"));
+        assert_eq!(request["tools"], original["tools"]);
+        assert_eq!(request["metadata"], original["metadata"]);
+
+        let incremental = json!({"previous_response_id":"unknown-upstream-id","input":[
+            {"type":"function_call_output","call_id":"old-call","output":"already known upstream"},
+            {"type":"function_call","call_id":"new-call","name":"read","arguments":"{}"}
+        ]});
+        let request = chat_to_responses(&json!({RESPONSES_REQUEST:incremental}), "native");
+        assert_eq!(request["input"], incremental["input"]);
+        assert_eq!(
+            request["previous_response_id"],
+            incremental["previous_response_id"]
+        );
+    }
 
     #[test]
     fn chat_structured_format_maps_to_native_responses_text_format() {

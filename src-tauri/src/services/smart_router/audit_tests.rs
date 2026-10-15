@@ -389,7 +389,8 @@ async fn audit_native_api_responses_reorders_assistant_text_without_dropping_ite
     let call = json!({"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_file","arguments":"{}"});
     let thought = json!({"type":"reasoning","id":"rs_1","encrypted_content":"opaque","summary":[]});
     let text = json!({"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"I will read it"}]});
-    let expected = json!([thought.clone(), text.clone(), call.clone()]);
+    let result = json!({"type":"function_call_output","call_id":"call_1","output":"file contents"});
+    let expected = json!([thought.clone(), text.clone(), call.clone(), result.clone()]);
     let observed = Arc::new(Mutex::new(None));
     let capture = observed.clone();
     let addr = audit_mock(Router::new().route(
@@ -404,7 +405,7 @@ async fn audit_native_api_responses_reorders_assistant_text_without_dropping_ite
     let response = route_responses_with_candidates(
         &state,
         &HeaderMap::new(),
-        json!({"input":[call,thought,text],"stream":false}),
+        json!({"input":[call,thought,text,result],"stream":false}),
         vec![audit_http_candidate(addr, "first")],
     )
     .await;

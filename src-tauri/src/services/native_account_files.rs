@@ -70,6 +70,33 @@ pub(crate) fn json(value: &Value) -> Result<Vec<u8>, String> {
 }
 pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     private_dir(path.parent().ok_or("accountError.home")?)?;
+    write_synced(path, bytes, fs::File::sync_all)
+}
+
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    // Preserve an existing native configuration's symbolic-link destination.
+    let mut target = path.to_path_buf();
+    for _ in 0..40 {
+        if !fs::symlink_metadata(&target).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return write_synced(&target, bytes, fs::File::sync_all);
+        }
+        let link = fs::read_link(&target).map_err(|_| "accountError.write")?;
+        target = if link.is_absolute() {
+            link
+        } else {
+            target.parent().ok_or("accountError.write")?.join(link)
+        };
+    }
+    Err("accountError.write|Too many symbolic links".into())
+}
+
+fn write_synced(
+    path: &Path,
+    bytes: &[u8],
+    sync: impl FnOnce(&fs::File) -> std::io::Result<()>,
+) -> Result<(), String> {
+    fs::create_dir_all(path.parent().ok_or("accountError.home")?)
+        .map_err(|_| "accountError.write")?;
     let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut options = fs::OpenOptions::new();
@@ -81,9 +108,9 @@ pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         }
         let mut file = options.open(&temporary).map_err(|_| "accountError.write")?;
         file.write_all(bytes).map_err(|_| "accountError.write")?;
-        file.sync_all().map_err(|_| "accountError.write")?;
+        sync(&file).map_err(|_| "accountError.write")?;
         drop(file);
-        fs::rename(&temporary, path).map_err(|_| "accountError.write".to_string())
+        replace(&temporary, path).map_err(|_| "accountError.write".to_string())
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);
@@ -91,8 +118,29 @@ pub(crate) fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     result
 }
 
+fn replace(temporary: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match fs::rename(temporary, path) {
+                Err(error)
+                    if matches!(error.raw_os_error(), Some(5 | 32 | 33))
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    fs::rename(temporary, path)
+}
+
 pub(crate) struct Transaction {
-    original: Vec<(PathBuf, Option<Vec<u8>>)>,
+    original: Vec<(PathBuf, Option<Vec<u8>>, bool)>,
     committed: bool,
 }
 impl Transaction {
@@ -103,9 +151,24 @@ impl Transaction {
         }
     }
     pub(crate) fn replace(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.replace_with(path, bytes, false)
+    }
+    pub(crate) fn replace_private_file(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
+        self.replace_with(path, bytes, true)
+    }
+    fn replace_with(
+        &mut self,
+        path: &Path,
+        bytes: &[u8],
+        preserve_link: bool,
+    ) -> Result<(), String> {
         let old = read_optional(path)?;
-        write(path, bytes)?;
-        self.original.push((path.to_path_buf(), old));
+        if preserve_link {
+            write_private_file(path, bytes)?;
+        } else {
+            write(path, bytes)?;
+        }
+        self.original.push((path.to_path_buf(), old, preserve_link));
         Ok(())
     }
     pub(crate) fn commit(mut self) {
@@ -117,8 +180,9 @@ impl Drop for Transaction {
         if self.committed {
             return;
         }
-        for (path, original) in self.original.iter().rev() {
+        for (path, original, preserve_link) in self.original.iter().rev() {
             let restored = match original {
+                Some(bytes) if *preserve_link => write_private_file(path, bytes),
                 Some(bytes) => write(path, bytes),
                 None => fs::remove_file(path).map_err(|_| "accountError.write".into()),
             };
@@ -132,6 +196,70 @@ impl Drop for Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_transaction_rollback_preserves_its_link_and_parent_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("echobird-linked-rollback-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
+        let target = root.join("actual.json");
+        let path = root.join("settings.json");
+        fs::write(&target, b"original").unwrap();
+        std::os::unix::fs::symlink("actual.json", &path).unwrap();
+        {
+            let mut transaction = Transaction::new();
+            transaction.replace_private_file(&path, b"applied").unwrap();
+            assert_eq!(fs::read(&target).unwrap(), b"applied");
+            assert!(transaction
+                .replace_private_file(&target.join("invalid"), b"fail")
+                .is_err());
+        }
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_flush_keeps_the_original_and_removes_only_its_temporary_file() {
+        let root = std::env::temp_dir().join(format!("echobird-flush-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("auth.json");
+        fs::write(&path, b"original").unwrap();
+        let result = write_synced(&path, b"replacement", |file| {
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+            assert_eq!(file.metadata().unwrap().len(), 11);
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+            Err(std::io::Error::other("fixture flush failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        write_synced(&path, b"replacement", |file| {
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+            file.sync_all()
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn native_paths_normalize_dot_segments_without_resolving_symbolic_links() {
         let home = std::env::temp_dir();

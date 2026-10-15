@@ -1638,8 +1638,9 @@ pub(crate) struct OwnedDesktopConfigProcess {
 }
 
 #[cfg(windows)]
-fn owned_windows_process_times(child: &std::process::Child) -> Result<(u64, u64), String> {
-    use std::os::windows::io::AsRawHandle;
+pub(crate) fn owned_windows_process_times(
+    child: &impl std::os::windows::io::AsRawHandle,
+) -> Result<(u64, u64), String> {
     use windows::Win32::Foundation::FILETIME;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -1675,7 +1676,7 @@ fn owned_windows_process_times(child: &std::process::Child) -> Result<(u64, u64)
 }
 
 #[cfg(windows)]
-fn stop_owned_windows_tree(pid: u32, created: u64, exited: u64) -> Result<(), String> {
+pub(crate) fn stop_owned_windows_tree(pid: u32, created: u64, exited: u64) -> Result<(), String> {
     let script = r#"
 $ErrorActionPreference='Stop'
 function Created($entry){return [long][decimal]::Truncate(([decimal]($entry.CreationDate.ToFileTimeUtc()))/10)}

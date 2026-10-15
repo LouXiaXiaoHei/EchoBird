@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::{
     body::{to_bytes, Body},
@@ -15,7 +15,116 @@ use super::protocol::SseParser;
 use super::tools::{self, RESPONSES_REQUEST};
 use super::{json_response, stream_response, ProxyError};
 
-/// Keep a batch's assistant text before its calls without changing native items.
+const INTERRUPTED_TOOL_RESULT: &str =
+    "[The result of this tool call is unavailable: the turn was interrupted.]";
+
+#[derive(Default)]
+struct ToolRound {
+    pending: Vec<(String, bool)>,
+    answered: BTreeSet<String>,
+    has_results: bool,
+}
+
+impl ToolRound {
+    fn call(&mut self, id: &str, custom: bool) {
+        if !id.is_empty() && !self.pending.iter().any(|(pending, _)| pending == id) {
+            self.answered.remove(id);
+            self.pending.push((id.to_string(), custom));
+        }
+    }
+
+    fn answer(&mut self, id: &str) -> bool {
+        self.has_results = true;
+        if let Some(index) = self.pending.iter().position(|(pending, _)| pending == id) {
+            self.pending.remove(index);
+            self.answered.insert(id.to_string());
+            true
+        } else {
+            // An unknown result may answer a call held by the upstream.
+            !self.answered.contains(id)
+        }
+    }
+}
+
+fn finish_tool_round(round: &mut ToolRound, output: &mut Vec<Value>, responses: bool) {
+    for (id, custom) in std::mem::take(&mut round.pending) {
+        round.answered.insert(id.clone());
+        output.push(if responses {
+            json!({"type":if custom { "custom_tool_call_output" } else { "function_call_output" },
+                "call_id":id,"output":INTERRUPTED_TOOL_RESULT})
+        } else {
+            json!({"role":"tool","tool_call_id":id,"content":INTERRUPTED_TOOL_RESULT,"is_error":true})
+        });
+    }
+    round.has_results = false;
+}
+
+pub(super) fn repaired_chat_messages(body: &Value) -> Vec<Value> {
+    let mut output = Vec::new();
+    let mut round = ToolRound::default();
+    for message in body["messages"].as_array().into_iter().flatten() {
+        if message["role"] == "tool" {
+            if !round.answer(message["tool_call_id"].as_str().unwrap_or_default()) {
+                continue;
+            }
+        } else {
+            let calls = message["tool_calls"].as_array();
+            if message["role"] != "assistant"
+                || calls.map_or(true, Vec::is_empty)
+                || round.has_results
+            {
+                finish_tool_round(&mut round, &mut output, false);
+            }
+            for call in calls.into_iter().flatten() {
+                round.call(call["id"].as_str().unwrap_or_default(), false);
+            }
+        }
+        output.push(message.clone());
+    }
+    finish_tool_round(&mut round, &mut output, false);
+    output
+}
+
+pub(super) fn repair_responses_tool_history(body: &mut Value) {
+    if body
+        .get("previous_response_id")
+        .is_some_and(|id| !id.is_null())
+    {
+        return;
+    }
+    let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut output = Vec::with_capacity(input.len());
+    let mut round = ToolRound::default();
+    for item in std::mem::take(input) {
+        match item["type"].as_str().unwrap_or("message") {
+            "function_call" | "custom_tool_call" => {
+                if round.has_results {
+                    finish_tool_round(&mut round, &mut output, true);
+                }
+                round.call(
+                    item["call_id"].as_str().unwrap_or_default(),
+                    item["type"] == "custom_tool_call",
+                );
+            }
+            "function_call_output" | "custom_tool_call_output" => {
+                if !round.answer(item["call_id"].as_str().unwrap_or_default()) {
+                    continue;
+                }
+            }
+            "message" if item["role"] == "user" || round.has_results => {
+                finish_tool_round(&mut round, &mut output, true);
+            }
+            _ => {}
+        }
+        output.push(item);
+    }
+    finish_tool_round(&mut round, &mut output, true);
+    *input = output;
+}
+
+/// Keep a batch's text before its calls and repair only known tool exchanges.
 pub(crate) fn normalize_responses_tool_rounds(body: &mut Value) {
     let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) else {
         return;
@@ -58,6 +167,7 @@ pub(crate) fn normalize_responses_tool_rounds(body: &mut Value) {
             _ => first_call = None,
         }
     }
+    repair_responses_tool_history(body);
 }
 
 /// Google can mark only the chunk opening a thought, leaving its close unmarked.
@@ -978,8 +1088,72 @@ mod tests {
             ]});
             let expected = body.clone();
             normalize_responses_tool_rounds(&mut body);
-            assert_eq!(body, expected);
+            let repaired = body["input"].as_array().unwrap();
+            let original_items: Vec<_> = repaired
+                .iter()
+                .filter(|item| item["output"] != INTERRUPTED_TOOL_RESULT)
+                .cloned()
+                .collect();
+            assert_eq!(json!(original_items), expected["input"]);
+            let missing: Vec<_> = repaired
+                .iter()
+                .filter(|item| item["output"] == INTERRUPTED_TOOL_RESULT)
+                .collect();
+            if expected["input"][1]["type"] == "function_call_output" {
+                assert!(missing.is_empty());
+            } else {
+                assert_eq!(missing.len(), 1);
+                assert_eq!(missing[0]["call_id"], "a");
+            }
         }
+    }
+
+    #[test]
+    fn tool_history_native_rounds_drop_duplicate_attachments_and_preserve_unknown_results() {
+        let first = json!({"type":"function_call_output","call_id":"a","output":[{"type":"input_image","image_url":"data:image/png;base64,Zmlyc3Q="}]});
+        let reused = json!({"type":"function_call_output","call_id":"a","output":"later answer"});
+        let unknown = json!({"type":"function_call_output","call_id":"upstream-call","output":"keep unknown result"});
+        let reasoning = json!({"type":"reasoning","encrypted_content":"opaque"});
+        let mut body = json!({"input":[
+            {"type":"function_call","call_id":"a","name":"read","arguments":"{}"},
+            first,
+            {"type":"function_call_output","call_id":"a","output":[{"type":"input_image","image_url":"data:image/png;base64,ZHVwbGljYXRl"}]},
+            reasoning,
+            {"type":"function_call","call_id":"a","name":"write","arguments":"{}"},
+            reused,
+            {"role":"user","content":"Next"},
+            unknown
+        ],"metadata":{"keep":true}});
+        normalize_responses_tool_rounds(&mut body);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 7);
+        assert_eq!(input[1], first);
+        assert_eq!(input[2], reasoning);
+        assert_eq!(input[4], reused);
+        assert_eq!(input[6], unknown);
+        let expected = body.clone();
+        normalize_responses_tool_rounds(&mut body);
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn tool_history_answers_belong_to_the_latest_call_with_that_id() {
+        let messages = json!({"messages":[
+            {"role":"assistant","tool_calls":[{"id":"a","function":{"name":"read","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"a","content":"first"},
+            {"role":"assistant","content":"The first task is done"},
+            {"role":"tool","tool_call_id":"a","content":"late duplicate"},
+            {"role":"user","content":"Next task"},
+            {"role":"assistant","tool_calls":[{"id":"a","function":{"name":"write","arguments":"{}"}}]},
+            {"role":"tool","tool_call_id":"a","content":"new answer"}
+        ]});
+        let repaired = repaired_chat_messages(&messages);
+        assert_eq!(repaired.len(), 6);
+        assert_eq!(repaired[1]["content"], "first");
+        assert_eq!(repaired[5]["content"], "new answer");
+        assert!(!repaired
+            .iter()
+            .any(|message| message["content"] == "late duplicate"));
     }
 
     #[test]

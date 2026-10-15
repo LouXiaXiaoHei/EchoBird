@@ -136,6 +136,7 @@ struct CodexSample {
 #[derive(Default)]
 pub(super) struct CodexUsage {
     previous: Option<TokenUsage>,
+    previous_owned_checkpoint: Option<(u64, TokenUsage)>,
     metadata_seen: bool,
     thread_id: Option<String>,
     forked: bool,
@@ -253,7 +254,36 @@ impl CodexUsage {
             return;
         }
         let mut ts = iso_timestamp(value.get("timestamp"));
+        let owned_fork = self.forked && self.history_start.is_some() && owns_record;
+        let duplicate_owned_checkpoint = if let Some(ordinal) = value
+            .get("ordinal")
+            .and_then(Value::as_u64)
+            .filter(|_| owned_fork)
+        {
+            let duplicate = self
+                .previous_owned_checkpoint
+                .is_some_and(|(before, usage)| {
+                    ordinal <= before
+                        || (total.input.is_some()
+                            && total.output.is_some()
+                            && total.input == usage.input
+                            && total.output == usage.output)
+                });
+            if self
+                .previous_owned_checkpoint
+                .map_or(true, |(before, _)| ordinal > before)
+            {
+                self.previous_owned_checkpoint = Some((ordinal, total));
+            }
+            duplicate
+        } else {
+            false
+        };
         let delta = match (total.input, total.output, self.previous) {
+            _ if duplicate_owned_checkpoint => None,
+            // A fork can interleave its own counter with replayed parent totals.
+            // Its measured last request remains exact, including zero usage.
+            _ if owned_fork && last.input.is_some() && last.output.is_some() => Some(last),
             (Some(input), Some(output), None) => {
                 if last.input != Some(input) || last.output != Some(output) {
                     // An initial cumulative snapshot is known for the session,
@@ -1140,6 +1170,82 @@ mod tests {
         assert_eq!(totals(&scan), (15, 5));
         assert_eq!(codex_session_totals(&path), (Some(15), Some(5)));
         assert!(scan.incomplete);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_fork_legacy_interleaved_counters_use_owned_request_usage() {
+        let dir = fixture_dir();
+        let path = dir.join("fork-interleaved.jsonl");
+        for (parent_input, parent_output, child_input, child_output) in
+            [(1000, 100, 100, 10), (100, 10, 1000, 100)]
+        {
+            let mut parent = counter(NEXT_DAY, parent_input, parent_output, 0, 0);
+            parent["ordinal"] = json!(1);
+            let mut first = counter(NEXT_DAY, child_input, child_output, 20, 2);
+            first["ordinal"] = json!(5);
+            let mut second = counter(NEXT_DAY, child_input + 25, child_output + 3, 25, 3);
+            second["ordinal"] = json!(6);
+            let mut snapshot = second.clone();
+            snapshot["ordinal"] = json!(7);
+            write_rows(
+                &path,
+                &[
+                    json!({"type":"session_meta","ordinal":0,"payload":{"id":"fixture","forked_from_id":"parent","subagent_history_start_ordinal":5}}),
+                    parent.clone(),
+                    first.clone(),
+                    parent.clone(),
+                    first.clone(),
+                    second.clone(),
+                    parent.clone(),
+                    second,
+                    parent,
+                    snapshot,
+                    first,
+                ],
+            );
+            let scan = scan_codex(&path);
+            assert_eq!(totals(&scan), (45, 5));
+            assert_eq!(codex_session_totals(&path), (Some(45), Some(5)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn codex_fork_legacy_zero_last_keeps_missing_and_partial_counter_fallbacks() {
+        let dir = fixture_dir();
+        let path = dir.join("fork-last-usage.jsonl");
+        let mut parent = counter(NEXT_DAY, 1000, 100, 0, 0);
+        parent["ordinal"] = json!(1);
+        let mut first = counter(NEXT_DAY, 1020, 102, 20, 2);
+        first["ordinal"] = json!(5);
+        let mut zero = counter(NEXT_DAY, 1040, 104, 0, 0);
+        zero["ordinal"] = json!(6);
+        let mut missing = counter(NEXT_DAY, 1045, 105, 5, 1);
+        missing["ordinal"] = json!(7);
+        missing["payload"]["info"]
+            .as_object_mut()
+            .unwrap()
+            .remove("last_token_usage");
+        let mut partial = counter(NEXT_DAY, 1048, 106, 3, 1);
+        partial["ordinal"] = json!(8);
+        partial["payload"]["info"]["last_token_usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("output_tokens");
+        write_rows(
+            &path,
+            &[
+                json!({"type":"session_meta","ordinal":0,"payload":{"id":"fixture","forked_from_id":"parent","subagent_history_start_ordinal":5}}),
+                parent,
+                first,
+                zero,
+                missing,
+                partial,
+            ],
+        );
+        assert_eq!(totals(&scan_codex(&path)), (28, 4));
+        assert_eq!(codex_session_totals(&path), (Some(28), Some(4)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

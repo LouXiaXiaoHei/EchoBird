@@ -461,18 +461,7 @@ fn effective_snapshot(auth_path: &Path, backup_path: &Path) -> Result<(Vec<u8>, 
 }
 
 fn write_private_file(path: &Path, raw: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("accountError.write|{error}"))?;
-    }
-    fs::write(path, raw).map_err(|error| format!("accountError.write|{error}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("accountError.write|{error}"))?;
-    }
-    Ok(())
+    super::native_account_files::write_private_file(path, raw)
 }
 
 fn save_snapshot(raw: &[u8], auth: &Value, store_dir: &Path) -> Result<AccountMetadata, String> {
@@ -1314,6 +1303,82 @@ async fn refresh_account_quota_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_credential_replacement_leaves_the_previous_file_intact() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-auth-write-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("auth.json");
+        let previous = root.join("previous.json");
+        fs::write(&path, b"original credential").unwrap();
+        fs::hard_link(&path, &previous).unwrap();
+        assert_eq!(fs::read(&previous).unwrap(), b"original credential");
+
+        write_private_file(&path, b"rotated credential").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"rotated credential");
+        let preserved = fs::read(&previous).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(preserved, b"original credential");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_credential_replacement_preserves_a_native_symbolic_link() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-auth-link-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let target = root.join("actual.json");
+        let path = root.join("auth.json");
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
+        std::os::unix::fs::symlink("actual.json", &path).unwrap();
+        write_private_file(&path, b"rotated credential").unwrap();
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"rotated credential");
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o750
+        );
+        write_private_file(&path, b"rotated again").unwrap();
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"rotated again");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_credential_replacement_waits_for_a_briefly_held_target() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root =
+            std::env::temp_dir().join(format!("echobird-auth-held-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("auth.json");
+        fs::write(&path, b"original credential").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        let result = write_private_file(&path, b"rotated credential");
+        release.join().unwrap();
+        let saved = fs::read(&path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(saved, b"rotated credential");
+    }
 
     #[tokio::test]
     async fn refresh_rejection_retains_credential_failure_without_replacing_tokens() {

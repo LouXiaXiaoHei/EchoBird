@@ -170,7 +170,8 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
 /// the file is missing.
 export async function getMyProjects(): Promise<unknown[]> {
   const arr = await invoke<unknown>('get_my_projects');
-  return Array.isArray(arr) ? arr : [];
+  if (!Array.isArray(arr)) throw new Error('PROJECTS_INVALID_DATA');
+  return arr;
 }
 
 /// Persist the full project registry (sent on every CRUD op).
