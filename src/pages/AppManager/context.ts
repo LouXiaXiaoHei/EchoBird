@@ -63,6 +63,9 @@ export interface AppManagerContextType {
   selectedCodexAccountId: string | null;
   setSelectedCodexAccountId: (id: string | null) => void;
   isLoadingCodexAccounts: boolean;
+  codexAccountsLoaded: boolean;
+  codexAccountsReadFailed: boolean;
+  codexAccountsMutationRevision: number;
   isAddingCodexAccount: boolean;
   codexOAuthRemainingSeconds: number;
   refreshingCodexAccountIds: Set<string>;

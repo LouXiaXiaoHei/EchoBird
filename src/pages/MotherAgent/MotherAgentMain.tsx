@@ -295,7 +295,7 @@ export function MotherAgentMain() {
           className={`absolute inset-0 overflow-y-auto slim-scroll ${showWelcome ? 'py-4' : 'p-4'}`}
         >
           {showWelcome ? (
-            <div className="grid min-h-full grid-rows-[minmax(0,0.382fr)_auto_minmax(0,0.618fr)]">
+            <div className="grid min-h-full grid-rows-[minmax(0,0.35fr)_auto_minmax(0,0.65fr)]">
               <div className="row-start-2 flex flex-col items-center gap-7">
                 <div className="flex items-center gap-3">
                   <img

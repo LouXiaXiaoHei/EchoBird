@@ -332,12 +332,17 @@ async function showAccountCenter(tools: Tool[]) {
 
 function mockAccountOrderStorage(raw?: string) {
   const values = new Map(raw ? [['echobird_account_card_order', raw]] : []);
+  const setItem = vi.fn((key: string, value: string) => void values.set(key, value));
+  const cacheWrites = vi.fn((key: string, value: string) => void values.set(key, value));
   const storage = {
     getItem: vi.fn((key: string) => values.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => void values.set(key, value)),
+    setItem: (key: string, value: string) => {
+      if (key === 'echobird_account_card_order') setItem(key, value);
+      else cacheWrites(key, value);
+    },
   };
   vi.stubGlobal('localStorage', storage);
-  return storage;
+  return { getItem: storage.getItem, setItem, cacheWrites };
 }
 
 const kiloFixture: api.KiloAccount = {
@@ -701,6 +706,183 @@ function dropAccountCard(activeId: string, overId: string | null) {
     });
   });
 }
+
+function pendingAccountList<T>() {
+  let resolve!: (rows: T[]) => void;
+  const promise = new Promise<T[]>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+async function mountAccountCenter(tools: Tool[]) {
+  useToolsStore
+    .getState()
+    .setDetectedTools(tools.map((id) => ({ id, name: id, category: 'Desktop', installed: true })));
+  useNavigationStore.getState().setActivePage('accounts');
+  await act(async () => {
+    renderer = create(
+      <AppManagerProvider>
+        <Harness center />
+      </AppManagerProvider>
+    );
+  });
+}
+
+function expectPassiveAccountNavigation() {
+  for (const [key, action] of Object.entries(api))
+    if (/^(start|refresh|switch|delete|claim|restore|apply)/.test(key) && vi.isMockFunction(action))
+      expect(action, key).not.toHaveBeenCalled();
+  expect(folderPicker).not.toHaveBeenCalled();
+  expect(shellOpen).not.toHaveBeenCalled();
+  expect(state.applyError).toBeNull();
+  expect(applyErrorEvents.filter(Boolean)).toEqual([]);
+}
+
+it('Account Center: first load keeps the skeleton until all installed providers settle', async () => {
+  const storage = mockAccountOrderStorage();
+  const codex = pendingAccountList<api.CodexAccount>();
+  const workBuddy = pendingAccountList<api.WorkBuddyAccount>();
+  vi.mocked(api.listCodexAccounts).mockReturnValueOnce(codex.promise);
+  vi.mocked(api.listWorkBuddyAccounts).mockReturnValueOnce(workBuddy.promise);
+  await mountAccountCenter(['codex', 'workbuddy']);
+  expect(accountCardIds()).toEqual([]);
+  expect(renderer.root.findByProps({ 'aria-label': 'accountCenter.loading' })).toBeDefined();
+  expect(api.listCodexAccounts).not.toHaveBeenCalled();
+  expect(api.listWorkBuddyAccounts).not.toHaveBeenCalled();
+  await tick();
+  expect(api.listCodexAccounts).toHaveBeenCalledTimes(1);
+  expect(api.listWorkBuddyAccounts).toHaveBeenCalledTimes(1);
+  await act(async () => workBuddy.resolve([rewardAccount]));
+  expect(accountCardIds()).toEqual([]);
+  expect(renderer.root.findByProps({ 'aria-label': 'accountCenter.loading' })).toBeDefined();
+  expect(storage.cacheWrites).not.toHaveBeenCalled();
+  const claimAll = renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' });
+  const refreshAll = renderer.root.findByProps({ 'aria-label': 'accountCenter.refreshAll' });
+  expect(claimAll.props.disabled).toBe(true);
+  expect(refreshAll.props.disabled).toBe(true);
+  await act(async () => {
+    await Promise.all([claimAll.props.onClick(), refreshAll.props.onClick()]);
+  });
+  expect(api.claimWorkBuddyDailyCredits).not.toHaveBeenCalled();
+  expect(api.refreshWorkBuddyAccountQuota).not.toHaveBeenCalled();
+  expect(api.refreshCodexAccountQuota).not.toHaveBeenCalled();
+  await act(async () =>
+    codex.resolve([{ id: 'first', email: 'first@example.test', active: false }])
+  );
+  expect(accountCardIds()).toEqual(['codex:first', 'workbuddy:reward']);
+  expect(renderer.root.findAllByProps({ 'aria-label': 'accountCenter.loading' })).toEqual([]);
+  expect(claimAll.props.disabled).toBe(false);
+  expect(refreshAll.props.disabled).toBe(false);
+  expect(storage.cacheWrites).toHaveBeenCalledTimes(1);
+  expectPassiveAccountNavigation();
+});
+
+it('Account Center: remount shows the persisted complete grid and replaces it only after every background read', async () => {
+  mockAccountOrderStorage();
+  vi.mocked(api.listCodexAccounts).mockResolvedValue([
+    { id: 'first', email: 'first@example.test', active: false },
+  ]);
+  vi.mocked(api.listDeepSeekAccounts).mockResolvedValue([
+    { id: 'second', name: 'Second', active: false, balances: null },
+  ]);
+  await mountAccountCenter(['codex', 'dsh']);
+  await tick();
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  act(() => renderer.unmount());
+  const codex = pendingAccountList<api.CodexAccount>();
+  const deepSeek = pendingAccountList<api.DeepSeekAccount>();
+  vi.mocked(api.listCodexAccounts).mockReturnValueOnce(codex.promise);
+  vi.mocked(api.listDeepSeekAccounts).mockReturnValueOnce(deepSeek.promise);
+  await mountAccountCenter(['codex', 'dsh']);
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  expect(renderer.root.findAllByProps({ 'aria-label': 'accountCenter.loading' })).toEqual([]);
+  expect(
+    renderer.root.findByProps({ 'aria-label': 'agent.refreshAccount first@example.test' }).props
+      .disabled
+  ).toBe(true);
+  await tick();
+  await act(async () => codex.resolve([{ id: 'new', email: 'new@example.test', active: false }]));
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  expect(renderer.root.findAllByProps({ 'aria-label': 'model.dragSort new@example.test' })).toEqual(
+    []
+  );
+  const claimAll = renderer.root.findByProps({ 'aria-label': 'accountCenter.claimAll' });
+  const refreshAll = renderer.root.findByProps({ 'aria-label': 'accountCenter.refreshAll' });
+  expect(claimAll.props.disabled).toBe(true);
+  expect(refreshAll.props.disabled).toBe(true);
+  await act(async () => {
+    await claimAll.props.onClick();
+    await refreshAll.props.onClick();
+  });
+  expect(api.refreshCodexAccountQuota).not.toHaveBeenCalled();
+  expect(api.refreshDeepSeekAccountQuota).not.toHaveBeenCalled();
+  await act(async () =>
+    deepSeek.resolve([{ id: 'third', name: 'Third', active: false, balances: null }])
+  );
+  expect(accountCardIds()).toEqual(['codex:new', 'dsh:third']);
+  expect(
+    renderer.root.findByProps({ 'aria-label': 'agent.refreshAccount new@example.test' }).props
+      .disabled
+  ).toBe(false);
+  expect(claimAll.props.disabled).toBe(false);
+  expect(refreshAll.props.disabled).toBe(false);
+  expectPassiveAccountNavigation();
+});
+
+it('Account Center: returning before reload starts preserves the complete cache and ignores an older navigation read', async () => {
+  const storage = mockAccountOrderStorage();
+  vi.mocked(api.listCodexAccounts).mockResolvedValue([
+    { id: 'first', email: 'first@example.test', active: false },
+  ]);
+  vi.mocked(api.listDeepSeekAccounts).mockResolvedValue([
+    { id: 'second', name: 'Second', active: false, balances: null },
+  ]);
+  await mountAccountCenter(['codex', 'dsh']);
+  await tick();
+  const initialWrites = storage.cacheWrites.mock.calls.length;
+  const oldCodex = pendingAccountList<api.CodexAccount>();
+  const oldDeepSeek = pendingAccountList<api.DeepSeekAccount>();
+  vi.mocked(api.listCodexAccounts).mockReturnValueOnce(oldCodex.promise);
+  vi.mocked(api.listDeepSeekAccounts).mockReturnValueOnce(oldDeepSeek.promise);
+  act(() => useNavigationStore.getState().setActivePage('models'));
+  await tick();
+  act(() => useNavigationStore.getState().setActivePage('accounts'));
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  expect(api.listCodexAccounts).toHaveBeenCalledTimes(1);
+  await tick();
+  await act(async () =>
+    oldCodex.resolve([{ id: 'stale', email: 'stale@example.test', active: false }])
+  );
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  act(() => useNavigationStore.getState().setActivePage('models'));
+  await tick();
+  const codex = pendingAccountList<api.CodexAccount>();
+  const deepSeek = pendingAccountList<api.DeepSeekAccount>();
+  vi.mocked(api.listCodexAccounts).mockReturnValueOnce(codex.promise);
+  vi.mocked(api.listDeepSeekAccounts).mockReturnValueOnce(deepSeek.promise);
+  act(() => useNavigationStore.getState().setActivePage('accounts'));
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  expect(
+    renderer.root.findByProps({ 'aria-label': 'model.dragSort first@example.test' }).props.disabled
+  ).toBe(true);
+  expect(storage.cacheWrites).toHaveBeenCalledTimes(initialWrites);
+  await tick();
+  await act(async () =>
+    oldDeepSeek.resolve([{ id: 'stale', name: 'Stale', active: false, balances: null }])
+  );
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  expect(storage.cacheWrites).toHaveBeenCalledTimes(initialWrites);
+  await act(async () =>
+    codex.resolve([{ id: 'current', email: 'current@example.test', active: false }])
+  );
+  expect(accountCardIds()).toEqual(['codex:first', 'dsh:second']);
+  await act(async () =>
+    deepSeek.resolve([{ id: 'current', name: 'Current', active: false, balances: null }])
+  );
+  expect(accountCardIds()).toEqual(['codex:current', 'dsh:current']);
+  expectPassiveAccountNavigation();
+});
 
 it('Account Center: saves cross-provider card order, restores it on remount and isolates refresh', async () => {
   const storage = mockAccountOrderStorage();

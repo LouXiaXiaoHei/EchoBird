@@ -35,6 +35,7 @@ export interface AccountCardData {
   subscriptionEndAt?: number | null;
   metrics: AccountMetric[];
   refreshing: boolean;
+  pending?: boolean;
   authorizationFailed: boolean;
   refresh: (onError?: (error: unknown) => void) => Promise<void>;
   claim?: () => Promise<unknown>;
@@ -54,6 +55,9 @@ export interface AccountProvider {
   installed: boolean;
   busy: boolean;
   loading: boolean;
+  loaded?: boolean;
+  readFailed?: boolean;
+  mutationRevision?: number;
   remainingSeconds: number;
   waitingLabel?: string;
   add: () => void;
@@ -65,6 +69,9 @@ interface AccountGroup<A> {
   accounts: A[];
   busy: boolean;
   loading: boolean;
+  loaded?: boolean;
+  readFailed?: boolean;
+  mutationRevision?: number;
   remainingSeconds: number;
   awaitingClientExit?: boolean;
   refreshing: Set<string>;
@@ -168,6 +175,9 @@ export function accountCenterProviders(
     installed: context.detectedTools.some((tool) => toolIds.includes(tool.id) && tool.installed),
     busy: group.busy,
     loading: group.loading,
+    loaded: group.loaded,
+    readFailed: group.readFailed,
+    mutationRevision: group.mutationRevision,
     remainingSeconds: group.remainingSeconds,
     waitingLabel:
       id === 'cue' && group.busy
@@ -220,6 +230,9 @@ export function accountCenterProviders(
         accounts: context.codexAccounts,
         busy: context.isAddingCodexAccount,
         loading: context.isLoadingCodexAccounts,
+        loaded: context.codexAccountsLoaded,
+        readFailed: context.codexAccountsReadFailed,
+        mutationRevision: context.codexAccountsMutationRevision,
         remainingSeconds: context.codexOAuthRemainingSeconds,
         refreshing: context.refreshingCodexAccountIds,
         authorizationFailedIds: context.codexAuthorizationFailedIds,

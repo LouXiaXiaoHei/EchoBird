@@ -27,6 +27,8 @@ import {
   workBuddyClaimedToday,
 } from '../AppManager/workBuddyDailyCredits';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useToolsStore } from '../../stores/toolsStore';
+import { useAccountCardCache } from './useAccountCardCache';
 import { ZCodeAccountProviderChoice } from '../AppManager/ZCodeAccountSection';
 import { MinimaxAccountRegionChoice } from '../AppManager/MinimaxAccountSection';
 import { DirectoryRow } from '../../components/DirectoryRow';
@@ -91,6 +93,7 @@ export function AccountCard({
               claimed={claimed}
               disabled={
                 !provider.installed ||
+                account.pending ||
                 provider.busy ||
                 account.refreshing ||
                 (currentClaimStatus && account.claimDisabled)
@@ -101,7 +104,7 @@ export function AccountCard({
           <AccountSectionActions
             email={account.identity}
             refreshing={account.refreshing}
-            disabled={!provider.installed}
+            disabled={!provider.installed || account.pending}
             onRefresh={account.refresh}
             onDelete={account.remove}
           />
@@ -246,13 +249,18 @@ export function AccountCard({
 export function AccountCenterMain() {
   const context = useAppManager();
   const { t, locale } = useI18n();
-  const providers = accountCenterProviders(context, t, locale);
   const activePage = useNavigationStore((state) => state.activePage);
+  const toolsReady = useToolsStore((state) => state.hasScanned);
+  const { providers, loading } = useAccountCardCache(accountCenterProviders(context, t, locale), {
+    locale,
+    active: activePage === 'accounts',
+    toolsReady,
+    scanning: context.isScanning,
+  });
   const claimedToday = useWorkBuddyClaimedToday(
     activePage === 'accounts' &&
       providers.some((provider) => provider.accounts.some((account) => account.claim))
   );
-  const loading = providers.some((provider) => provider.loading);
   const { accountCardOrder: accountOrder, setAccountCardOrder: setAccountOrder } = context;
   const orderIndex = new Map(accountOrder.map((id, index) => [id, index]));
   const accounts = providers
@@ -368,6 +376,7 @@ export function AccountCenterTitleActions() {
   const context = useAppManager();
   const { t, locale } = useI18n();
   const activePage = useNavigationStore((state) => state.activePage);
+  const toolsReady = useToolsStore((state) => state.hasScanned) || context.detectedTools.length > 0;
   const providers = accountCenterProviders(context, t, locale);
   const latest = useRef(providers);
   const batch = useRef<symbol | null>(null);
@@ -393,9 +402,14 @@ export function AccountCenterTitleActions() {
       provider.accounts.map((account) => ({ providerId: provider.id, account }))
     );
   const blocked =
+    !toolsReady ||
+    context.isScanning ||
     context.isLaunching ||
     providers.some(
-      (provider) => provider.busy || provider.accounts.some((account) => account.refreshing)
+      (provider) =>
+        (provider.loading && !provider.loaded) ||
+        provider.busy ||
+        provider.accounts.some((account) => account.refreshing)
     );
   const run = async (action: 'refresh' | 'claim') => {
     if (batch.current || blocked || activePage !== 'accounts' || !accounts.length) return;
@@ -416,7 +430,14 @@ export function AccountCenterTitleActions() {
           break;
         const provider = latest.current.find((provider) => provider.id === target.providerId);
         const account = provider?.accounts.find((account) => account.id === target.account.id);
-        if (!provider?.installed || provider.busy || !account || account.refreshing) continue;
+        if (
+          !provider?.installed ||
+          (provider.loading && !provider.loaded) ||
+          provider.busy ||
+          !account ||
+          account.refreshing
+        )
+          continue;
         if (action === 'claim') {
           if (account.claim && !claimedProviders.has(provider.id)) {
             const deviceClaimed = await account.claim();
