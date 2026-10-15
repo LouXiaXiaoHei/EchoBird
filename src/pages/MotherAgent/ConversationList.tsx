@@ -87,9 +87,9 @@ export function ConversationList() {
                   event.stopPropagation();
                   if (!isProcessing) void deleteConversation(conversation.id);
                 }}
-                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-cyber-text-muted/70 hover:text-red-500 transition-colors"
+                className="absolute right-3 top-1/2 -translate-y-1/2 p-0.5 text-cyber-text-secondary hover:text-red-500 transition-colors"
               >
-                <Trash2 size={14} />
+                <Trash2 size={20} />
               </button>
             </div>
           );
