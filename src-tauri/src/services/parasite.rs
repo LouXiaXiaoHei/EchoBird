@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -201,38 +201,57 @@ fn clear_session_file(path: &Path) -> Result<(), String> {
 pub async fn detect_installed() -> Vec<String> {
     let mut installed = Vec::new();
     for agent in AGENTS {
-        if probe(agent).await {
+        if probe(agent, agent_command(agent).await).await {
             installed.push(agent.id.to_string());
         }
     }
     installed
 }
 
-async fn probe(agent: &ParasiteAgent) -> bool {
-    let mut cmd = crate::utils::process::async_command(agent.command);
-    cmd.args(agent.detect_args);
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+async fn agent_command(agent: &ParasiteAgent) -> tokio::process::Command {
+    let executable = match crate::services::tool_manager::get_tool_exe_path(agent.id) {
+        Some(path) => Some(path),
+        None => crate::utils::platform::get_command_path(agent.command).await,
+    };
+    command_at(agent, executable.as_deref())
+}
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), cmd.status()).await {
+fn command_at(agent: &ParasiteAgent, executable: Option<&str>) -> tokio::process::Command {
+    crate::utils::process::async_command(executable.unwrap_or(agent.command))
+}
+
+async fn probe(agent: &ParasiteAgent, mut cmd: tokio::process::Command) -> bool {
+    cmd.args(agent.detect_args);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let Ok(mut child) = cmd.spawn() else {
+        return false;
+    };
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
         Ok(Ok(status)) => status.success(),
-        _ => false,
+        _ => {
+            stop_child(&mut child).await;
+            false
+        }
     }
 }
 
 // ── Sending a Message ──
 
-/// Build the full arg list for a turn. Substitutes `{sessionId}` in
+/// Build the arg list for a turn. Substitutes `{sessionId}` in
 /// `resume_args_template` when continuing an existing session; otherwise
 /// builds from `args_template` and generates a fresh UUID for `--session-id`
-/// so the next turn can `--resume` it. Appends the user message as the
-/// trailing positional arg.
+/// so the next turn can `--resume` it. The message travels over stdin so
+/// Windows batch launchers never interpret its content as shell arguments.
 ///
 /// The wrapped agent is invoked WITHOUT a `--model` flag — by design,
 /// Mother Agent's Connect mode lets the wrapped agent use whatever model
 /// is in its own config (set via App Desktop or the agent's own setup).
 fn build_args(
     agent: &ParasiteAgent,
-    message: &str,
     existing_session_id: Option<&str>,
 ) -> (Vec<String>, Option<String>) {
     let mut args: Vec<String>;
@@ -256,7 +275,6 @@ fn build_args(
         }
     }
 
-    args.push(message.to_string());
     (args, effective_session)
 }
 
@@ -313,7 +331,7 @@ pub async fn send_message(
         },
     );
 
-    let (args, effective_session_id) = build_args(&agent, &message, existing_session_id.as_deref());
+    let (args, effective_session_id) = build_args(&agent, existing_session_id.as_deref());
 
     log::info!(
         "[Parasite] spawn {} {:?}",
@@ -323,14 +341,14 @@ pub async fn send_message(
             .collect::<Vec<_>>()
     );
 
-    let mut cmd = crate::utils::process::async_command(agent.command);
+    let mut cmd = agent_command(&agent).await;
     cmd.args(&args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("Failed to spawn {}: {}", agent.command, e);
@@ -352,34 +370,7 @@ pub async fn send_message(
         }
     };
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-
-    let outcome = tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => {
-            log::info!("[Parasite] cancelled — killing subprocess");
-            let _ = child.kill().await;
-            ParasiteOutcome::Cancelled
-        }
-        result = async {
-            let mut stdout_buf = String::new();
-            let mut stderr_buf = String::new();
-            if let Some(ref mut so) = stdout {
-                let _ = so.read_to_string(&mut stdout_buf).await;
-            }
-            if let Some(ref mut se) = stderr {
-                let _ = se.read_to_string(&mut stderr_buf).await;
-            }
-            let status = child.wait().await.map_err(|e| format!("wait error: {}", e))?;
-            Ok::<_, String>((status, stdout_buf, stderr_buf))
-        } => {
-            match result {
-                Ok((status, out, err)) => ParasiteOutcome::Completed { status, stdout: out, stderr: err },
-                Err(e) => ParasiteOutcome::SpawnError(e),
-            }
-        }
-    };
+    let outcome = run_child(child, &message, &cancel_token).await;
 
     match outcome {
         ParasiteOutcome::Cancelled => {
@@ -485,6 +476,72 @@ enum ParasiteOutcome {
     },
 }
 
+async fn stop_child(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let (Some(pid), Some(handle)) = (child.id(), child.raw_handle()) {
+        let handle = unsafe { std::os::windows::io::BorrowedHandle::borrow_raw(handle) };
+        if let Ok((created, exited)) =
+            crate::services::process_manager::owned_windows_process_times(&handle)
+        {
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::services::process_manager::stop_owned_windows_tree(pid, created, exited)
+            })
+            .await;
+        }
+    }
+    let _ = child.kill().await;
+}
+
+async fn run_child(
+    mut child: tokio::process::Child,
+    message: &str,
+    cancel: &CancellationToken,
+) -> ParasiteOutcome {
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let outcome = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => ParasiteOutcome::Cancelled,
+        result = async {
+            let write_input = async {
+                if let Some(mut input) = stdin {
+                    input.write_all(message.as_bytes()).await?;
+                    input.shutdown().await?;
+                }
+                Ok::<_, std::io::Error>(())
+            };
+            let read_stdout = async {
+                let mut output = String::new();
+                if let Some(mut stdout) = stdout {
+                    let _ = stdout.read_to_string(&mut output).await;
+                }
+                output
+            };
+            let read_stderr = async {
+                let mut output = String::new();
+                if let Some(mut stderr) = stderr {
+                    let _ = stderr.read_to_string(&mut output).await;
+                }
+                output
+            };
+            let (input_result, stdout, stderr) = tokio::join!(write_input, read_stdout, read_stderr);
+            let status = child.wait().await.map_err(|e| format!("wait error: {e}"))?;
+            if status.success() && !parse_claude_json(&stdout).is_error {
+                input_result.map_err(|error| format!("CLI input error: {error}"))?;
+            }
+            Ok::<_, String>((status, stdout, stderr))
+        } => match result {
+            Ok((status, stdout, stderr)) => ParasiteOutcome::Completed { status, stdout, stderr },
+            Err(error) => ParasiteOutcome::SpawnError(error),
+        }
+    };
+    if !matches!(outcome, ParasiteOutcome::Completed { .. }) {
+        stop_child(&mut child).await;
+    }
+    outcome
+}
+
 async fn finish_session(sessions: &SharedParasiteSessions, key: &str, session_id: Option<String>) {
     let mut map = sessions.lock().await;
     if let Some(sess) = map.get_mut(key) {
@@ -588,6 +645,220 @@ fn safe_truncate(s: &str, max_chars: usize) -> &str {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    struct CliFixture {
+        directory: PathBuf,
+        executable: String,
+        agent: ParasiteAgent,
+    }
+
+    #[cfg(windows)]
+    impl CliFixture {
+        fn new() -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("echobird-parasite-cli-{}", uuid::Uuid::new_v4()));
+            let scripts = directory.join("代理 fixture & O'Brien");
+            std::fs::create_dir_all(&scripts).unwrap();
+            std::fs::write(
+                scripts.join("probe.ps1"),
+                r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+[Console]::InputEncoding = New-Object System.Text.UTF8Encoding($false)
+$mode = $env:ECHOBIRD_PARASITE_FIXTURE_MODE
+if ($args[0] -eq '--version') {
+    if ($mode -eq 'fail') { exit 7 }
+    [Console]::Out.Write('fixture 1.0.0'); exit 0
+}
+if ($mode -eq 'blocked') {
+    [IO.File]::WriteAllText($env:ECHOBIRD_PARASITE_FIXTURE_READY, "$PID")
+    Start-Sleep -Seconds 60; exit 0
+}
+if ($mode -eq 'early-error') { [Console]::Error.Write('fixture configuration failed'); exit 9 }
+if ($mode -eq 'json-error') {
+    [Console]::Out.Write('{"type":"result","is_error":true,"result":"fixture authentication failed"}'); exit 0
+}
+if ($mode -eq 'duplex') {
+    [Console]::Out.Write(('o' * 131072)); [Console]::Error.Write(('e' * 131072))
+}
+$inputText = [Console]::In.ReadToEnd()
+@{ arguments=@($args); input=$inputText } | ConvertTo-Json -Compress
+"#,
+            )
+            .unwrap();
+            let executable = scripts.join("fixture.cmd");
+            std::fs::write(
+                &executable,
+                "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0probe.ps1\" %*\r\n",
+            )
+            .unwrap();
+            Self {
+                directory,
+                executable: executable.to_str().unwrap().to_string(),
+                agent: ParasiteAgent {
+                    command: "echobird-missing-agent-7bd96c59",
+                    ..AGENTS[0]
+                },
+            }
+        }
+
+        fn turn(&self, args: &[String], mode: &str) -> tokio::process::Child {
+            command_at(&self.agent, Some(&self.executable))
+                .args(args)
+                .env("ECHOBIRD_PARASITE_FIXTURE_MODE", mode)
+                .env(
+                    "ECHOBIRD_PARASITE_FIXTURE_READY",
+                    self.directory.join("ready"),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for CliFixture {
+        fn drop(&mut self) {
+            if let (Ok(path), Ok(parent)) = (
+                std::fs::canonicalize(&self.directory),
+                std::fs::canonicalize(std::env::temp_dir()),
+            ) {
+                if path.parent() == Some(parent.as_path()) {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn resolved_cli_path_drives_detection_and_preserves_multiline_turns() {
+        let fixture = CliFixture::new();
+        let error = command_at(&fixture.agent, None)
+            .arg("--version")
+            .output()
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            probe(
+                &fixture.agent,
+                command_at(&fixture.agent, Some(&fixture.executable))
+            )
+            .await
+        );
+        let mut failing = command_at(&fixture.agent, Some(&fixture.executable));
+        failing.env("ECHOBIRD_PARASITE_FIXTURE_MODE", "fail");
+        assert!(!probe(&fixture.agent, failing).await);
+        let missing = fixture.directory.join("missing.cmd");
+        assert!(!probe(&fixture.agent, command_at(&fixture.agent, missing.to_str())).await);
+
+        let message =
+            "第一行 & | ^ < > %SystemRoot% ! \"quoted\" 'single'\r\n第二行 $(literal) `ticks`";
+        for session in [None, Some("fixture-resume-session")] {
+            let (args, effective) = build_args(&fixture.agent, session);
+            assert!(!args.iter().any(|arg| arg == message || arg == "--model"));
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                run_child(fixture.turn(&args, ""), message, &CancellationToken::new()),
+            )
+            .await
+            .unwrap();
+            let ParasiteOutcome::Completed {
+                status,
+                stdout,
+                stderr,
+            } = outcome
+            else {
+                panic!("fixture turn did not complete");
+            };
+            assert!(status.success(), "{stderr}");
+            let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(output["input"], message);
+            assert_eq!(output["arguments"], serde_json::json!(args));
+            if let Some(session) = session {
+                assert_eq!(effective.as_deref(), Some(session));
+                assert!(args.contains(&"--resume".to_string()));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cli_stdin_handles_large_duplex_output_early_errors_and_cancellation() {
+        use std::time::Duration;
+
+        let fixture = CliFixture::new();
+        let (args, _) = build_args(&fixture.agent, None);
+        let message = "multiline & %SystemRoot% \"quoted\"\n".repeat(32768);
+        for mode in ["duplex", "early-error", "json-error"] {
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(15),
+                run_child(
+                    fixture.turn(&args, mode),
+                    &message,
+                    &CancellationToken::new(),
+                ),
+            )
+            .await
+            .unwrap();
+            let ParasiteOutcome::Completed {
+                status,
+                stdout,
+                stderr,
+            } = outcome
+            else {
+                panic!("fixture output was replaced by an input error");
+            };
+            match mode {
+                "duplex" => {
+                    assert!(status.success());
+                    assert_eq!(stderr, "e".repeat(131072));
+                    let output: serde_json::Value =
+                        serde_json::from_str(&stdout[131072..]).unwrap();
+                    assert_eq!(output["input"], message);
+                }
+                "early-error" => {
+                    assert_eq!(status.code(), Some(9));
+                    assert_eq!(stderr, "fixture configuration failed");
+                }
+                _ => assert!(parse_claude_json(&stdout).is_error),
+            }
+        }
+
+        let cancel = CancellationToken::new();
+        let work = run_child(fixture.turn(&args, "blocked"), &message, &cancel);
+        let interrupt = async {
+            let ready = fixture.directory.join("ready");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !ready.exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            cancel.cancel();
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::join!(work, interrupt)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(outcome, ParasiteOutcome::Cancelled));
+        let child_pid = std::fs::read_to_string(fixture.directory.join("ready")).unwrap();
+        let stopped = crate::utils::process::async_command("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "if(Get-Process -Id $env:ECHOBIRD_PARASITE_CHILD -ErrorAction SilentlyContinue){exit 1}"])
+            .env("ECHOBIRD_PARASITE_CHILD", child_pid)
+            .status()
+            .await
+            .unwrap();
+        assert!(
+            stopped.success(),
+            "cancel left the owned batch child running"
+        );
+    }
+
     #[test]
     fn clearing_resume_target_handles_missing_files_and_reports_deletion_failure() {
         let directory =
@@ -679,7 +950,7 @@ mod tests {
 
         let restored = load_session_from_file(&first).unwrap();
         let agent = lookup_agent("claudecode").unwrap();
-        let (args, session_id) = build_args(&agent, "follow up", Some(&restored));
+        let (args, session_id) = build_args(&agent, Some(&restored));
         assert_eq!(session_id.as_deref(), Some("native-session-a"));
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"native-session-a".to_string()));
@@ -723,23 +994,23 @@ mod tests {
     #[test]
     fn claude_args_new_session_generates_session_id() {
         let agent = lookup_agent("claudecode").unwrap();
-        let (args, sid) = build_args(&agent, "ping", None);
+        let (args, sid) = build_args(&agent, None);
         assert!(sid.is_some(), "fresh session must get a generated id");
         let sid = sid.unwrap();
         assert!(args.contains(&"--session-id".to_string()));
         assert!(args.contains(&sid));
-        assert_eq!(args.last().map(|s| s.as_str()), Some("ping"));
+        assert_eq!(args.last(), Some(&sid));
     }
 
     #[test]
     fn claude_args_resume_uses_existing_session_id() {
         let agent = lookup_agent("claudecode").unwrap();
-        let (args, sid) = build_args(&agent, "follow up", Some("sess-abc"));
+        let (args, sid) = build_args(&agent, Some("sess-abc"));
         assert_eq!(sid.as_deref(), Some("sess-abc"));
         assert!(args.contains(&"--resume".to_string()));
         assert!(args.contains(&"sess-abc".to_string()));
         assert!(!args.iter().any(|a| a.contains("{sessionId}")));
-        assert_eq!(args.last().map(|s| s.as_str()), Some("follow up"));
+        assert_eq!(args.last().map(|s| s.as_str()), Some("sess-abc"));
     }
 
     #[test]
@@ -747,7 +1018,7 @@ mod tests {
         // Connect mode intentionally lets Claude Code use its own configured
         // model — no per-turn override — so --model should never appear.
         let agent = lookup_agent("claudecode").unwrap();
-        let (args, _) = build_args(&agent, "hi", None);
+        let (args, _) = build_args(&agent, None);
         assert!(!args.contains(&"--model".to_string()));
     }
 
