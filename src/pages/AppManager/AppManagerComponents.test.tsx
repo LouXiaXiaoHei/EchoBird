@@ -1,8 +1,11 @@
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
+import * as api from '../../api/tauri';
 import type { LocalTool, ModelConfig } from '../../api/types';
 import type { TKey } from '../../i18n';
+import { ModelListCard } from '../../components/ModelListCard';
 import vscodeDefinition from '../../../tools/vscode/paths.json';
 import qoderDefinition from '../../../tools/qoder/paths.json';
 import qoderCnDefinition from '../../../tools/qodercn/paths.json';
@@ -92,24 +95,27 @@ describe('ModelListSection', () => {
     expect(markup).toContain('Cloud Model');
     expect(markup).toContain('Anthropic Official');
   });
-  it('hides the router when smart routing is turned off', async () => {
-    vi.stubGlobal('__APP_EDITION__', 'full');
-    const { ModelListSection } = await import('./AppManagerComponents');
-    const markup = renderToStaticMarkup(
-      <ModelListSection
-        smartRouterEnabled={false}
-        selectedToolData={tool}
-        userModels={models}
-        toolModelConfig={{ 'test-tool': 'smart-router' }}
-        selectedTool="test-tool"
-        handleSelectModel={vi.fn()}
-        t={(key) => key}
-      />
-    );
-    expect(markup).not.toContain('Auto Router');
-    expect(markup).not.toContain('127.0.0.1:53683');
-    expect(markup).toContain('Cloud Model');
-  });
+  it.each(['test-tool', 'codex', 'chatgptdesktop'])(
+    'hides the router for %s when smart routing is turned off',
+    async (toolId) => {
+      vi.stubGlobal('__APP_EDITION__', 'full');
+      const { ModelListSection } = await import('./AppManagerComponents');
+      const markup = renderToStaticMarkup(
+        <ModelListSection
+          smartRouterEnabled={false}
+          selectedToolData={{ ...tool, id: toolId }}
+          userModels={models}
+          toolModelConfig={{ [toolId]: 'smart-router' }}
+          selectedTool={toolId}
+          handleSelectModel={vi.fn()}
+          t={(key) => key}
+        />
+      );
+      expect(markup).not.toContain('Auto Router');
+      expect(markup).not.toContain('127.0.0.1:53683');
+      expect(markup).toContain('Cloud Model');
+    }
+  );
   it('renders smart, local, and cloud models as one ordered list with compact badges', async () => {
     vi.stubGlobal('__APP_EDITION__', 'full');
     const { ModelListSection } = await import('./AppManagerComponents');
@@ -187,7 +193,7 @@ describe('ModelListSection', () => {
   });
 
   it.each(['codex', 'chatgptdesktop'])(
-    'hides Chat Completions-only local endpoints from %s',
+    'shows the Responses-capable router and hides the Chat-only local server from %s',
     async (toolId) => {
       vi.stubGlobal('__APP_EDITION__', 'full');
       const { ModelListSection } = await import('./AppManagerComponents');
@@ -202,10 +208,48 @@ describe('ModelListSection', () => {
         />
       );
 
-      expect(markup).not.toContain('Auto Router');
+      expect(markup).toContain('Auto Router');
+      expect(markup).toContain('127.0.0.1:53683/v1');
       expect(markup).not.toContain('Local Model');
       expect(markup).not.toContain('OpenAI Official');
       expect(markup).toContain('Cloud Model');
+    }
+  );
+
+  it.each(['codex', 'chatgptdesktop'])(
+    'selects the exact router card for %s without applying configuration',
+    async (toolId) => {
+      vi.stubGlobal('__APP_EDITION__', 'full');
+      const { ModelListSection } = await import('./AppManagerComponents');
+      const selectModel = vi.fn();
+      const applyModel = vi.spyOn(api, 'applyModelToTool');
+      const router = { ...models[2], modelId: 'auto' };
+      let renderer: ReactTestRenderer | undefined;
+      try {
+        act(() => {
+          renderer = create(
+            <ModelListSection
+              selectedToolData={{ ...tool, id: toolId }}
+              userModels={[router]}
+              toolModelConfig={{}}
+              selectedTool={toolId}
+              handleSelectModel={selectModel}
+              t={(key) => key}
+            />
+          );
+        });
+        expect(selectModel).not.toHaveBeenCalled();
+        expect(applyModel).not.toHaveBeenCalled();
+        const card = renderer!.root.findByType(ModelListCard);
+        expect(card.props.model).toEqual(router);
+        expect(card.props.subtitle).toBe('127.0.0.1:53683/v1');
+        act(() => card.findByType('button').props.onClick());
+        expect(selectModel).toHaveBeenCalledExactlyOnceWith(toolId, 'smart-router');
+        expect(applyModel).not.toHaveBeenCalled();
+      } finally {
+        act(() => renderer?.unmount());
+        applyModel.mockRestore();
+      }
     }
   );
 

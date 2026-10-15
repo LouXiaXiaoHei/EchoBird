@@ -591,9 +591,7 @@ function isModelCompatibleWithTool(
   selectedTool: string | null
 ): boolean {
   const requiresResponses = selectedTool === 'codex' || selectedTool === 'chatgptdesktop';
-  const isChatOnlyLocalEndpoint =
-    model.internalId === 'local-server' || model.internalId === 'smart-router';
-  if (requiresResponses && isChatOnlyLocalEndpoint) return false;
+  if (requiresResponses && model.internalId === 'local-server') return false;
 
   const hasOpenAI = toolProtocols.includes('openai') && !!model.baseUrl;
   const hasAnthropic = toolProtocols.includes('anthropic') && !!model.anthropicUrl;

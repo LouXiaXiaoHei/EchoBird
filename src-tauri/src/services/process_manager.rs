@@ -584,18 +584,15 @@ impl ProcessManager {
             // (npm-installed tools like openclaw.cmd, codex.cmd, opencode.cmd).
             // Resolve cmd.exe via %COMSPEC% / %SystemRoot%\System32 instead of
             // relying on PATH — some users have System32 stripped from PATH.
-            let mut cmd = if tool_id == "musecode" {
-                musecode_windows_terminal(&full_command, &work_dir)
-            } else if let Some(executable) = &literal_executable {
+            let independent_terminal = literal_executable.is_none() && tool_id != "kilo";
+            let mut cmd = if let Some(executable) = &literal_executable {
                 copilot_native_command(executable)
             } else if tool_id == "kilo" {
                 let runtime = crate::services::tool_manager::get_kilo_runtime_path()
                     .ok_or("Kilo CLI executable not found")?;
                 kilo_native_command(&runtime, model_id.as_deref())
             } else {
-                let mut cmd = Command::new(resolve_cmd_exe());
-                cmd.args(["/C", &full_command]);
-                cmd
+                windows_cli_terminal(&full_command, &work_dir)
             };
             cmd.current_dir(&work_dir);
 
@@ -641,18 +638,25 @@ impl ProcessManager {
                 cmd.env("OPENAI_BASE_URL", url);
             }
 
-            let pid = if tool_id == "musecode" {
+            let pid = if independent_terminal {
+                let tool_name = match tool_id {
+                    "musecode" => "Muse Code",
+                    "claudecode" => "Claude Code",
+                    "omp" => "Oh My Pi",
+                    "opencode" => "OpenCode",
+                    _ => tool_id,
+                };
                 let output = cmd.output().map_err(|e| format!("Spawn error: {e}"))?;
                 if !output.status.success() {
                     return Err(format!(
-                        "Failed to launch Muse Code: {}",
+                        "Failed to launch {tool_name}: {}",
                         String::from_utf8_lossy(&output.stderr).trim()
                     ));
                 }
                 String::from_utf8_lossy(&output.stdout)
                     .trim()
                     .parse::<u32>()
-                    .map_err(|e| format!("Failed to read Muse Code terminal PID: {e}"))?
+                    .map_err(|e| format!("Failed to read {tool_name} terminal PID: {e}"))?
             } else {
                 // Visible terminal window, independent of the parent process.
                 cmd.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE);
@@ -1417,9 +1421,9 @@ fn resolve_cmd_exe() -> std::path::PathBuf {
 }
 
 #[cfg(windows)]
-fn musecode_windows_terminal(command: &str, cwd: &std::path::Path) -> Command {
+fn windows_cli_terminal(command: &str, cwd: &std::path::Path) -> Command {
     // CREATE_NEW_CONSOLE alone still inherits a development client's log pipes.
-    // Start-Process creates console handles for Muse's TUI and trust prompt.
+    // Start-Process gives interactive TUIs their own console handles.
     let powershell = std::env::var_os("SystemRoot")
         .map(|root| {
             std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe")
@@ -2807,12 +2811,12 @@ try {
 
     #[cfg(windows)]
     #[test]
-    fn muse_windows_terminal_has_console_handles_with_a_piped_parent() {
+    fn windows_cli_terminal_has_console_handles_with_a_piped_parent() {
         use std::os::windows::process::CommandExt;
         use std::time::{Duration, Instant};
 
         let dir =
-            std::env::temp_dir().join(format!("echobird-muse-launch-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("echobird-cli-launch-{}", uuid::Uuid::new_v4()));
         let cwd = dir.join("项目 folder & O'Brien");
         std::fs::create_dir_all(&cwd).unwrap();
         let result = dir.join("result.json");
@@ -2821,7 +2825,8 @@ try {
             r#"param([string]$Label)
 Add-Type 'using System; using System.Runtime.InteropServices; public class ConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int id); [DllImport("kernel32.dll")] public static extern bool GetConsoleMode(IntPtr handle, out uint mode); }'
 $handles = @(-10,-11,-12) | ForEach-Object { $mode=0; [ConsoleProbe]::GetConsoleMode([ConsoleProbe]::GetStdHandle($_),[ref]$mode) }
-$result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:ECHOBIRD_LAUNCH_FIXTURE } | ConvertTo-Json -Compress
+$parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+$result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:ECHOBIRD_LAUNCH_FIXTURE; parentPid=$parentPid } | ConvertTo-Json -Compress
 [IO.File]::WriteAllText($env:ECHOBIRD_LAUNCH_RESULT,$result)
 "#,
         )
@@ -2832,16 +2837,35 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
         )
         .unwrap();
         let marker = "argument space & O'Brien";
-        for (command, independent) in [
-            ("probe".to_string(), false),
-            (format!("probe \"{marker}\""), true),
+        let mut handles = Vec::new();
+        for (tool_id, command, independent, label) in [
+            ("fixture-other", "probe".to_string(), false, ""),
+            ("musecode", format!("probe \"{marker}\""), true, marker),
             (
+                "musecode",
                 format!("\"{}\" \"{marker}\"", dir.join("probe.cmd").display()),
                 true,
+                marker,
+            ),
+            ("claudecode", "probe".to_string(), true, ""),
+            ("claudecode", format!("probe \"{marker}\""), true, marker),
+            (
+                "claudecode",
+                format!("\"{}\" \"{marker}\"", dir.join("probe.cmd").display()),
+                true,
+                marker,
+            ),
+            ("omp", "probe".to_string(), true, ""),
+            ("opencode", format!("probe \"{marker}\""), true, marker),
+            (
+                "fixture-future-cli",
+                format!("\"{}\" \"{marker}\"", dir.join("probe.cmd").display()),
+                true,
+                marker,
             ),
         ] {
             let mut launcher = if independent {
-                super::musecode_windows_terminal(&command, &cwd)
+                super::windows_cli_terminal(&command, &cwd)
             } else {
                 let mut launcher = std::process::Command::new(super::resolve_cmd_exe());
                 launcher.args(["/C", &command]).creation_flags(0x00000210);
@@ -2862,7 +2886,7 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            if independent {
+            let child_pid = if independent {
                 let pid = String::from_utf8_lossy(&output.stdout)
                     .trim()
                     .parse::<u32>()
@@ -2878,7 +2902,10 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
                     .output()
                     .unwrap();
                 assert!(waited.status.success());
-            }
+                Some(pid)
+            } else {
+                None
+            };
             let deadline = Instant::now() + Duration::from_secs(10);
             let value: serde_json::Value = loop {
                 if let Ok(value) = std::fs::read(&result)
@@ -2890,19 +2917,29 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
                 std::thread::sleep(Duration::from_millis(50));
             };
             std::fs::remove_file(&result).unwrap();
-            assert_eq!(
-                value["handles"],
-                serde_json::json!([independent, independent, independent])
-            );
+            handles.push((
+                tool_id,
+                value["handles"].clone(),
+                serde_json::json!([independent, independent, independent]),
+            ));
+            if let Some(pid) = child_pid {
+                assert_eq!(value["parentPid"].as_u64(), Some(u64::from(pid)));
+            }
             assert_eq!(
                 std::fs::canonicalize(std::path::Path::new(value["cwd"].as_str().unwrap()))
                     .unwrap(),
                 std::fs::canonicalize(&cwd).unwrap()
             );
-            assert_eq!(value["label"], if independent { marker } else { "" });
+            assert_eq!(value["label"], label);
             assert_eq!(value["marker"], "preserved");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        let resolved = std::fs::canonicalize(&dir).unwrap();
+        let temporary = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert_eq!(resolved.parent(), Some(temporary.as_path()));
+        std::fs::remove_dir_all(&resolved).unwrap();
+        for (tool_id, actual, expected) in handles {
+            assert_eq!(actual, expected, "{tool_id} terminal console handles");
+        }
     }
 
     #[test]
