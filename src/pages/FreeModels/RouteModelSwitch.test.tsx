@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DndContext, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import * as api from '../../api/tauri';
 import * as accountApi from '../../api/accountProxy';
+import * as modelApi from '../../api/models';
 import type { ModelConfig } from '../../api/types';
 import type { FreeModelDirectory, FreeModelEntry } from '../../api/freeModels';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
@@ -75,8 +76,13 @@ vi.mock('@dnd-kit/sortable', async (original) => ({
 vi.mock('../../api/accountProxy', async (original) => ({
   ...(await original<typeof import('../../api/accountProxy')>()),
   getCachedAccountProxyModels: vi.fn(),
+  cacheAccountProxyModels: vi.fn(),
   getAccountProxyModels: vi.fn(),
   listProxyAccounts: vi.fn(),
+}));
+vi.mock('../../api/models', () => ({
+  getCachedUpstreamModelCatalog: vi.fn(),
+  fetchUpstreamModelCatalog: vi.fn(),
 }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
@@ -218,6 +224,11 @@ describe('Direct route card model selection', () => {
   function clickCard(modelId: string) {
     act(() => dragHandle(card(modelId)).props.onClick({ detail: 1 }));
   }
+  async function openMenu(modelId: string) {
+    if (picker(modelId).props.open)
+      await act(async () => picker(modelId).props.onOpenChange(false));
+    await act(async () => picker(modelId).props.onOpenChange(true));
+  }
   function cardFor(modelId: string): ReactTestInstance {
     return renderer.root
       .findAll(
@@ -235,9 +246,8 @@ describe('Direct route card model selection', () => {
       picker(oldId).props.onChange(newId);
     });
   }
-  function expectNoPassiveChanges() {
+  function expectNoConfigurationChanges() {
     expect(api.getFreeModelDirectory).not.toHaveBeenCalled();
-    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
     expect(api.queryModelUsage).not.toHaveBeenCalled();
     expect(api.updateModel).not.toHaveBeenCalled();
     expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
@@ -246,6 +256,13 @@ describe('Direct route card model selection', () => {
     expect(nexus.setShowAddModelModal).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
     expect(showToast).not.toHaveBeenCalled();
+  }
+  function expectNoPassiveChanges() {
+    expect(api.getFreeModelDirectory).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expect(accountApi.cacheAccountProxyModels).not.toHaveBeenCalled();
+    expectNoConfigurationChanges();
   }
 
   beforeEach(() => {
@@ -281,7 +298,9 @@ describe('Direct route card model selection', () => {
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     useNavigationStore.setState({ activePage: 'freeModels' });
     vi.mocked(api.getSmartRouterConfig).mockImplementation(async () => config());
-    vi.mocked(api.getSmartRouterCandidates).mockImplementation(async () => savedModels);
+    vi.mocked(api.getSmartRouterCandidates).mockImplementation(async () =>
+      savedModels.filter((model) => savedOrder.includes(model.internalId))
+    );
     vi.mocked(api.getSmartRouterActivity).mockResolvedValue({
       candidateId: null,
       active: false,
@@ -289,8 +308,16 @@ describe('Direct route card model selection', () => {
       updatedAtMs: 0,
     });
     vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue(cached);
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue(null);
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockResolvedValue({
+      models: [{ id: 'free-old' }, { id: 'free-new' }],
+      requiresApiKey: false,
+    });
     vi.mocked(accountApi.getCachedAccountProxyModels).mockImplementation((source) =>
       source.accountId === 'account-one' ? ['account-old', 'account-new'] : undefined
+    );
+    vi.mocked(accountApi.getAccountProxyModels).mockImplementation(
+      async (source) => accountApi.getCachedAccountProxyModels(source) ?? []
     );
     vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
       {
@@ -321,6 +348,558 @@ describe('Direct route card model selection', () => {
     vi.resetAllMocks();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('API catalog retains every cached upstream ID and the selected ID without passive remote requests', async () => {
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
+      models: [
+        { id: 'remote-free', free: true },
+        { id: 'remote-paid', multiplier: 0.8 },
+      ],
+      requiresApiKey: false,
+    });
+    await open();
+    expect(modelApi.getCachedUpstreamModelCatalog).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: free.baseUrl,
+      anthropicUrl: free.anthropicUrl,
+      apiKey: free.apiKey,
+    });
+    expect(picker('free-old').props.options).toEqual(['free-old', 'remote-free', 'remote-paid']);
+    expectNoPassiveChanges();
+    await select('free-old', 'remote-paid');
+    expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(free.internalId, {
+      modelId: 'remote-paid',
+    });
+    expect(savedModels.find((model) => model.internalId === free.internalId)?.apiKey).toBe(
+      free.apiKey
+    );
+  });
+
+  it('opens saved account and API model menus without refresh icons and loads their directories on demand', async () => {
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['account-old', 'account-new']);
+    await open();
+    expect(picker('account-old').props.onRefresh).toBeUndefined();
+    expect(picker('free-old').props.onRefresh).toBeUndefined();
+    expectNoPassiveChanges();
+    await act(async () => clickCard('account-old'));
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    await act(async () => clickCard('free-old'));
+    expect(modelApi.fetchUpstreamModelCatalog).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: free.baseUrl,
+      anthropicUrl: free.anthropicUrl,
+      apiKey: free.apiKey,
+    });
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it.each(['account', 'API'] as const)(
+    'loads a successful %s directory only once across closing and reopening its menu',
+    async (kind) => {
+      const id = kind === 'account' ? 'account-old' : 'free-old';
+      const request =
+        kind === 'account' ? accountApi.getAccountProxyModels : modelApi.fetchUpstreamModelCatalog;
+      await open();
+      expectNoPassiveChanges();
+      await openMenu(id);
+      await act(async () => picker(id).props.onOpenChange(false));
+      expect(request).toHaveBeenCalledOnce();
+      await openMenu(id);
+      expect(picker(id).props.open).toBe(true);
+      expect(request).toHaveBeenCalledOnce();
+      expectNoConfigurationChanges();
+    }
+  );
+
+  it.each(['account', 'API'] as const)(
+    'silently retains a failed %s directory and retries on its next menu opening',
+    async (kind) => {
+      const id = kind === 'account' ? 'account-old' : 'free-old';
+      const original =
+        kind === 'account' ? ['account-old', 'account-new'] : ['free-old', 'free-new'];
+      const request =
+        kind === 'account' ? accountApi.getAccountProxyModels : modelApi.fetchUpstreamModelCatalog;
+      if (kind === 'account') {
+        vi.mocked(accountApi.getAccountProxyModels)
+          .mockRejectedValueOnce('accountError.network')
+          .mockResolvedValueOnce(['recovered-choice']);
+      } else {
+        vi.mocked(modelApi.fetchUpstreamModelCatalog)
+          .mockRejectedValueOnce('UPSTREAM_MODELS_HTTP_503')
+          .mockResolvedValueOnce({
+            models: [{ id: 'recovered-choice' }],
+            requiresApiKey: false,
+          });
+      }
+      await open();
+      await openMenu(id);
+      expect(picker(id).props.options).toEqual(original);
+      expect(picker(id).props.refreshing).toBe(false);
+      expect(request).toHaveBeenCalledOnce();
+      expectNoConfigurationChanges();
+      await openMenu(id);
+      expect(picker(id).props.options).toEqual([id, 'recovered-choice']);
+      expect(request).toHaveBeenCalledTimes(2);
+      expectNoConfigurationChanges();
+    }
+  );
+
+  it.each([
+    { state: 'missing', models: undefined },
+    { state: 'empty', models: [] },
+  ])(
+    'keeps the saved account model and accessible picker when its directory cache is $state',
+    async ({ models }) => {
+      vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue(models);
+      await open();
+      expect(picker('account-old').props.options).toEqual(['account-old']);
+      expect(picker('account-old').props.onRefresh).toBeUndefined();
+      expect(accountApi.cacheAccountProxyModels).not.toHaveBeenCalled();
+      expectNoPassiveChanges();
+      await openMenu('account-old');
+      expect(picker('account-old').props.open).toBe(true);
+      expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(
+        account.accountSource
+      );
+      expectNoConfigurationChanges();
+    }
+  );
+
+  it('refreshes an existing account directory without re-adding or replacing its selected model', async () => {
+    const source = account.accountSource!;
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue(undefined);
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['remote-other', 'remote-free']);
+    await open();
+    vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+      { source, label: 'Refreshed identity', freeModelIds: ['remote-free'] },
+    ]);
+    await openMenu('account-old');
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source, [
+      'remote-other',
+      'remote-free',
+    ]);
+    expect(picker('account-old').props.options).toEqual([
+      'account-old',
+      'remote-other',
+      'remote-free',
+    ]);
+    expect(picker('account-old').props.freeModelIds).toEqual(['remote-free']);
+    expect(picker('account-old').props.refreshing).toBe(false);
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    expect(api.queryModelUsage).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('keeps refreshed account choices after remounting without another remote request', async () => {
+    let models: string[] | undefined;
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockImplementation((source) =>
+      source.accountId === 'account-one' ? models : undefined
+    );
+    vi.mocked(accountApi.cacheAccountProxyModels).mockImplementation((source, next) => {
+      if (source.provider === 'codex' && source.accountId === 'account-one') models = [...next];
+    });
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['remote-one', 'remote-two']);
+    await open();
+    await openMenu('account-old');
+    act(() => renderer.unmount());
+    await open();
+    expect(picker('account-old').props.options).toEqual([
+      'account-old',
+      'remote-one',
+      'remote-two',
+    ]);
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledOnce();
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledOnce();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('uses a newer account directory from another picker after refreshing the card', async () => {
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['refreshed-choice']);
+    await open();
+    await openMenu('account-old');
+    expect(picker('account-old').props.options).toEqual(['account-old', 'refreshed-choice']);
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue([
+      'account-old',
+      'external-choice',
+    ]);
+    act(() =>
+      renderer.update(
+        <FreeModelsProvider>
+          <Harness />
+        </FreeModelsProvider>
+      )
+    );
+    expect(picker('account-old').props.options).toEqual(['account-old', 'external-choice']);
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledOnce();
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledOnce();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('retains refreshed account choices and metadata when another card is added and cache writes are unavailable', async () => {
+    const source = account.accountSource!;
+    const labels = { 'fresh-choice': 'Fresh model label' };
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['fresh-choice', 'fresh-other']);
+    await open();
+    vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
+      {
+        source,
+        label: 'Fresh account identity',
+        modelLabels: labels,
+        freeModelIds: ['fresh-choice'],
+      },
+    ]);
+    await openMenu('account-old');
+    const added: ModelConfig = {
+      ...free,
+      internalId: 'added-model',
+      name: 'Another saved model',
+      modelId: 'another-current',
+      baseUrl: 'https://another.example/v1',
+    };
+    savedModels.push(added);
+    await act(async () => context.addSelectedModel({ ...added, modelId: 'another-current' }));
+    expect(picker('account-old').props.options).toEqual([
+      'account-old',
+      'fresh-choice',
+      'fresh-other',
+    ]);
+    expect(picker('account-old').props.optionLabels).toEqual(labels);
+    expect(picker('account-old').props.freeModelIds).toEqual(['fresh-choice']);
+    expect(picker('account-old').props.ariaLabel).toContain('Fresh account identity');
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledOnce();
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledOnce();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('refreshes only the requested regional account even when another region shares its ID', async () => {
+    const source = { provider: 'qoderCn' as const, accountId: 'shared' };
+    savedModels = [
+      { ...account, accountSource: { provider: 'qoder', accountId: 'shared' } },
+      {
+        ...account,
+        internalId: 'cn-model',
+        modelId: 'cn-old',
+        accountSource: source,
+      },
+    ];
+    savedOrder = savedModels.map((model) => model.internalId);
+    vi.mocked(accountApi.getCachedAccountProxyModels).mockImplementation((account) =>
+      account.provider === 'qoder' ? ['account-old', 'global-choice'] : ['cn-old', 'cn-choice']
+    );
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['cn-new']);
+    await open();
+    await openMenu('cn-old');
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source, ['cn-new']);
+    expect(picker('cn-old').props.options).toEqual(['cn-old', 'cn-new']);
+    expect(picker('account-old').props.options).toEqual(['account-old', 'global-choice']);
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('preserves cached account choices and selection when loading its opened menu fails', async () => {
+    vi.mocked(accountApi.getAccountProxyModels).mockRejectedValue('accountError.network');
+    await open();
+    await openMenu('account-old');
+    expect(picker('account-old').props.options).toEqual(['account-old', 'account-new']);
+    expect(picker('account-old').props.refreshing).toBe(false);
+    expect(accountApi.cacheAccountProxyModels).not.toHaveBeenCalled();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('retains a successful account model refresh if optional account metadata cannot be loaded', async () => {
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['remote-choice']);
+    await open();
+    vi.mocked(accountApi.listProxyAccounts).mockRejectedValue('saved metadata unavailable');
+    await openMenu('account-old');
+    expect(picker('account-old').props.options).toEqual(['account-old', 'remote-choice']);
+    expect(picker('account-old').props.refreshing).toBe(false);
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledExactlyOnceWith(
+      account.accountSource,
+      ['remote-choice']
+    );
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates repeated account menu openings while its directory request is pending', async () => {
+    const request = deferred<string[]>();
+    vi.mocked(accountApi.getAccountProxyModels).mockReturnValue(request.promise);
+    await open();
+    act(() => {
+      picker('account-old').props.onOpenChange(true);
+      picker('account-old').props.onOpenChange(true);
+    });
+    expect(picker('account-old').props.refreshing).toBe(true);
+    expect(picker('account-old').props.options).toEqual(['account-old', 'account-new']);
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    await act(async () => request.resolve(['fresh-choice']));
+    expect(picker('account-old').props.options).toEqual(['account-old', 'fresh-choice']);
+    expect(picker('account-old').props.refreshing).toBe(false);
+    expect(accountApi.cacheAccountProxyModels).toHaveBeenCalledOnce();
+    expect(api.updateModel).not.toHaveBeenCalled();
+  });
+
+  it.each(['leaving', 'changing-source', 'removing'] as const)(
+    'ignores an account directory response after %s without stale cache writes',
+    async (change) => {
+      const request = deferred<string[]>();
+      vi.mocked(accountApi.getAccountProxyModels).mockReturnValue(request.promise);
+      await open();
+      clickCard('account-old');
+      if (change === 'leaving') {
+        await act(async () => useNavigationStore.getState().setActivePage('models'));
+      } else if (change === 'changing-source') {
+        const replacement = {
+          ...account,
+          modelId: 'replacement-old',
+          accountSource: { provider: 'codex' as const, accountId: 'replacement' },
+        };
+        savedModels = savedModels.map((model) =>
+          model.internalId === account.internalId ? replacement : model
+        );
+        await act(async () => context.updateSelectedModel(replacement));
+      } else {
+        await act(async () => context.removeSelectedModel(account.internalId));
+      }
+      await act(async () => request.resolve(['late-choice']));
+      if (change === 'leaving') {
+        await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
+        expect(picker('account-old').props.options).toEqual(['account-old', 'account-new']);
+      } else if (change === 'changing-source') {
+        expect(picker('replacement-old').props.options).toEqual(['replacement-old']);
+      } else {
+        expect(picker('account-old')).toBeUndefined();
+      }
+      expect(accountApi.cacheAccountProxyModels).not.toHaveBeenCalled();
+      expect(api.updateModel).not.toHaveBeenCalled();
+      expect(showToast).not.toHaveBeenCalled();
+    }
+  );
+
+  it('ignores refreshed account metadata that finishes after leaving the page', async () => {
+    const metadata = deferred<accountApi.ProxyAccount[]>();
+    vi.mocked(accountApi.getAccountProxyModels).mockResolvedValue(['fresh-choice']);
+    await open();
+    vi.mocked(accountApi.listProxyAccounts).mockReturnValue(metadata.promise);
+    await openMenu('account-old');
+    expect(picker('account-old').props.refreshing).toBe(true);
+    await act(async () => useNavigationStore.getState().setActivePage('models'));
+    await act(async () =>
+      metadata.resolve([
+        { source: account.accountSource!, label: 'Late identity', freeModelIds: ['fresh-choice'] },
+      ])
+    );
+    expect(accountApi.cacheAccountProxyModels).not.toHaveBeenCalled();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('API catalog menu opening loads metadata and preserves a current ID omitted upstream', async () => {
+    vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue({
+      ...cached,
+      models: [
+        ...cached.models,
+        {
+          ...freeEntry('big-pickle'),
+          freeType: 'renewing-quota',
+          notes: 'Leave the API key empty. Public free model.',
+        },
+        freeEntry('priced-free'),
+        {
+          ...freeEntry('quota-only'),
+          freeType: 'renewing-quota',
+        },
+      ],
+    });
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockResolvedValue({
+      models: [
+        { id: 'big-pickle' },
+        { id: 'priced-free', multiplier: 0.5 },
+        { id: 'vendor/charged:free', free: false },
+        { id: 'remote-free', free: true, multiplier: 0.5 },
+        { id: 'quota-only' },
+      ],
+      requiresApiKey: false,
+    });
+    await open();
+    expect(picker('free-old').props.onRefresh).toBeUndefined();
+    await openMenu('free-old');
+    expect(modelApi.fetchUpstreamModelCatalog).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: free.baseUrl,
+      anthropicUrl: free.anthropicUrl,
+      apiKey: free.apiKey,
+    });
+    expect(picker('free-old').props.options).toEqual([
+      'free-old',
+      'big-pickle',
+      'priced-free',
+      'vendor/charged:free',
+      'remote-free',
+      'quota-only',
+    ]);
+    expect(picker('free-old').props.freeModelIds).toEqual(
+      expect.arrayContaining(['big-pickle', 'remote-free'])
+    );
+    expect(picker('free-old').props.freeModelIds).not.toContain('priced-free');
+    expect(picker('free-old').props.freeModelIds).not.toContain('quota-only');
+    expect(picker('free-old').props.paidModelIds).toEqual(['priced-free', 'vendor/charged:free']);
+    expect(picker('free-old').props.optionMultipliers).toEqual({
+      'priced-free': 0.5,
+      'remote-free': 0.5,
+    });
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+  });
+
+  it('API catalog failed menu loading silently retains cached choices', async () => {
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
+      models: [{ id: 'cached-choice' }],
+      requiresApiKey: false,
+    });
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockRejectedValue('UPSTREAM_MODELS_HTTP_503');
+    await open();
+    await openMenu('free-old');
+    expect(picker('free-old').props.options).toEqual(['free-old', 'cached-choice']);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(api.updateModel).not.toHaveBeenCalled();
+  });
+
+  it('API catalog accepts a new candidate with its actual saved credentials without fetching remotely', async () => {
+    savedOrder = [account.internalId];
+    savedModels = savedModels.map((model) =>
+      model.internalId === free.internalId
+        ? { ...model, apiKey: 'encrypted:opaque-saved-key' }
+        : model
+    );
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
+      models: [{ id: 'saved-catalog-choice' }],
+      requiresApiKey: false,
+    });
+    await open();
+    expect(modelApi.getCachedUpstreamModelCatalog).not.toHaveBeenCalled();
+    await act(async () =>
+      context.addSelectedModel({
+        internalId: free.internalId,
+        name: free.name,
+        baseUrl: free.baseUrl,
+        anthropicUrl: free.anthropicUrl,
+        apiKey: 'encrypted:opaque-saved-key',
+        modelId: free.modelId ?? '',
+        scope: free.scope,
+      })
+    );
+    expect(modelApi.getCachedUpstreamModelCatalog).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: free.baseUrl,
+      anthropicUrl: free.anthropicUrl,
+      apiKey: 'encrypted:opaque-saved-key',
+    });
+    expect(picker('free-old').props.options).toEqual(['free-old', 'saved-catalog-choice']);
+    expect(api.setSmartRouterCandidates).toHaveBeenCalledExactlyOnceWith([
+      account.internalId,
+      free.internalId,
+    ]);
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(api.getSmartRouterCandidates).toHaveBeenCalledOnce();
+  });
+
+  it('API catalog permits legacy candidate input without credentials and keeps its binding unknown', async () => {
+    savedOrder = [account.internalId];
+    await open();
+    await act(async () =>
+      context.addSelectedModel({
+        internalId: free.internalId,
+        name: free.name,
+        baseUrl: free.baseUrl,
+        modelId: 'free-old',
+        scope: free.scope,
+      })
+    );
+    expect(api.setSmartRouterCandidates).toHaveBeenCalledExactlyOnceWith([
+      account.internalId,
+      free.internalId,
+    ]);
+    expect(api.getSmartRouterCandidates).toHaveBeenCalledOnce();
+    expect(
+      context.customModels.find((model) => model.id === free.internalId)?.apiKey
+    ).toBeUndefined();
+    expect(picker('free-old').props.onRefresh).toBeUndefined();
+    expect(modelApi.getCachedUpstreamModelCatalog).not.toHaveBeenCalled();
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expect(api.updateModel).not.toHaveBeenCalled();
+  });
+
+  it('API catalog passive cache failures keep fallback choices without dialogs or remote reads', async () => {
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockRejectedValue('unreadable cache');
+    await open();
+    expect(picker('free-old').props.options).toEqual(['free-old', 'free-new']);
+    expectNoPassiveChanges();
+  });
+
+  it('API catalog opening supersedes a late cache read and deduplicates repeated opening requests', async () => {
+    const cache = deferred<modelApi.UpstreamModelCatalog>();
+    const request = deferred<modelApi.UpstreamModelCatalog>();
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockReturnValueOnce(cache.promise);
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockReturnValueOnce(request.promise);
+    await open();
+    act(() => {
+      picker('free-old').props.onOpenChange(true);
+      picker('free-old').props.onOpenChange(true);
+    });
+    expect(picker('free-old').props.refreshing).toBe(true);
+    expect(modelApi.fetchUpstreamModelCatalog).toHaveBeenCalledOnce();
+    await act(async () =>
+      request.resolve({ models: [{ id: 'fresh-choice' }], requiresApiKey: false })
+    );
+    expect(picker('free-old').props.refreshing).toBe(false);
+    await act(async () =>
+      cache.resolve({ models: [{ id: 'old-cached-choice' }], requiresApiKey: false })
+    );
+    expect(picker('free-old').props.options).toEqual(['free-old', 'fresh-choice']);
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('API catalog results are bound to exact endpoint credentials and ignore late replies after editing or leaving', async () => {
+    const request = deferred<modelApi.UpstreamModelCatalog>();
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockImplementation(async (input) => ({
+      models: [{ id: input.apiKey === 'replacement-secret' ? 'new-key-choice' : 'old-key-choice' }],
+      requiresApiKey: false,
+    }));
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockReturnValueOnce(request.promise);
+    await open();
+    clickCard('free-old');
+    savedModels = savedModels.map((model) =>
+      model.internalId === free.internalId ? { ...model, apiKey: 'replacement-secret' } : model
+    );
+    await act(async () =>
+      context.updateSelectedModel({ ...free, modelId: 'free-old', apiKey: 'replacement-secret' })
+    );
+    expect(picker('free-old').props.options).toEqual(['free-old', 'new-key-choice']);
+    await act(async () =>
+      request.resolve({ models: [{ id: 'late-old-key' }], requiresApiKey: false })
+    );
+    expect(picker('free-old').props.options).toEqual(['free-old', 'new-key-choice']);
+    expect(showToast).not.toHaveBeenCalled();
+    const leaving = deferred<modelApi.UpstreamModelCatalog>();
+    vi.mocked(modelApi.fetchUpstreamModelCatalog).mockReturnValueOnce(leaving.promise);
+    clickCard('free-old');
+    await act(async () => useNavigationStore.getState().setActivePage('models'));
+    await act(async () =>
+      leaving.resolve({ models: [{ id: 'late-left-page' }], requiresApiKey: false })
+    );
+    await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
+    expect(picker('free-old').props.options).toEqual(['free-old', 'new-key-choice']);
+    expect(api.updateModel).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it.each([undefined, '', '   ', 'Pro'])('shows only an actual Cline plan: %s', async (plan) => {
@@ -419,15 +998,24 @@ describe('Direct route card model selection', () => {
     expect(textOf(card('qmodel_38max'))).toContain('Qwen3.8-Max');
     expect(textOf(card('qmodel_38max'))).toContain('agent.qoderTrial');
     expect(textOf(card('cmodel'))).not.toContain('Wrong Region');
-    clickCard('cmodel');
+    expect(writeCache).not.toHaveBeenCalled();
+    expectNoPassiveChanges();
+    await openMenu('cmodel');
     const selected = renderer.root.find(
       (node) => node.type === 'div' && node.children[0] === 'Cantus' && node.props.onMouseDown
     );
     expect(selected.props.className).toContain('bg-cyber-text/15');
     await act(async () => selected.props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
     expect(savedModels).toEqual(original);
-    expect(writeCache).not.toHaveBeenCalled();
-    expectNoPassiveChanges();
+    expect(writeCache).toHaveBeenCalledExactlyOnceWith({ provider: 'qoder', accountId: 'shared' }, [
+      'Cantus',
+      'Qwen3.8-Max',
+    ]);
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith({
+      provider: 'qoder',
+      accountId: 'shared',
+    });
+    expectNoConfigurationChanges();
 
     const stopPropagation = vi.fn();
     act(() =>
@@ -450,7 +1038,7 @@ describe('Direct route card model selection', () => {
     );
     expect(textOf(overlay)).toContain('Cantus');
     await act(async () => renderer.root.findByType(DndContext).props.onDragCancel());
-    expectNoPassiveChanges();
+    expectNoConfigurationChanges();
     await select('cmodel', 'Qwen3.8-Max');
     expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(account.internalId, {
       modelId: 'Qwen3.8-Max',
@@ -458,7 +1046,7 @@ describe('Direct route card model selection', () => {
   });
 
   it.each(['workBuddy', 'workBuddyAi', 'qoder', 'qoderCn', 'kilo', 'cline'] as const)(
-    'shows %s free metadata from the exact saved account without fetching on menu open',
+    'shows %s cached free metadata while loading only that account when its menu opens',
     async (provider) => {
       const source = { provider, accountId: 'saved' };
       savedModels = [{ ...account, modelId: 'auto', accountSource: source }];
@@ -482,18 +1070,20 @@ describe('Direct route card model selection', () => {
       ]);
       await open();
       expect(picker('auto').props.freeModelIds).toEqual(['hy3']);
-      clickCard('auto');
+      expectNoPassiveChanges();
+      await openMenu('auto');
       const options = renderer.root.findAll(
         (node) => node.type === 'div' && node.props.onMouseDown
       );
-      expect(options.map(textOf)).toEqual(['auto', 'hy3 model.free', 'charged']);
-      expectNoPassiveChanges();
-      await act(async () => options[1].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+      expect(options.map(textOf)).toEqual(['hy3 model.free', 'auto', 'charged']);
+      expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
+      expectNoConfigurationChanges();
+      await act(async () => options[0].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
       expect(api.updateModel).toHaveBeenCalledExactlyOnceWith(account.internalId, {
         modelId: 'hy3',
       });
       expect(savedModels[0].accountSource).toEqual(source);
-      expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+      expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(source);
       expect(api.queryModelUsage).not.toHaveBeenCalled();
       expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
     }
@@ -549,7 +1139,9 @@ describe('Direct route card model selection', () => {
     expect(picker('account-old').props.options).toEqual(['account-old', 'account-new']);
     expect(picker('other-old').props.options).toEqual(['other-old', 'other-new']);
     expect(picker('free-old').props.options).toEqual(['free-old', 'free-new']);
-    expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(3);
+    expect(picker('manual-id').props.options).toEqual(['manual-id']);
+    expect(picker('uncached').props.options).toEqual(['uncached']);
+    expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(5);
     for (const combo of renderer.root.findAllByType(ModelIdCombobox)) {
       expect(combo.props.selectOnly).toBe(true);
       expect(combo.props.compact).toBe(true);
@@ -812,7 +1404,7 @@ describe('Direct route card model selection', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
-  it('toggles cached model choices on repeated card clicks while static cards and drag previews have no menu action', async () => {
+  it('toggles API and account model choices on repeated card clicks while drag previews have no menu action', async () => {
     savedModels.push({
       ...free,
       internalId: 'manual',
@@ -830,7 +1422,9 @@ describe('Direct route card model selection', () => {
     clickCard('account-old');
     expect(picker('account-old').props.open).toBe(true);
     act(() => dragHandle(cardFor('manual-id')).props.onClick?.({ detail: 1 }));
-    expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(2);
+    expect(picker('manual-id').props.open).toBe(true);
+    expect(picker('manual-id').props.options).toEqual(['manual-id']);
+    expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(3);
     await act(async () =>
       renderer.root.findByType(DndContext).props.onDragStart({ active: { id: 'account-model' } })
     );
@@ -842,7 +1436,13 @@ describe('Direct route card model selection', () => {
     );
     expect(overlay.findAllByType(ModelIdCombobox)).toHaveLength(0);
     act(() => overlay.findByType('button').props.onClick?.({ detail: 1 }));
-    expectNoPassiveChanges();
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    expect(modelApi.fetchUpstreamModelCatalog).toHaveBeenCalledExactlyOnceWith({
+      baseUrl: 'https://manual.example/v1',
+      anthropicUrl: free.anthropicUrl,
+      apiKey: free.apiKey,
+    });
+    expectNoConfigurationChanges();
   });
 
   it('uses Enter to open the card menu while preserving Space for keyboard dragging', async () => {
@@ -861,10 +1461,12 @@ describe('Direct route card model selection', () => {
     const space = { key: ' ', code: 'Space', preventDefault: vi.fn() };
     act(() => dragHandle(card('account-old')).props.onKeyDown(space));
     expect(keyboardDrag).toHaveBeenCalledExactlyOnceWith(space);
-    expectNoPassiveChanges();
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expectNoConfigurationChanges();
   });
 
-  it('keeps the menu closed after an open card loses and regains its cached model options', async () => {
+  it('keeps the saved account picker usable when its cached directory becomes unavailable', async () => {
     await open();
     clickCard('account-old');
     expect(picker('account-old').props.open).toBe(true);
@@ -876,8 +1478,8 @@ describe('Direct route card model selection', () => {
         </FreeModelsProvider>
       )
     );
-    expect(cardFor('account-old').findAllByType(ModelIdCombobox)).toHaveLength(0);
-    act(() => dragHandle(cardFor('account-old')).props.onClick({ detail: 1 }));
+    expect(picker('account-old').props.options).toEqual(['account-old', 'account-new']);
+    expect(picker('account-old').props.open).toBe(true);
     vi.mocked(accountApi.getCachedAccountProxyModels).mockReturnValue([
       'account-old',
       'account-new',
@@ -889,10 +1491,10 @@ describe('Direct route card model selection', () => {
         </FreeModelsProvider>
       )
     );
-    expect(picker('account-old').props.open).toBe(false);
-    clickCard('account-old');
     expect(picker('account-old').props.open).toBe(true);
-    expectNoPassiveChanges();
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expectNoConfigurationChanges();
   });
 
   it('closes the card menu for a model save and prevents clicks from reopening it while pending', async () => {
@@ -945,7 +1547,9 @@ describe('Direct route card model selection', () => {
     expect(picker('account-old').props.open).toBe(false);
     clickCard('account-old');
     expect(picker('account-old').props.open).toBe(true);
-    expectNoPassiveChanges();
+    expect(accountApi.getAccountProxyModels).toHaveBeenCalledExactlyOnceWith(account.accountSource);
+    expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+    expectNoConfigurationChanges();
   });
 
   it('ignores the current model, permits dragging from the model row, and excludes portalled options and keyboard selection', async () => {

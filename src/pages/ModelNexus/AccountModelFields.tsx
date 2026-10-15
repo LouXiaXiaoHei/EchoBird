@@ -193,6 +193,7 @@ export function AccountModelFields({
         <ModelIdCombobox
           selectOnly
           ariaLabel={t('accountProxy.provider')}
+          inferFreeFromId={false}
           disabled={!active}
           value={provider}
           options={accountProxyProviders.map((entry) => entry.id)}
@@ -209,6 +210,7 @@ export function AccountModelFields({
         <ModelIdCombobox
           selectOnly
           ariaLabel={t('accountProxy.account')}
+          inferFreeFromId={false}
           disabled={!active || loading}
           placeholder="—"
           value={

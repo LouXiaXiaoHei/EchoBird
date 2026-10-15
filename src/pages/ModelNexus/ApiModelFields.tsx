@@ -5,6 +5,7 @@ import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
 import modelDirectory from '../../data/modelDirectory.json';
+import { isFreeModelOption } from '../../utils/modelOptions';
 import type { NewModelForm } from './context';
 
 function catalogInput(
@@ -51,6 +52,7 @@ export function ApiModelFields({
     baseUrl: input.baseUrl,
     anthropicUrl: input.anthropicUrl,
     options: form.modelIdOptions,
+    freeModelIds: form.freeModelIds,
   }));
   const [pendingSource, setPendingSource] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<{
@@ -58,6 +60,11 @@ export function ApiModelFields({
     catalog: api.UpstreamModelCatalog;
   } | null>(null);
   const catalog = loaded?.source === source ? loaded.catalog : undefined;
+  const initialFreeIds =
+    sameEndpoint(initial.baseUrl, input.baseUrl) &&
+    sameEndpoint(initial.anthropicUrl, input.anthropicUrl)
+      ? initial.freeModelIds
+      : undefined;
   const validEndpoint = (() => {
     try {
       const url = new URL(input.baseUrl || input.anthropicUrl);
@@ -74,10 +81,19 @@ export function ApiModelFields({
         return;
       setForm((current) => {
         if (JSON.stringify(catalogInput(current)) !== source || current.modelId) return current;
-        return next.models[0] ? { ...current, modelId: next.models[0].id } : current;
+        const first =
+          next.models.find((model) =>
+            isFreeModelOption(model.id, {
+              multiplier: model.multiplier,
+              free:
+                model.free ??
+                (initialFreeIds?.includes(model.id) && !(model.multiplier! > 0) ? true : undefined),
+            })
+          ) ?? next.models[0];
+        return first ? { ...current, modelId: first.id } : current;
       });
     },
-    [source, setForm, editing, input.apiKey]
+    [source, setForm, editing, input.apiKey, initialFreeIds]
   );
 
   const refresh = useCallback(async () => {
@@ -155,6 +171,15 @@ export function ApiModelFields({
   const options = needsKey
     ? (initialOptions ?? fallback?.modelIds ?? [])
     : (catalog?.models.map((model) => model.id) ?? initialOptions ?? fallback?.modelIds ?? []);
+  const freeIds = new Set(catalog?.models.filter((model) => model.free).map((model) => model.id));
+  for (const id of initialFreeIds ?? []) {
+    const model = catalog?.models.find((model) => model.id === id);
+    if (
+      model?.free !== false &&
+      !(model?.free !== true && model?.multiplier !== undefined && model.multiplier > 0)
+    )
+      freeIds.add(id);
+  }
 
   return (
     <div>
@@ -165,7 +190,10 @@ export function ApiModelFields({
         value={form.modelId}
         onChange={(value) => setForm((current) => ({ ...current, modelId: value }))}
         options={options}
-        freeModelIds={catalog?.models.filter((model) => model.free).map((model) => model.id)}
+        freeModelIds={catalog || initialFreeIds?.length ? [...freeIds] : undefined}
+        paidModelIds={catalog?.models
+          .filter((model) => model.free === false)
+          .map((model) => model.id)}
         freeLabel={t('model.free')}
         optionMultipliers={Object.fromEntries(
           catalog?.models

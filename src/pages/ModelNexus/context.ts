@@ -16,6 +16,7 @@ export interface NewModelForm {
   // model id input. Absent/empty → no dropdown (manual add / edit). Purely a
   // convenience picker; the model id input is always free-editable.
   modelIdOptions?: string[];
+  freeModelIds?: string[];
   accountSource?: AccountSource;
 }
 

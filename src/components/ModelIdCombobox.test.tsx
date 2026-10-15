@@ -114,6 +114,8 @@ function update(extra: Partial<Props>) {
 const input = () => renderer.root.findByType('input');
 const menus = () => renderer.root.findAll((node) => node.props.style?.position === 'fixed');
 const options = () => menus()[0].findAll((node) => typeof node.props.onMouseDown === 'function');
+const optionTexts = () =>
+  options().map((node) => node.findAllByType('span')[0]?.children[0] ?? node.children[0]);
 const button = (label: string) => renderer.root.findByProps({ 'aria-label': label });
 const key = (name: string) => {
   const preventDefault = vi.fn();
@@ -324,13 +326,14 @@ it('shows reliable positive multipliers without rounding and prioritizes the fre
   expect(input().props.value).toBe('Paid display name');
   act(() => input().props.onFocus());
   const badges = (index: number) => options()[index].findAllByType('span');
-  expect(badges(0).map((node) => node.children)).toEqual([['Paid display name'], ['0.79×']]);
-  expect(badges(0)[1].props.className).toContain('text-cyber-text-muted');
-  expect(badges(1).map((node) => node.children)).toEqual([['free-id'], ['免费']]);
-  expect(badges(1)[1].props.className).toContain('text-cyber-accent');
-  expect(badges(2).map((node) => node.children)).toEqual([['precise-id'], ['1.23456789×']]);
-  for (let index = 3; index < options().length; index += 1) expect(badges(index)).toHaveLength(0);
-  act(() => options()[0].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
+  expect(badges(0).map((node) => node.children)).toEqual([['free-id'], ['免费']]);
+  expect(badges(0)[1].props.className).toContain('text-cyber-accent');
+  expect(badges(1).map((node) => node.children)).toEqual([['zero-id'], ['免费']]);
+  expect(badges(2).map((node) => node.children)).toEqual([['Paid display name'], ['0.79×']]);
+  expect(badges(2)[1].props.className).toContain('text-cyber-text-muted');
+  expect(badges(3).map((node) => node.children)).toEqual([['precise-id'], ['1.23456789×']]);
+  for (let index = 4; index < options().length; index += 1) expect(badges(index)).toHaveLength(0);
+  act(() => options()[2].props.onMouseDown({ button: 0, preventDefault: vi.fn() }));
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith('paid-id');
   expect(input().props.value).toBe('Paid display name');
   expect(menus()).toHaveLength(0);
@@ -645,7 +648,7 @@ it('searches display labels and still commits the selected ID', () => {
   expect(input().props.value).toBe('Codex account');
 });
 
-it('marks only explicitly free choices while preserving plain option and selected labels', () => {
+it('marks supplied free metadata while preserving plain option and selected labels', () => {
   mount({
     value: 'opaque-free',
     options: ['opaque-free', 'paid-model', 'unknown-model'],
@@ -664,6 +667,120 @@ it('marks only explicitly free choices while preserving plain option and selecte
   expect(options()[2].children).toEqual(['unknown-model']);
   expect(options()).toHaveLength(3);
   expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('stably puts free models first without changing a manually entered ID', () => {
+  mount({
+    value: 'manual/Unlisted-ID',
+    options: [
+      'paid-a',
+      'provider/free-model',
+      'zero-ratio',
+      'paid-b',
+      'carefree',
+      'opaque',
+      'provider/free-model',
+      'foo:free',
+      'zero-blocked',
+      'big-pickle',
+    ],
+    freeModelIds: ['opaque', 'big-pickle'],
+    paidModelIds: ['zero-blocked'],
+    optionMultipliers: { 'zero-ratio': 0, 'foo:free': 2, 'zero-blocked': 0, opaque: 1 },
+    freeLabel: '免费',
+  });
+  act(() => input().props.onFocus());
+  expect(optionTexts()).toEqual([
+    'provider/free-model',
+    'zero-ratio',
+    'carefree',
+    'opaque',
+    'big-pickle',
+    'paid-a',
+    'paid-b',
+    'foo:free',
+    'zero-blocked',
+  ]);
+  for (const row of options().slice(0, 5)) {
+    const badge = row.findAllByType('span')[1];
+    expect(badge.children).toEqual(['免费']);
+    expect(badge.props.className).toContain('text-cyber-accent');
+  }
+  expect(input().props.value).toBe('manual/Unlisted-ID');
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['FREE', true],
+  ['provider/model:free', true],
+  ['model-free', true],
+  ['model_free', true],
+  ['model.free', true],
+  ['free/v1', true],
+  ['provider/model:FrEeTier', true],
+  ['tierFREE', true],
+  ['freedom', true],
+  ['freestyle', true],
+  ['carefree', true],
+  ['freezer', true],
+  ['model-freeform', true],
+  ['free2', true],
+  ['2free', true],
+  ['big-pickle', false],
+])(
+  'recognizes free anywhere in %s regardless of case without guessing unrelated names',
+  (id, free) => {
+    mount({ options: [id as string], freeLabel: '免费' });
+    act(() => input().props.onFocus());
+    expect(
+      options()[0]
+        .findAllByType('span')
+        .some((node) => node.children[0] === '免费')
+    ).toBe(free);
+  }
+);
+
+it('lets explicit paid metadata override the free name and updates without selecting', () => {
+  mount({ value: 'model-free', options: ['paid-model', 'model-free'] });
+  act(() => input().props.onFocus());
+  expect(optionTexts()).toEqual(['model-free', 'paid-model']);
+  update({ paidModelIds: ['model-free'] });
+  expect(optionTexts()).toEqual(['paid-model', 'model-free']);
+  expect(options()[1].findAllByType('span')).toHaveLength(0);
+  expect(input().props.value).toBe('model-free');
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('keeps non-model IDs in source order when name inference is disabled but honors metadata', () => {
+  mount({
+    value: 'free-account',
+    options: ['paid-provider', 'free-account', 'free-provider'],
+    inferFreeFromId: false,
+    freeLabel: '免费',
+  });
+  act(() => input().props.onFocus());
+  expect(optionTexts()).toEqual(['paid-provider', 'free-account', 'free-provider']);
+  for (const row of options()) expect(row.findAllByType('span')).toHaveLength(0);
+  update({
+    freeModelIds: ['free-provider'],
+    optionMultipliers: { 'paid-provider': 0 },
+  });
+  expect(optionTexts()).toEqual(['paid-provider', 'free-provider', 'free-account']);
+  expect(options()[0].findAllByType('span')[1].children).toEqual(['免费']);
+  expect(options()[1].findAllByType('span')[1].children).toEqual(['免费']);
+  expect(options()[2].findAllByType('span')).toHaveLength(0);
+  expect(input().props.value).toBe('free-account');
+  expect(props.onChange).not.toHaveBeenCalled();
+});
+
+it('uses the sorted compact options for keyboard selection while returning the original ID', () => {
+  mountControlled({ value: 'paid-model', options: ['paid-model', 'provider/Model:Free'] });
+  act(() => button('Open from card').props.onClick());
+  expect(optionTexts()).toEqual(['provider/Model:Free', 'paid-model']);
+  act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() }));
+  act(() => button('Route model').props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
+  expect(props.onChange).toHaveBeenCalledExactlyOnceWith('provider/Model:Free');
+  expect(button('Route model').findByType('span').children).toEqual(['provider/Model:Free']);
 });
 
 it('selects a free labelled choice by mouse using its original ID', () => {
@@ -706,7 +823,6 @@ it('keeps compact free choices on their original IDs through keyboard selection 
     freeLabel: '免费',
   });
   act(() => button('Open from card').props.onClick());
-  act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() }));
   act(() => button('Route model').props.onKeyDown({ key: 'ArrowDown', preventDefault: vi.fn() }));
   act(() => button('Route model').props.onKeyDown({ key: 'Enter', preventDefault: vi.fn() }));
   expect(props.onChange).toHaveBeenCalledExactlyOnceWith('opaque-free');

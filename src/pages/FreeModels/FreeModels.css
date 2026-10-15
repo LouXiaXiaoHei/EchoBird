@@ -203,7 +203,7 @@
   background: rgb(var(--bg-elevated-rgb));
 }
 
-.free-model-route-picker > div > button {
+.free-model-route-picker > div > button[aria-expanded] {
   position: relative;
   width: 100%;
   height: 24px;
@@ -212,11 +212,11 @@
   transition: color 150ms ease;
 }
 
-.free-model-route-picker > div > button > span {
+.free-model-route-picker > div > button[aria-expanded] > span {
   flex: 1;
 }
 
-.free-model-route-picker > div > button > svg {
+.free-model-route-picker > div > button[aria-expanded] > svg {
   position: absolute;
   top: 6px;
   right: 6px;
@@ -228,7 +228,7 @@
 .free-model-route-node.has-model-picker:hover
   .free-model-route-picker
   > div
-  > button:not(:disabled) {
+  > button[aria-expanded]:not(:disabled) {
   color: rgb(var(--text-primary-rgb));
 }
 

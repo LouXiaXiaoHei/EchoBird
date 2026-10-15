@@ -32,13 +32,28 @@ pub(crate) fn keyless_auth(base_url: &str, model_id: &str) -> Option<KeylessAuth
     keyless_endpoint(base_url)?;
     let cached = load_cached_free_model_directory();
     let bundled = bundled_free_model_directory().ok()?;
+    keyless_auth_from_catalogs(&cached, &bundled, base_url, model_id)
+}
+
+fn keyless_auth_from_catalogs(
+    cached: &Value,
+    bundled: &Value,
+    base_url: &str,
+    model_id: &str,
+) -> Option<KeylessAuth> {
+    let auth = keyless_endpoint(base_url)?;
     // A cached matching entry can revoke anonymous access declared by the bundle.
-    let catalog = if catalog_contains_model(&cached, base_url, model_id) {
-        &cached
-    } else {
-        &bundled
-    };
-    keyless_auth_in_catalog(catalog, base_url, model_id)
+    if catalog_contains_model(cached, base_url, model_id) {
+        return keyless_auth_in_catalog(cached, base_url, model_id);
+    }
+    if catalog_contains_model(bundled, base_url, model_id) {
+        return keyless_auth_in_catalog(bundled, base_url, model_id);
+    }
+    (auth == KeylessAuth::Public
+        && model_id
+            .strip_suffix("-free")
+            .is_some_and(|name| !name.is_empty()))
+    .then_some(auth)
 }
 
 fn catalog_contains_model(catalog: &Value, base_url: &str, model_id: &str) -> bool {
@@ -72,7 +87,7 @@ pub(crate) fn keyless_auth_in_catalog(
         .then_some(auth)
 }
 
-fn keyless_endpoint(raw: &str) -> Option<KeylessAuth> {
+pub(crate) fn keyless_endpoint(raw: &str) -> Option<KeylessAuth> {
     let url = url::Url::parse(raw.trim()).ok()?;
     if url.scheme() != "https"
         || !url.username().is_empty()
@@ -208,6 +223,99 @@ fn has_catalog_shape(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_public_model_authorization_keeps_endpoint_and_paid_model_boundaries() {
+        let empty = serde_json::json!({"version":1,"models":[]});
+        for endpoint in [
+            "http://opencode.ai/inference/v1",
+            "https://opencode.ai.evil.example/inference/v1",
+            "https://user@opencode.ai/inference/v1",
+            "https://opencode.ai:444/inference/v1",
+            "https://opencode.ai/inference/v1/other",
+            "https://opencode.ai/inference/v1?key=public",
+            "https://opencode.ai/inference/v1#other",
+            "https://opencode.ai/zen/v1",
+            "https://api.kilo.ai/api/gateway",
+            "https://api.example.com/v1",
+        ] {
+            assert_eq!(
+                keyless_auth_from_catalogs(&empty, &empty, endpoint, "cat-jam-free"),
+                None,
+                "{endpoint}"
+            );
+        }
+        for model in ["claude-opus-5", "cat-jam", "", "-free"] {
+            assert_eq!(
+                keyless_auth_from_catalogs(
+                    &empty,
+                    &empty,
+                    "https://opencode.ai/inference/v1",
+                    model
+                ),
+                None,
+                "{model}"
+            );
+        }
+        assert_eq!(
+            keyless_auth_from_catalogs(
+                &empty,
+                &empty,
+                "https://opencode.ai/inference/v1/",
+                "cat-jam-free"
+            ),
+            Some(KeylessAuth::Public)
+        );
+    }
+
+    #[test]
+    fn dynamic_public_model_authorization_preserves_cached_and_bundled_decisions() {
+        let empty = serde_json::json!({"version":1,"models":[]});
+        let revoked = serde_json::json!({"version":1,"models":[{"baseUrl":"https://opencode.ai/inference/v1", "modelId":"cat-jam-free", "notes":"An API key is now required."}]});
+        let allowed = serde_json::json!({"version":1,"models":[{"baseUrl":"https://opencode.ai/inference/v1", "modelId":"cat-jam-free", "notes":"Leave the API key empty. Public access."}]});
+        let endpoint = "https://opencode.ai/inference/v1";
+        assert_eq!(
+            keyless_auth_from_catalogs(&revoked, &allowed, endpoint, "cat-jam-free"),
+            None
+        );
+        assert_eq!(
+            keyless_auth_from_catalogs(&allowed, &revoked, endpoint, "cat-jam-free"),
+            Some(KeylessAuth::Public)
+        );
+        assert_eq!(
+            keyless_auth_from_catalogs(&empty, &revoked, endpoint, "cat-jam-free"),
+            None
+        );
+        let bundled = bundled_free_model_directory().unwrap();
+        assert_eq!(
+            keyless_auth_from_catalogs(&empty, &bundled, endpoint, "big-pickle"),
+            Some(KeylessAuth::Public)
+        );
+    }
+
+    #[test]
+    fn dynamic_public_model_authorization_does_not_follow_general_free_metadata() {
+        let empty = serde_json::json!({"version":1,"models":[]});
+        let marked_free = serde_json::json!({"version":1,"models":[{"baseUrl":"https://opencode.ai/inference/v1", "modelId":"paid-model", "free":true,"is_free":true,"pricing":{"prompt":0,"completion":0}}]});
+        assert_eq!(
+            keyless_auth_from_catalogs(
+                &marked_free,
+                &empty,
+                "https://opencode.ai/inference/v1",
+                "paid-model"
+            ),
+            None
+        );
+        assert_eq!(
+            keyless_auth_from_catalogs(
+                &empty,
+                &marked_free,
+                "https://opencode.ai/inference/v1",
+                "paid-model"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn bundled_keyless_entries_have_explicit_authentication_modes() {

@@ -50,9 +50,12 @@ import {
   X,
 } from 'lucide-react';
 import * as api from '../../api/tauri';
+import * as modelApi from '../../api/models';
 import {
   accountProxyProviders,
   accountModelPickerOptions,
+  cacheAccountProxyModels,
+  getAccountProxyModels,
   getCachedAccountProxyModels,
   listProxyAccounts,
   type ProxyAccount,
@@ -132,6 +135,8 @@ interface RouteModelInput {
   internalId: string;
   name: string;
   baseUrl: string;
+  anthropicUrl?: string;
+  apiKey?: string;
   modelId: string;
   accountSource?: AccountSource;
   scope?: ModelConfig['scope'];
@@ -143,6 +148,8 @@ interface RouteModelNode {
   provider: string;
   modelId: string;
   baseUrl: string;
+  anthropicUrl?: string;
+  apiKey?: string;
   accountSource?: AccountSource;
   scope?: ModelConfig['scope'];
 }
@@ -296,6 +303,8 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           provider: model.name,
           modelId: model.modelId ?? '',
           baseUrl: model.baseUrl,
+          anthropicUrl: model.anthropicUrl,
+          apiKey: model.apiKey,
           accountSource: model.accountSource,
           scope: model.scope,
         },
@@ -417,6 +426,8 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
               provider: model.name,
               modelId: model.modelId,
               baseUrl: model.baseUrl,
+              anthropicUrl: model.anthropicUrl,
+              apiKey: model.apiKey,
               accountSource: model.accountSource,
               scope: model.scope,
             },
@@ -442,6 +453,8 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
                     provider: model.name,
                     modelId: model.modelId,
                     baseUrl: model.baseUrl,
+                    anthropicUrl: model.anthropicUrl,
+                    apiKey: model.apiKey,
                     accountSource: model.accountSource,
                     scope: model.scope ?? entry.scope,
                   }
@@ -751,6 +764,11 @@ interface RouteModelCardProps {
   active?: boolean;
   compact?: boolean;
   modelIdOptions?: string[];
+  freeModelIds?: string[];
+  paidModelIds?: string[];
+  optionMultipliers?: Record<string, number>;
+  onLoadModels?: () => void;
+  refreshing?: boolean;
   saving?: boolean;
   dragging?: boolean;
   onModelChange?: (id: string, modelId: string) => Promise<void>;
@@ -765,6 +783,11 @@ function RouteModelCard({
   active = false,
   compact = false,
   modelIdOptions = [],
+  freeModelIds,
+  paidModelIds,
+  optionMultipliers,
+  onLoadModels,
+  refreshing = false,
   saving = false,
   dragging = false,
   onModelChange,
@@ -791,6 +814,11 @@ function RouteModelCard({
       : getModelIcon(model.provider, model.modelId);
   const hasModelPicker = Boolean(onModelChange && modelIdOptions.length > 0 && !overlay);
   if (pickerOpen && (!hasModelPicker || saving || dragging)) setPickerOpen(false);
+  const changePickerOpen = (open: boolean) => {
+    if (open && (!hasModelPicker || saving || dragging)) return;
+    setPickerOpen(open);
+    if (open && !pickerOpen) onLoadModels?.();
+  };
 
   return (
     <div
@@ -816,12 +844,12 @@ function RouteModelCard({
           aria-label={`${t('freeModels.router.priority')} ${priority}: ${model.modelId}`}
           aria-expanded={hasModelPicker ? pickerOpen : undefined}
           onClick={() => {
-            if (hasModelPicker && !saving && !dragging) setPickerOpen((previous) => !previous);
+            if (hasModelPicker && !saving && !dragging) changePickerOpen(!pickerOpen);
           }}
           onKeyDown={(event) => {
             if (hasModelPicker && !saving && !dragging && event.key === 'Enter') {
               event.preventDefault();
-              setPickerOpen(true);
+              changePickerOpen(true);
             } else {
               dragHandleProps?.onKeyDown?.(event);
             }
@@ -856,7 +884,7 @@ function RouteModelCard({
           {hasModelPicker ? (
             <div
               className="free-model-route-picker pointer-events-auto min-w-0"
-              aria-busy={saving}
+              aria-busy={saving || refreshing}
               onPointerDown={(event) => {
                 event.stopPropagation();
                 if (event.currentTarget.contains(event.target as Node)) dragPointerDown?.(event);
@@ -869,11 +897,14 @@ function RouteModelCard({
                 value={model.modelId}
                 options={modelIdOptions}
                 optionLabels={account?.modelLabels}
-                freeModelIds={account?.freeModelIds}
+                freeModelIds={account?.freeModelIds ?? freeModelIds}
+                paidModelIds={paidModelIds}
+                optionMultipliers={optionMultipliers}
                 freeLabel={t('model.free')}
+                refreshing={refreshing}
                 disabled={saving || dragging}
                 open={pickerOpen}
-                onOpenChange={setPickerOpen}
+                onOpenChange={changePickerOpen}
                 externalTriggerRef={cardRef}
                 ariaLabel={`${t('model.modelId')}: ${displayName} (${priority})`}
                 onChange={(modelId) => void onModelChange?.(model.id, modelId)}
@@ -1126,6 +1157,28 @@ export function FreeModelsMain() {
   return viewMode === 'super' ? <SuperRouterMain /> : <SmartRouterMain />;
 }
 
+type RouteCatalogInput = modelApi.UpstreamModelCatalogInput | { accountSource: AccountSource };
+type RouteModelCatalog = modelApi.UpstreamModelCatalog & {
+  account?: ProxyAccount;
+  accountCacheSnapshot?: string;
+};
+
+function routeCatalogBinding(model: RouteModelNode) {
+  if (model.id === 'local-server') return null;
+  if (model.accountSource) {
+    const { provider, accountId } = model.accountSource;
+    const input: RouteCatalogInput = { accountSource: { provider, accountId } };
+    return { input, key: JSON.stringify(input) };
+  }
+  if (model.apiKey === undefined) return null;
+  const input: RouteCatalogInput = {
+    baseUrl: model.baseUrl.trim(),
+    anthropicUrl: model.anthropicUrl?.trim() ?? '',
+    apiKey: model.apiKey.trim(),
+  };
+  return { input, key: JSON.stringify(input) };
+}
+
 function SmartRouterMain() {
   const { t } = useI18n();
   const { showToast } = useToast();
@@ -1142,14 +1195,185 @@ function SmartRouterMain() {
     changeSelectedModel,
     savingModelIds,
   } = useFreeModels();
+  const [routeCatalogs, setRouteCatalogs] = useState<Map<string, RouteModelCatalog>>(
+    () => new Map()
+  );
+  const [refreshingCatalogs, setRefreshingCatalogs] = useState<Set<string>>(() => new Set());
+  const catalogGeneration = useRef(0);
+  const catalogRequests = useRef(new Map<string, object>());
+  const catalogRevisions = useRef(new Map<string, number>());
+  const loadedCatalogs = useRef(new Set<string>());
+  const catalogBindingsKey = JSON.stringify(
+    [
+      ...new Set(
+        customModels.flatMap((model) => {
+          const binding = routeCatalogBinding(model);
+          return binding ? [binding.key] : [];
+        })
+      ),
+    ].sort()
+  );
+  const currentCatalogBindings = useRef(new Set<string>());
+
+  useEffect(() => {
+    const generation = ++catalogGeneration.current;
+    const keys: string[] = JSON.parse(catalogBindingsKey);
+    currentCatalogBindings.current = new Set(keys);
+    const requests = catalogRequests.current;
+    keys.forEach((key) => {
+      const revision = catalogRevisions.current.get(key);
+      const input: RouteCatalogInput = JSON.parse(key);
+      const models =
+        'accountSource' in input ? getCachedAccountProxyModels(input.accountSource) : undefined;
+      const cached =
+        'accountSource' in input
+          ? Promise.resolve(
+              models === undefined
+                ? null
+                : {
+                    models: models.map((id) => ({ id })),
+                    requiresApiKey: false,
+                    accountCacheSnapshot: JSON.stringify(models),
+                  }
+            )
+          : modelApi.getCachedUpstreamModelCatalog(input);
+      void cached
+        .then((catalog) => {
+          if (
+            catalog &&
+            catalogGeneration.current === generation &&
+            catalogRevisions.current.get(key) === revision
+          ) {
+            setRouteCatalogs((current) =>
+              'accountSource' in input && current.has(key)
+                ? current
+                : new Map(current).set(key, catalog)
+            );
+          }
+        })
+        .catch(() => undefined);
+    });
+    return () => {
+      catalogGeneration.current = generation + 1;
+      requests.clear();
+      setRefreshingCatalogs(new Set());
+    };
+  }, [catalogBindingsKey]);
+
+  const refreshRouteCatalog = async (model: RouteModelNode) => {
+    const binding = routeCatalogBinding(model);
+    if (
+      !binding ||
+      !currentCatalogBindings.current.has(binding.key) ||
+      catalogRequests.current.has(binding.key) ||
+      loadedCatalogs.current.has(binding.key)
+    )
+      return;
+    const { key, input } = binding;
+    const generation = catalogGeneration.current;
+    const request = {};
+    catalogRequests.current.set(key, request);
+    catalogRevisions.current.set(key, (catalogRevisions.current.get(key) ?? 0) + 1);
+    setRefreshingCatalogs((current) => new Set(current).add(key));
+    const isCurrent = () =>
+      catalogGeneration.current === generation && currentCatalogBindings.current.has(key);
+    try {
+      let catalog: RouteModelCatalog;
+      if ('accountSource' in input) {
+        const source = input.accountSource;
+        const models = await getAccountProxyModels(source);
+        if (!isCurrent()) return;
+        let account: ProxyAccount | undefined;
+        try {
+          const accounts = await listProxyAccounts(source.provider);
+          account = accounts.find(
+            (entry) =>
+              entry.source.provider === source.provider &&
+              entry.source.accountId === source.accountId
+          );
+        } catch (error) {
+          console.error('Load proxy model labels failed:', error);
+        }
+        if (!isCurrent()) return;
+        cacheAccountProxyModels(source, models);
+        catalog = {
+          models: models.map((id) => ({ id })),
+          requiresApiKey: false,
+          account,
+          accountCacheSnapshot: JSON.stringify(getCachedAccountProxyModels(source) ?? null),
+        };
+      } else {
+        catalog = await modelApi.fetchUpstreamModelCatalog(input);
+      }
+      if (isCurrent()) {
+        loadedCatalogs.current.add(key);
+        setRouteCatalogs((current) => new Map(current).set(key, catalog));
+      }
+    } catch {
+      // Keep cached choices on an automatic load failure; reopening can retry.
+    } finally {
+      if (catalogRequests.current.get(key) === request) {
+        catalogRequests.current.delete(key);
+        if (isCurrent())
+          setRefreshingCatalogs((current) => {
+            const next = new Set(current);
+            next.delete(key);
+            return next;
+          });
+      }
+    }
+  };
+  const routeCatalogFor = (model: RouteModelNode) => {
+    const binding = routeCatalogBinding(model);
+    return binding ? routeCatalogs.get(binding.key) : undefined;
+  };
+  const modelMetadataFor = (model: RouteModelNode) => {
+    const binding = routeCatalogBinding(model);
+    const refresh = {
+      refreshing: binding ? refreshingCatalogs.has(binding.key) : false,
+      onLoadModels: binding ? () => void refreshRouteCatalog(model) : undefined,
+    };
+    if (model.accountSource || model.id === 'local-server') return refresh;
+    const upstream = routeCatalogFor(model)?.models ?? [];
+    const paidModelIds = upstream
+      .filter(
+        (entry) => entry.free !== true && (entry.free === false || (entry.multiplier ?? 0) > 0)
+      )
+      .map((entry) => entry.id);
+    const freeModelIds = [
+      ...new Set([
+        ...freeModels
+          .filter(
+            (entry) =>
+              entry.baseUrl === model.baseUrl &&
+              (entry.freeType === 'perpetual' || isKeylessFreeModel(entry)) &&
+              !paidModelIds.includes(entry.modelId)
+          )
+          .map((entry) => entry.modelId),
+        ...upstream.filter((entry) => entry.free === true).map((entry) => entry.id),
+      ]),
+    ];
+    const optionMultipliers = Object.fromEntries(
+      upstream.flatMap((entry) =>
+        entry.multiplier === undefined ? [] : [[entry.id, entry.multiplier]]
+      )
+    );
+    return {
+      freeModelIds,
+      paidModelIds,
+      optionMultipliers,
+      ...refresh,
+    };
+  };
   const accountFor = (model: RouteModelNode) => {
     const source = model.accountSource;
     return source
-      ? proxyAccounts[source.provider]?.find(
-          (account) =>
-            account.source.provider === source.provider &&
-            account.source.accountId === source.accountId
-        )
+      ? (routeCatalogFor(model)?.account ??
+          proxyAccounts[source.provider]?.find(
+            (account) =>
+              account.source.provider === source.provider &&
+              account.source.accountId === source.accountId
+          ))
       : undefined;
   };
   const keylessFor = (model: RouteModelNode) =>
@@ -1169,15 +1393,36 @@ function SmartRouterMain() {
   };
   const modelIdOptionsFor = (model: RouteModelNode) => {
     if (model.id === 'local-server') return [];
-    if (model.accountSource)
-      return accountModelPickerOptions(
-        getCachedAccountProxyModels(model.accountSource) ?? [],
+    if (model.accountSource) {
+      const cached = getCachedAccountProxyModels(model.accountSource);
+      const catalog = routeCatalogFor(model);
+      const fetchedModels = catalog?.models.map((entry) => entry.id);
+      // Keep a successful refresh usable if persistence fails, while observing
+      // a later directory update from the account add/edit dialog.
+      const models =
+        (catalog?.accountCacheSnapshot === JSON.stringify(cached ?? null)
+          ? fetchedModels
+          : cached) ??
+        fetchedModels ??
+        [];
+      return [
+        ...new Set([
+          model.modelId,
+          ...accountModelPickerOptions(models, model.modelId, accountFor(model)?.modelLabels),
+        ]),
+      ].filter(Boolean);
+    }
+    const catalog = routeCatalogFor(model);
+    return [
+      ...new Set([
         model.modelId,
-        accountFor(model)?.modelLabels
-      );
-    return freeModels
-      .filter((entry) => entry.baseUrl === model.baseUrl)
-      .map((entry) => entry.modelId);
+        ...(catalog
+          ? catalog.models.map((entry) => entry.id)
+          : freeModels
+              .filter((entry) => entry.baseUrl === model.baseUrl)
+              .map((entry) => entry.modelId)),
+      ]),
+    ].filter(Boolean);
   };
   const switchModel = async (id: string, modelId: string) => {
     const model = customModels.find((entry) => entry.id === id);
@@ -1537,6 +1782,7 @@ function SmartRouterMain() {
                       priority={index + 1}
                       active={routerEnabled && activeRoutePath?.id === model.id}
                       modelIdOptions={modelIdOptionsFor(model)}
+                      {...modelMetadataFor(model)}
                       saving={savingModelIds.has(model.id)}
                       onModelChange={switchModel}
                       registerNode={setNodeRef}
@@ -1768,6 +2014,9 @@ export function FreeModelsPanel() {
         apiKey: '',
         modelId: modelIds[0] ?? '',
         modelIdOptions: modelIds,
+        freeModelIds: group.models
+          .filter((model) => model.freeType === 'perpetual' || isKeylessFreeModel(model))
+          .map((model) => model.modelId),
       });
       setEditingModelId(null);
       setModelModalDestination('freeRouter');
@@ -1797,6 +2046,8 @@ export function FreeModelsPanel() {
         internalId: model.internalId,
         name: model.name,
         baseUrl: model.baseUrl,
+        anthropicUrl: model.anthropicUrl,
+        apiKey: model.apiKey,
         modelId: model.modelId ?? '',
         accountSource: model.accountSource,
         scope: model.scope,

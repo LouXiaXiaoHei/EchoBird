@@ -9,8 +9,9 @@ import type { ModelConfig } from '../../api/types';
 import { AddModelModal, ModelNexusProvider } from './ModelNexus';
 import { useModelNexus, type NewModelForm } from './context';
 
-const { showToast, updateSelectedModel, t } = vi.hoisted(() => ({
+const { showToast, addSelectedModel, updateSelectedModel, t } = vi.hoisted(() => ({
   showToast: vi.fn(),
+  addSelectedModel: vi.fn(),
   updateSelectedModel: vi.fn(),
   t: (key: string) => key,
 }));
@@ -24,7 +25,7 @@ vi.mock('../../components', () => ({
 }));
 vi.mock('../FreeModels/FreeModels', () => ({
   useFreeModels: () => ({
-    addSelectedModel: vi.fn(),
+    addSelectedModel,
     updateSelectedModel,
     selectedIds: new Set(),
   }),
@@ -127,6 +128,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   renderer = undefined;
   vi.mocked(api.getModels).mockReset().mockResolvedValue([saved]);
+  addSelectedModel.mockReset().mockResolvedValue(undefined);
   vi.mocked(api.isKeyDestroyed).mockReset().mockResolvedValue(false);
   vi.mocked(api.updateModel)
     .mockReset()
@@ -229,6 +231,37 @@ it('automatically refreshes an explicitly opened provider Add and debounces chan
   expect(context.showAddModelModal).toBe(false);
   expectNoModelActions();
   expect(showToast).not.toHaveBeenCalled();
+});
+
+it('adds a new API route with the configuration returned by Save, without looking it up before selection', async () => {
+  const created: ModelConfig = {
+    ...saved,
+    internalId: 'new-api-route',
+    baseUrl: 'https://opencode.ai/inference/v1',
+    anthropicUrl: 'https://models.fixture.test/anthropic',
+    modelId: 'cat-jam-free',
+    apiKey: 'enc:v1:opaque-from-save',
+    scope: 'smartRouter',
+  };
+  vi.mocked(api.addModel).mockResolvedValue(created);
+  await mount();
+  await openAdd({ baseUrl: created.baseUrl, apiKey: '', modelId: created.modelId! });
+  await act(async () => context.setModelModalDestination('freeRouter'));
+  await act(async () => button('model.enterSave').props.onClick());
+  expect(addSelectedModel).toHaveBeenCalledExactlyOnceWith({
+    internalId: created.internalId,
+    name: created.name,
+    baseUrl: created.baseUrl,
+    anthropicUrl: created.anthropicUrl,
+    apiKey: created.apiKey,
+    modelId: created.modelId,
+    accountSource: undefined,
+    scope: 'smartRouter',
+  });
+  expect(api.deleteModel).not.toHaveBeenCalled();
+  expect(api.decryptSecret).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  expect(context.showAddModelModal).toBe(false);
 });
 
 it('deactivates model fetching immediately on Cancel and ignores success during the closing animation', async () => {

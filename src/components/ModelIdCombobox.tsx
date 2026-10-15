@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, RefreshCw } from 'lucide-react';
+import { isFreeModelOption } from '../utils/modelOptions';
 import './ModelIdCombobox.css';
 
 interface ModelIdComboboxProps {
@@ -14,6 +15,8 @@ interface ModelIdComboboxProps {
   optionLabels?: Record<string, string>;
   optionMultipliers?: Record<string, number>;
   freeModelIds?: readonly string[];
+  paidModelIds?: readonly string[];
+  inferFreeFromId?: boolean;
   freeLabel?: string;
   inlineActions?: boolean;
   actionHint?: string;
@@ -65,6 +68,8 @@ export function ModelIdCombobox({
   optionLabels,
   optionMultipliers,
   freeModelIds,
+  paidModelIds,
+  inferFreeFromId = true,
   freeLabel = 'Free',
   inlineActions = false,
   actionHint,
@@ -99,10 +104,30 @@ export function ModelIdCombobox({
   const inputRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
-  // Dedupe defensively so duplicate ids in the directory data can't collide on
-  // the React `key` below.
-  const opts = useMemo(() => Array.from(new Set(options)), [options]);
-  const freeIds = useMemo(() => new Set(freeModelIds), [freeModelIds]);
+  const freeIds = useMemo(() => {
+    const explicitFree = new Set(freeModelIds);
+    const explicitPaid = new Set(paidModelIds);
+    return new Set(
+      options.filter((id) =>
+        isFreeModelOption(
+          id,
+          {
+            free: explicitPaid.has(id) ? false : explicitFree.has(id) ? true : undefined,
+            multiplier: optionMultipliers?.[id],
+          },
+          inferFreeFromId
+        )
+      )
+    );
+  }, [options, freeModelIds, paidModelIds, optionMultipliers, inferFreeFromId]);
+  // Preserve upstream order within each group and keep duplicate IDs out.
+  const opts = useMemo(
+    () =>
+      Array.from(new Set(options)).sort(
+        (left, right) => Number(freeIds.has(right)) - Number(freeIds.has(left))
+      ),
+    [options, freeIds]
+  );
   const useInlineActions = inlineActions && !compact;
   const hasOptions = opts.length > 0;
   const hasChevron = hasOptions || selectOnly;

@@ -143,6 +143,30 @@ it('selects the first upstream ID only when the Add form has no current model ID
   expect(field().props.value).toBe('my-custom-model');
 });
 
+it('defaults an empty Add to the first free choice using name or directory metadata', async () => {
+  vi.mocked(api.fetchUpstreamModelCatalog).mockResolvedValue({
+    models: [
+      { id: 'paid-first' },
+      { id: 'blocked:free', free: false },
+      { id: 'charged-free', multiplier: 2 },
+      { id: 'provider/Model:Free' },
+      { id: 'zero-multiplier', multiplier: 0 },
+    ],
+    requiresApiKey: false,
+  });
+  await open({ modelId: '' });
+  await advance();
+  expect(current.modelId).toBe('provider/Model:Free');
+  await act(async () => renderer!.unmount());
+  vi.mocked(api.fetchUpstreamModelCatalog).mockResolvedValue({
+    models: [{ id: 'paid-first' }, { id: 'big-pickle' }, { id: 'provider/model-free' }],
+    requiresApiKey: false,
+  });
+  await open({ modelId: '', freeModelIds: ['big-pickle'] });
+  await advance();
+  expect(current.modelId).toBe('big-pickle');
+});
+
 it('opens Edit from its local cache and queries upstream only after explicit refresh', async () => {
   vi.mocked(api.getCachedUpstreamModelCatalog).mockResolvedValue(directory);
   await open({}, { editing: true });
@@ -158,6 +182,32 @@ it('opens Edit from its local cache and queries upstream only after explicit ref
   expect(api.updateModel).not.toHaveBeenCalled();
   expect(api.testModel).not.toHaveBeenCalled();
   expect(api.pingModel).not.toHaveBeenCalled();
+});
+
+it('carries known free directory metadata only for its original endpoint and honors paid overrides', async () => {
+  vi.mocked(api.getCachedUpstreamModelCatalog).mockResolvedValue({
+    models: [
+      { id: 'big-pickle' },
+      { id: 'renamed-free', free: false },
+      { id: 'metered-alias', multiplier: 0.5 },
+      { id: 'explicit-free', free: true, multiplier: 0.25 },
+    ],
+    requiresApiKey: false,
+  });
+  await open({ freeModelIds: ['big-pickle', 'renamed-free', 'metered-alias'] });
+  expect(field().props.freeModelIds).toEqual(['explicit-free', 'big-pickle']);
+  expect(field().props.paidModelIds).toEqual(['renamed-free']);
+  expect(field().props.options).toEqual([
+    'big-pickle',
+    'renamed-free',
+    'metered-alias',
+    'explicit-free',
+  ]);
+  vi.mocked(api.getCachedUpstreamModelCatalog).mockResolvedValue(null);
+  await patchForm({ baseUrl: 'https://another.fixture.test/v1' });
+  expect(field().props.freeModelIds).toBeUndefined();
+  expect(field().props.paidModelIds).toBeUndefined();
+  expect(api.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
 });
 
 it('keeps an empty saved Edit model ID unchanged when loading cached options', async () => {
