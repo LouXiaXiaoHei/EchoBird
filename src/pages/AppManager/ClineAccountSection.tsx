@@ -37,6 +37,7 @@ export function ClineAccountSection({ showDivider = true }: { showDivider?: bool
                 <QuotaCountdown
                   resetAt={account.subscriptionEndAt}
                   compact
+                  keepZero
                   label={t('accountCenter.subscription')}
                 />
               ) : undefined

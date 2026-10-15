@@ -19,7 +19,8 @@ export const QuotaCountdown: React.FC<{
   small?: boolean;
   parenthesized?: boolean;
   label?: string;
-}> = ({ resetAt, compact, small, parenthesized, label }) => {
+  keepZero?: boolean;
+}> = ({ resetAt, compact, small, parenthesized, label, keepZero }) => {
   const [now, setNow] = useState<number | null>(null);
   useEffect(() => {
     if (!resetAt) return;
@@ -30,7 +31,7 @@ export const QuotaCountdown: React.FC<{
       clearInterval(timer);
     };
   }, [resetAt]);
-  if (compact && (!resetAt || now === null || resetAt * 1000 <= now)) return null;
+  if (compact && (!resetAt || now === null || (!keepZero && resetAt * 1000 <= now))) return null;
   const countdown = resetAt && now !== null ? formatQuotaCountdown(resetAt, now, compact) : '';
   return (
     <span

@@ -47,6 +47,7 @@ export const ManusAccountSection: React.FC<{ tool?: 'manus' | 'cue' }> = ({ tool
                     <QuotaCountdown
                       resetAt={subscriptionEndAt}
                       compact
+                      keepZero
                       label={t('accountCenter.subscription')}
                     />
                   ) : undefined

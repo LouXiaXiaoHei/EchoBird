@@ -89,6 +89,7 @@ export const TraeAccountSection: React.FC = () => {
                     <QuotaCountdown
                       resetAt={subscriptionEndAt}
                       compact
+                      keepZero
                       label={t('accountCenter.subscription')}
                     />
                   ) : undefined

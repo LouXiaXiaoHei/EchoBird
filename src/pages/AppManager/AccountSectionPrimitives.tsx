@@ -230,10 +230,10 @@ export const AccountSectionRow: React.FC<{
           )}
         </span>
       </span>
-      <span className="grid auto-rows-[16px] items-center justify-items-center">
+      <span className="grid min-w-0 grid-cols-1 auto-rows-[16px] items-center justify-items-center">
         {!singleLine && (
           <span
-            className={`${planPrefix ? 'flex items-center gap-2 ' : ''}whitespace-nowrap text-[12px] font-semibold text-cyber-text`}
+            className={`${planPrefix ? 'flex items-center gap-2 ' : ''}justify-self-end whitespace-nowrap text-[12px] font-semibold text-cyber-text`}
           >
             {planPrefix}
             {(typeof plan === 'string' ? accountPlanLabel(plan) : plan) || '—'}

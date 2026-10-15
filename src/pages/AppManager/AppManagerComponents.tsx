@@ -897,7 +897,7 @@ export const CodexAccountSection: React.FC<{ showDivider?: boolean }> = ({
                 widePlan={planLabel.length >= 8}
                 planPrefix={
                   account.subscriptionEndAt ? (
-                    <QuotaCountdown resetAt={account.subscriptionEndAt} compact />
+                    <QuotaCountdown resetAt={account.subscriptionEndAt} compact keepZero />
                   ) : undefined
                 }
                 refreshing={refreshingCodexAccountIds.has(account.id)}
