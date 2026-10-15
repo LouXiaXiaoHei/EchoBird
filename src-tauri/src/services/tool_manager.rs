@@ -1216,7 +1216,8 @@ fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String>
                 .and_then(|p| resolve(&p))
         })
         .or_else(|| {
-            if !include_hints {
+            // Hermes' CLI has the same leaf name as its Linux/macOS GUI.
+            if !include_hints || pc.name == "Hermes Desktop" {
                 return None;
             }
             filenames_of(&paths).iter().find_map(|name| {
@@ -2532,6 +2533,11 @@ pub fn get_tool_launch_uri(tool_id: &str) -> Option<String> {
     {
         return Some(uri);
     }
+    #[cfg(windows)]
+    if tool_id == "hermes" {
+        // Source installs use the GUI path, even when only registry hints find it.
+        return None;
+    }
     configured
 }
 
@@ -2857,6 +2863,118 @@ mod tests {
         assert!(root.exists());
         assert!(super::detect_tool(&paths).await.is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn hermes_desktop_requires_a_gui_instead_of_cli_or_leftover_data() {
+        let mut definition: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/hermes/paths.json")).unwrap();
+        assert!(definition.command.is_empty());
+        assert!(definition.env_var.is_none());
+        let root =
+            std::env::temp_dir().join(format!("echobird-hermes-detect-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        fs::create_dir_all(data.join("bin")).unwrap();
+        fs::write(data.join("bin/hermes"), b"CLI fixture").unwrap();
+        let executable = root.join(if cfg!(windows) {
+            "desktop/Hermes.exe"
+        } else {
+            "desktop/Hermes"
+        });
+        let declared = Some(vec![executable.to_string_lossy().into_owned()]);
+        definition.paths = crate::models::tool::PlatformPaths {
+            win32: declared.clone(),
+            darwin: declared.clone(),
+            linux: declared,
+        };
+        definition.launch_uri = None;
+        definition.install_hints = None;
+        definition.config_dir = data.to_string_lossy().into_owned();
+        definition.config_dir_alt = None;
+        assert!(super::detect_tool(&definition).await.is_none());
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"GUI fixture").unwrap();
+        assert_eq!(
+            super::detect_tool(&definition).await.as_deref(),
+            executable.to_str()
+        );
+        fs::remove_file(executable).unwrap();
+        assert!(super::detect_tool(&definition).await.is_none());
+        let resolved = root.canonicalize().unwrap();
+        assert!(resolved.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+        fs::remove_dir_all(resolved).unwrap();
+    }
+
+    #[test]
+    fn hermes_desktop_path_lookup_does_not_accept_the_cli() {
+        const FIXTURE: &str = "ECHOBIRD_HERMES_PATH_FIXTURE";
+        if let Some(root) = std::env::var_os(FIXTURE) {
+            let root = std::path::PathBuf::from(root);
+            let name = if cfg!(windows) {
+                "hermes.exe"
+            } else {
+                "hermes"
+            };
+            let cli = root.join("bin").join(name);
+            assert_eq!(which::which(name).unwrap(), cli);
+            let mut definition: PathsConfig =
+                serde_json::from_str(include_str!("../../../tools/hermes/paths.json")).unwrap();
+            let missing_gui = Some(vec![root
+                .join("desktop")
+                .join(name)
+                .to_string_lossy()
+                .into_owned()]);
+            definition.paths = crate::models::tool::PlatformPaths {
+                win32: missing_gui.clone(),
+                darwin: missing_gui.clone(),
+                linux: missing_gui,
+            };
+            definition.install_hints = None;
+            assert!(super::find_tool_executable(&definition, true).is_none());
+            // The generic resolver still finds PATH executables for other tools.
+            definition.name = "Fixture GUI".into();
+            assert_eq!(
+                super::find_tool_executable(&definition, true).as_deref(),
+                cli.to_str()
+            );
+            println!("Hermes CLI PATH fixture verified");
+            return;
+        }
+        let root =
+            std::env::temp_dir().join(format!("echobird-hermes-path-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let cli = root.join("bin").join(if cfg!(windows) {
+            "hermes.exe"
+        } else {
+            "hermes"
+        });
+        fs::write(&cli, b"fixture").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&cli, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "services::tool_manager::tests::hermes_desktop_path_lookup_does_not_accept_the_cli",
+                "--nocapture",
+            ])
+            .env(FIXTURE, &root)
+            .env("PATH", root.join("bin"))
+            .output()
+            .unwrap();
+        let resolved = root.canonicalize().unwrap();
+        assert!(resolved.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+        fs::remove_dir_all(resolved).unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout)
+                    .contains("Hermes CLI PATH fixture verified"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

@@ -1178,7 +1178,7 @@ fn count_jsonl_message_lines_checked(path: &Path) -> std::io::Result<u32> {
 // (sessions + messages tables + FTS5 search). The `sessions/` dir is only a
 // gateway routing index (`sessions.json`) / optional JSONL exports, NOT the
 // session store, so we read the db. `started_at` is epoch SECONDS (float);
-// `message_count` is a column, so no message-table JOIN is needed.
+// visible user/assistant counts are read separately from the session counters.
 
 /// Best display text out of a decoded JSON message-content value: a bare
 /// string, the first `{type:"text", text:…}` block of an array, or an object's
@@ -1228,11 +1228,46 @@ fn hermes_decode_text(content: &str) -> String {
     content.to_string()
 }
 
+fn hermes_session_visibility(conn: &rusqlite::Connection) -> rusqlite::Result<&'static str> {
+    Ok(if sqlite_has_column(conn, "sessions", "hidden")? {
+        "archived = 0 AND COALESCE(hidden, 0) = 0"
+    } else {
+        "archived = 0"
+    })
+}
+
+/// Modern display rows include compacted history, but not rewound or model-only
+/// rows. Each indexed display position prefers the live, then newest, copy.
+fn hermes_message_visibility(conn: &rusqlite::Connection) -> rusqlite::Result<Option<String>> {
+    for column in ["id", "active", "compacted", "display_order"] {
+        if !sqlite_has_column(conn, "messages", column)? {
+            return Ok(None);
+        }
+    }
+    let mut visible = "(m.active = 1 OR m.compacted = 1)".to_string();
+    if sqlite_has_column(conn, "messages", "display_metadata")? {
+        visible.push_str(
+            " AND COALESCE(json_extract(CASE WHEN json_valid(m.display_metadata) \
+             THEN m.display_metadata ELSE '{}' END, '$.model_only'), 0) = 0",
+        );
+    }
+    let candidate_visible = visible.replace("m.", "candidate.");
+    Ok(Some(format!(
+        "{visible} AND (m.display_order IS NULL OR NOT EXISTS (\
+            SELECT 1 FROM messages candidate \
+            WHERE candidate.session_id = m.session_id \
+            AND candidate.display_order = m.display_order AND {candidate_visible} \
+            AND (candidate.active > m.active OR \
+                (candidate.active = m.active AND candidate.id > m.id))))"
+    )))
+}
+
 /// First non-empty user-message text for a session — Hermes' title-preview
 /// source. Mirrors its SQL: earliest `role='user'` message that has content.
 fn hermes_first_user_text_checked(
     conn: &rusqlite::Connection,
     session_id: &str,
+    message_visibility: Option<&str>,
 ) -> rusqlite::Result<Option<String>> {
     use rusqlite::OptionalExtension;
     if !conn.query_row(
@@ -1242,14 +1277,19 @@ fn hermes_first_user_text_checked(
     )? {
         return Ok(None);
     }
+    let order = if message_visibility.is_some() {
+        "COALESCE(m.display_order, m.id), m.id"
+    } else {
+        "m.timestamp, m.id"
+    };
+    let visibility = message_visibility.unwrap_or("1");
+    let query = format!(
+        "SELECT m.content FROM messages m \
+         WHERE m.session_id = ?1 AND m.role = 'user' AND m.content IS NOT NULL \
+         AND {visibility} ORDER BY {order} LIMIT 1"
+    );
     let content: Option<String> = conn
-        .query_row(
-            "SELECT content FROM messages \
-             WHERE session_id = ?1 AND role = 'user' AND content IS NOT NULL \
-             ORDER BY timestamp, id LIMIT 1",
-            [session_id],
-            |row| row.get(0),
-        )
+        .query_row(&query, [session_id], |row| row.get(0))
         .optional()?
         .flatten();
     let Some(content) = content else {
@@ -1287,6 +1327,8 @@ fn hermes_history_page_checked(
     )
     .map_err(|error| error.to_string())?;
     let db_str = db_path.to_string_lossy().into_owned();
+    let session_visibility = hermes_session_visibility(&conn).map_err(|error| error.to_string())?;
+    let message_visibility = hermes_message_visibility(&conn).map_err(|error| error.to_string())?;
 
     // Collect the page first so the prepared statement is dropped before we run
     // the per-session title-preview queries on the same connection.
@@ -1320,14 +1362,18 @@ fn hermes_history_page_checked(
             .map_err(|error| error.to_string())?
             && sqlite_has_column(&conn, "messages", "role").map_err(|error| error.to_string())?
         {
-            "(SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id AND m.role IN ('user', 'assistant'))"
+            format!(
+                "(SELECT COUNT(*) FROM messages m WHERE m.session_id = sessions.id \
+                 AND m.role IN ('user', 'assistant') AND {})",
+                message_visibility.as_deref().unwrap_or("1")
+            )
         } else {
-            "NULL"
+            "NULL".to_string()
         };
         let query = format!(
             "SELECT id, title, cwd, started_at, message_count, {usage_columns}, {model_column}, {conversation_count} \
                      FROM sessions \
-                     WHERE archived = 0 \
+                     WHERE {session_visibility} \
                      ORDER BY started_at DESC \
                      LIMIT ?1 OFFSET ?2"
         );
@@ -1365,6 +1411,14 @@ fn hermes_history_page_checked(
         .map_err(|error| error.to_string())?
         .into_iter()
         .all(|present| present);
+    let main_task = if has_model_usage
+        && sqlite_has_column(&conn, "session_model_usage", "task")
+            .map_err(|error| error.to_string())?
+    {
+        " AND COALESCE(task, '') = ''"
+    } else {
+        ""
+    };
 
     raws.into_iter()
         .map(|r| {
@@ -1372,7 +1426,7 @@ fn hermes_history_page_checked(
             let name = if !explicit.is_empty() {
                 make_title(explicit)
             } else {
-                hermes_first_user_text_checked(&conn, &r.id)
+                hermes_first_user_text_checked(&conn, &r.id, message_visibility.as_deref())
                     .map_err(|error| error.to_string())?
                     .map(|t| make_title(&t))
                     .filter(|s| !s.is_empty())
@@ -1391,9 +1445,10 @@ fn hermes_history_page_checked(
             let mut model_id = r.model_id.as_deref().map(str::trim)
                 .filter(|id| !id.is_empty()).map(str::to_string);
             if has_model_usage {
-                let mut statement = conn.prepare(
-                    "SELECT model FROM session_model_usage WHERE session_id = ?1 ORDER BY last_seen DESC"
-                ).map_err(|error| error.to_string())?;
+                let query = format!(
+                    "SELECT model FROM session_model_usage WHERE session_id = ?1{main_task} ORDER BY last_seen DESC"
+                );
+                let mut statement = conn.prepare(&query).map_err(|error| error.to_string())?;
                 let models = statement.query_map([&r.id], |row| row.get::<_, Option<String>>(0))
                     .map_err(|error| error.to_string())?;
                 for model in models {
@@ -1441,9 +1496,12 @@ fn collect_hermes_heatmap_entries_checked(
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|error| error.to_string())?;
-    let query = "SELECT started_at, message_count FROM sessions \
-                 WHERE archived = 0 AND started_at >= ?1";
-    let mut stmt = conn.prepare(query).map_err(|error| error.to_string())?;
+    let visibility = hermes_session_visibility(&conn).map_err(|error| error.to_string())?;
+    let query = format!(
+        "SELECT started_at, message_count FROM sessions \
+         WHERE {visibility} AND started_at >= ?1"
+    );
+    let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
     let rows = stmt
         .query_map([cutoff_secs as f64], |row| {
             let started_at: f64 = row.get(0)?;
@@ -3096,6 +3154,93 @@ mod tests {
         assert_eq!(rows[1].message_count, Some(1));
         assert_eq!(rows[2].model_id, None);
         assert_eq!(rows[2].message_count, Some(0));
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hermes_history_and_heatmap_exclude_hidden_sessions_without_writing() {
+        let dir = fixture_dir();
+        let db = dir.join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL, message_count INTEGER, archived INTEGER, hidden INTEGER);
+             INSERT INTO sessions VALUES ('visible','Visible','/fixture',1000,2,0,0),
+                ('hidden','Hidden','/fixture',1100,8,0,1),
+                ('archived','Archived','/fixture',1200,10,1,0);"
+        ).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        let rows = hermes_history_page_checked(&db, 0, 20).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_token.as_deref(), Some("visible"));
+        let mut heatmap = Vec::new();
+        collect_hermes_heatmap_entries_checked(&db, 0, &mut heatmap).unwrap();
+        assert_eq!(heatmap.len(), 1);
+        assert_eq!((heatmap[0].ts, heatmap[0].count), (1000, 2));
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hermes_model_metadata_excludes_auxiliary_tasks_and_preserves_session_fallback() {
+        let dir = fixture_dir();
+        let db = dir.join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL, message_count INTEGER, archived INTEGER, model TEXT);
+             INSERT INTO sessions VALUES ('main','Main','/fixture',1000,2,0,'initial-model'),
+                ('fallback','Fallback','/fixture',900,2,0,'session-model');
+             CREATE TABLE session_model_usage (session_id TEXT, model TEXT, last_seen REAL, task TEXT);
+             INSERT INTO session_model_usage VALUES ('main','main-model',10,''),
+                ('main','title-model',30,'title_generation'),('main','vision-model',40,'vision'),
+                ('fallback','compression-model',50,'compression');"
+        ).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        let rows = hermes_history_page_checked(&db, 0, 20).unwrap();
+        assert_eq!(rows[0].model_id.as_deref(), Some("main-model"));
+        assert_eq!(rows[1].model_id.as_deref(), Some("session-model"));
+        assert_eq!(std::fs::read(&db).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn hermes_modern_display_uses_visible_unique_messages_for_title_and_count() {
+        let dir = fixture_dir();
+        let db = dir.join("state.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, cwd TEXT, started_at REAL, message_count INTEGER, archived INTEGER);
+             INSERT INTO sessions VALUES ('fixture','','/fixture',1000,99,0),
+                ('priority','','/fixture',900,4,0);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL,
+                active INTEGER, compacted INTEGER, display_order INTEGER, display_metadata TEXT);
+             INSERT INTO messages VALUES
+                (1,'fixture','user','Undone question',1,0,0,1,NULL),
+                (2,'fixture','user','Model-only question',2,1,0,2,'{"model_only":true}'),
+                (3,'fixture','user','Compacted question',300,0,1,3,NULL),
+                (4,'fixture','assistant','Compacted answer',4,0,1,4,NULL),
+                (5,'fixture','assistant','Live answer',500,1,0,4,NULL),
+                (6,'fixture','assistant','Newer archived copy',6,0,1,4,NULL),
+                (7,'fixture','user','Older question copy',7,1,0,5,NULL),
+                (8,'fixture','user','Latest question copy',0,1,0,5,NULL),
+                (9,'fixture','tool','Tool result',9,1,0,6,NULL),
+                (10,'fixture','user','Unindexed question',10,1,0,NULL,NULL),
+                (11,'fixture','assistant','Unindexed answer',11,1,0,NULL,NULL),
+                (12,'fixture','user','Model-only replacement',12,1,0,3,'{"model_only":true}'),
+                (20,'priority','user','Older live question',20,1,0,1,NULL),
+                (21,'priority','user','Compacted question copy',21,0,1,1,NULL),
+                (22,'priority','user','Newest live question',22,1,0,1,NULL),
+                (23,'priority','user','Newest compacted copy',23,0,1,1,NULL);"#
+        ).unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        let rows = hermes_history_page_checked(&db, 0, 20).unwrap();
+        assert_eq!(rows[0].name, "Compacted question");
+        assert_eq!(rows[0].message_count, Some(5));
+        assert_eq!(rows[1].name, "Newest live question");
+        assert_eq!(rows[1].message_count, Some(1));
         assert_eq!(std::fs::read(&db).unwrap(), before);
         std::fs::remove_dir_all(dir).unwrap();
     }
