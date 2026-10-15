@@ -25,6 +25,9 @@ use crate::models::model::AccountProvider;
 use crate::services::{free_model_directory, model_manager};
 use crate::utils::platform::echobird_dir;
 
+#[path = "zen_free.rs"]
+mod zen_free;
+
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STREAM_PREFLIGHT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BINDINGS: usize = 512;
@@ -762,6 +765,9 @@ async fn send_candidate(
             .extensions_mut()
             .insert(RejectedAccountCredentials(rejected_credentials));
         return Ok(response);
+    }
+    if zen_free::is_candidate(candidate) {
+        return zen_free::send(state, headers, candidate, &body, protocol).await;
     }
     if protocol == RouteProtocol::Responses {
         let continuing = has_previous_response(&body);
@@ -3295,6 +3301,8 @@ mod tests {
                 "baseUrl":"https://api.kilo.ai/api/gateway", "apiKey":""},
             {"internalId":"zen", "name":"Zen", "modelId":"space-bunny-free",
                 "baseUrl":"https://opencode.ai/zen/v1", "apiKey":"   "},
+            {"internalId":"zen-free", "name":"Zen Free", "modelId":"space-bunny-free",
+                "baseUrl":"https://opencode.ai/inference/v1", "apiKey":""},
             {"internalId":"paid", "name":"Paid", "modelId":"claude-opus-5",
                 "baseUrl":"https://opencode.ai/zen/v1", "apiKey":""},
             {"internalId":"spoof", "name":"Spoof", "modelId":"kilo-auto/free",
@@ -3310,7 +3318,7 @@ mod tests {
         .unwrap();
         let resolved = resolve_candidates_from(
             [
-                "paid", "zen", "account", "missing", "kilo", "spoof", "blank", "loop",
+                "paid", "zen", "account", "missing", "kilo", "zen-free", "spoof", "blank", "loop",
             ]
             .map(String::from)
             .to_vec(),
@@ -3322,7 +3330,7 @@ mod tests {
                 .iter()
                 .map(|item| item.internal_id.as_str())
                 .collect::<Vec<_>>(),
-            ["account", "kilo"]
+            ["account", "kilo", "zen-free"]
         );
         assert!(resolved.iter().all(|item| item.api_key.trim().is_empty()));
         assert!(resolved[0].account_source.is_some());

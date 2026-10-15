@@ -28,6 +28,24 @@ pub(crate) use providers::{context_limit_error, stream_error};
 pub use responses::{chat_to_responses, chat_to_responses_with_tools, responses_to_chat};
 pub(crate) use responses::{normalize_responses_tool_rounds, GoogleThought};
 
+pub(crate) fn chat_request_to_responses(body: &Value, model: &str) -> Value {
+    protocol::chat_to_responses(body, model)
+}
+
+pub(crate) async fn convert_public_model_stream(
+    response: reqwest::Response,
+    model: &str,
+    streaming: bool,
+    responses: bool,
+) -> Result<Response, ProxyError> {
+    let protocol = if responses {
+        protocol::WireProtocol::Responses
+    } else {
+        protocol::WireProtocol::Chat
+    };
+    providers::converted(response, protocol, model, streaming, true).await
+}
+
 pub(crate) fn forget_preparation_metadata(provider: AccountProvider, account_id: &str) {
     providers::forget_metadata(provider, account_id);
 }

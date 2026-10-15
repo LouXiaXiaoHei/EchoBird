@@ -9,6 +9,7 @@ const BUNDLED_CATALOG: &str = include_str!("../../../docs/api/free-models/index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeylessAuth {
     Anonymous,
+    Public,
 }
 
 pub(crate) fn bundled_free_model_directory() -> Result<Value, String> {
@@ -84,6 +85,7 @@ fn keyless_endpoint(raw: &str) -> Option<KeylessAuth> {
     }
     match (url.host_str()?, url.path().trim_end_matches('/')) {
         ("api.kilo.ai", "/api/gateway") => Some(KeylessAuth::Anonymous),
+        ("opencode.ai", "/inference/v1") => Some(KeylessAuth::Public),
         _ => None,
     }
 }
@@ -210,6 +212,21 @@ mod tests {
     #[test]
     fn bundled_keyless_entries_have_explicit_authentication_modes() {
         let catalog = bundled_free_model_directory().unwrap();
+        let zen_models: Vec<_> = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|model| model["providerId"] == "opencode-zen-free")
+            .map(|model| model["modelId"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            zen_models,
+            [
+                "big-pickle",
+                "space-bunny-free",
+                "muse-spark-1.3-contributor-free"
+            ]
+        );
         assert_eq!(
             keyless_auth_in_catalog(
                 &catalog,
@@ -217,6 +234,14 @@ mod tests {
                 "kilo-auto/free"
             ),
             Some(KeylessAuth::Anonymous)
+        );
+        assert_eq!(
+            keyless_auth_in_catalog(
+                &catalog,
+                "https://opencode.ai/inference/v1/",
+                "space-bunny-free"
+            ),
+            Some(KeylessAuth::Public)
         );
         assert_eq!(
             keyless_auth_in_catalog(
@@ -252,6 +277,9 @@ mod tests {
             "https://user:password@opencode.ai/zen/v1",
             "https://opencode.ai/zen/v1?key=value",
             "http://127.0.0.1/zen/v1",
+            "https://opencode.ai/inference/v1/other",
+            "https://user@opencode.ai/inference/v1",
+            "https://opencode.ai/inference/v1?key=value",
         ] {
             assert_eq!(
                 keyless_auth_in_catalog(&catalog, endpoint, "kilo-auto/free"),
