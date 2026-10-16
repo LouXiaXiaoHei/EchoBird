@@ -1,11 +1,11 @@
 {
   "version": "5.9.6",
-  "releaseDate": "2026-10-16",
-  "releaseNotes": "持续优化 EchoBird 产品体验，让日常使用更流畅、更安心。\n\n- 支持 Open Design，应用、账号与模型管理更完整。\n- 账号隐私跨页面同步，隐藏与显示保持一致，并记住上次选择。\n- 优化智能接入动效与卡片展示，连接关系更清晰。\n- 统一应用图标与分类导航，查找和切换更直观。\n- 提升账号与模型切换体验，常用操作更顺畅。",
+  "releaseDate": "2026-10-17",
+  "releaseNotes": "全面打磨日常使用体验，让界面更舒适、切换更顺手。\n\n- 智能接入支持卡片与列表切换，排序、启停和模型切换更方便。\n- 新增四种全局背景选择，随主题配色变化，并记住你的偏好。\n- 优化半透明卡片、标签切换与深浅色显示，页面更通透、更清晰。\n- 设置布局更整洁，界面缩放移至通用，语言独立平铺展示。\n- AI 助手统一五档推理强度，保留默认选项，优化拖动动效并记住各模型选择。",
   "releaseNotesI18n": {
-    "zh-cn": "持续优化 EchoBird 产品体验，让日常使用更流畅、更安心。\n\n- 支持 Open Design，应用、账号与模型管理更完整。\n- 账号隐私跨页面同步，隐藏与显示保持一致，并记住上次选择。\n- 优化智能接入动效与卡片展示，连接关系更清晰。\n- 统一应用图标与分类导航，查找和切换更直观。\n- 提升账号与模型切换体验，常用操作更顺畅。",
-    "en": "A more polished EchoBird experience for smoother, more comfortable everyday use.\n\n- Open Design support brings more complete app, account, and model management.\n- Account privacy stays in sync across pages and remembers your visibility preference.\n- Refined Smart Access animations and cards make connections easier to follow.\n- Consistent app icons and clearer categories make tools easier to find and switch.\n- Improved account and model switching makes everyday actions smoother.",
-    "zh-tw": "持續優化 EchoBird 產品體驗，讓日常使用更流暢、更安心。\n\n- 支援 Open Design，應用、帳號與模型管理更完整。\n- 帳號隱私跨頁面同步，隱藏與顯示保持一致，並記住上次選擇。\n- 優化智慧接入動效與卡片展示，連線關係更清晰。\n- 統一應用圖示與分類導覽，尋找和切換更直覺。\n- 提升帳號與模型切換體驗，常用操作更順暢。",
-    "ja": "EchoBird の使い心地を磨き、毎日の操作をよりスムーズで快適に。\n\n- Open Design に対応し、アプリ・アカウント・モデルの管理を充実させました。\n- アカウントの表示・非表示を画面間で同期し、前回の設定を保持します。\n- スマート接続のアニメーションとカード表示を整え、接続関係を見やすくしました。\n- アプリアイコンとカテゴリを統一し、ツールの検索や切り替えを分かりやすくしました。\n- アカウントとモデルの切り替えを改善し、日常の操作をよりスムーズにしました。"
+    "zh-cn": "全面打磨日常使用体验，让界面更舒适、切换更顺手。\n\n- 智能接入支持卡片与列表切换，排序、启停和模型切换更方便。\n- 新增四种全局背景选择，随主题配色变化，并记住你的偏好。\n- 优化半透明卡片、标签切换与深浅色显示，页面更通透、更清晰。\n- 设置布局更整洁，界面缩放移至通用，语言独立平铺展示。\n- AI 助手统一五档推理强度，保留默认选项，优化拖动动效并记住各模型选择。",
+    "en": "A refined everyday experience with a clearer interface and smoother switching.\n\n- Switch Smart Access between cards and a list for easier sorting, enabling, and model selection.\n- Choose from four global background options that follow your theme and remember your preference.\n- Refined translucent cards, tabs, and light and dark colors make pages clearer and more comfortable.\n- Cleaner settings move interface scaling to General and give languages their own page with all choices visible.\n- The AI assistant offers the same five reasoning levels plus Default for every API model, with refined slider animations and saved choices per model.",
+    "zh-tw": "全面打磨日常使用體驗，讓介面更舒適、切換更順手。\n\n- 智慧接入支援卡片與清單切換，排序、啟停和模型切換更方便。\n- 新增四種全域背景選擇，隨主題配色變化，並記住你的偏好。\n- 優化半透明卡片、分頁切換與深淺色顯示，頁面更通透、更清晰。\n- 設定版面更整潔，介面縮放移至通用，語言獨立平鋪顯示。\n- AI 助手統一五段推理強度，保留預設選項，優化拖曳動效並記住各模型選擇。",
+    "ja": "画面の見やすさと切り替えやすさを磨き、毎日の操作をさらに快適に。\n\n- スマート接続をカード表示とリスト表示で切り替え、並べ替え・有効化・モデル選択をしやすくしました。\n- テーマカラーに連動する4種類の全体背景から選べ、前回の選択を保持します。\n- 半透明カード、タブ、ライト・ダーク配色を調整し、画面をより見やすくしました。\n- 設定画面を整理し、表示倍率を「一般」に移動。言語は専用ページに一覧表示します。\n- AI アシスタントの全 API モデルで共通の推論強度5段階と「デフォルト」を選べ、スライダーの動きとモデルごとの選択保存を改善しました。"
   }
 }
