@@ -150,6 +150,15 @@ afterEach(() => {
 describe('Mother Agent reasoning workflow', () => {
   const deepseek = { ...model, internalId: 'deepseek', modelId: 'deepseek-flash' };
   const gpt = { ...model, internalId: 'gpt', modelId: 'gpt-5.2' };
+  const anthropic = {
+    ...model,
+    internalId: 'anthropic',
+    modelId: 'custom-messages-model',
+    baseUrl: '',
+    anthropicUrl: 'https://example.test/anthropic',
+  };
+  const router = { ...model, internalId: 'router', scope: 'smartRouter' as const };
+  const gateway = { ...model, internalId: 'gateway', baseUrl: 'https://openrouter.ai/api/v1' };
   const preferenceKey = (entry: ModelConfig) =>
     JSON.stringify([
       entry.internalId,
@@ -159,7 +168,7 @@ describe('Mother Agent reasoning workflow', () => {
     ]);
   beforeEach(() => {
     stored.set('echobird_agent_model', deepseek.internalId);
-    vi.mocked(api.getModels).mockResolvedValue([deepseek, gpt, model]);
+    vi.mocked(api.getModels).mockResolvedValue([deepseek, gpt, model, anthropic, router, gateway]);
   });
 
   it('starts with default and sends no extra parameter without an explicit choice', async () => {
@@ -200,16 +209,26 @@ describe('Mother Agent reasoning workflow', () => {
     expect(state.reasoningEffort).toBe('xhigh');
   });
 
-  it('keeps all five DeepSeek choices and sends them unchanged only on explicit turns', async () => {
+  it('keeps all five choices for every API model and sends only on explicit turns', async () => {
     await mount();
     const levels: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
-    for (const effort of levels) {
-      const requestCount = vi.mocked(api.sendAgentMessage).mock.calls.length;
-      act(() => state.setReasoningEffort(effort));
-      expect(state.reasoningEffort).toBe(effort);
-      expect(api.sendAgentMessage).toHaveBeenCalledTimes(requestCount);
-      await send(`Use ${effort}`);
-      expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe(effort);
+    for (const selected of [deepseek, gpt, model, anthropic, router, gateway]) {
+      act(() => state.setAgentModel(selected.internalId));
+      expect(state.reasoningLevels).toEqual(levels);
+      for (const effort of levels) {
+        const requestCount = vi.mocked(api.sendAgentMessage).mock.calls.length;
+        act(() => state.setReasoningEffort(effort));
+        expect(state.reasoningEffort).toBe(effort);
+        expect(api.sendAgentMessage).toHaveBeenCalledTimes(requestCount);
+        await send(`Use ${effort}`);
+        expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe(effort);
+        emitAgent({ type: 'done', conversation_id: activeSession() });
+      }
+      act(() => state.setReasoningEffort(undefined));
+      await send('Return to model default');
+      expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
+        'reasoning_effort'
+      );
       emitAgent({ type: 'done', conversation_id: activeSession() });
     }
     act(() => state.setReasoningEffort('medium'));
@@ -217,7 +236,7 @@ describe('Mother Agent reasoning workflow', () => {
     renderer = undefined;
     await mount();
     expect(state.reasoningEffort).toBe('medium');
-    expect(api.sendAgentMessage).toHaveBeenCalledTimes(levels.length);
+    expect(api.sendAgentMessage).toHaveBeenCalledTimes(6 * (levels.length + 1));
     act(() => state.setReasoningEffort(undefined));
     await send('Return to model default');
     expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
@@ -301,7 +320,7 @@ describe('Mother Agent reasoning workflow', () => {
     expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('low');
   });
 
-  it('omits stale or unsupported choices and keeps Claude Code native settings', async () => {
+  it('drops invalid saved values and keeps native Claude Code settings separate', async () => {
     stored.set(REASONING_STORAGE_KEY, JSON.stringify({ [preferenceKey(deepseek)]: 'unsupported' }));
     await mount();
     expect(state.reasoningEffort).toBeUndefined();
@@ -324,9 +343,7 @@ describe('Mother Agent reasoning workflow', () => {
     act(() => state.setAgentModel(model.internalId));
     act(() => state.setReasoningEffort('high'));
     await send('Unknown model');
-    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
-      'reasoning_effort'
-    );
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('high');
   });
 
   it('invalidates a preference when an existing entry changes model and allows reset to default', async () => {

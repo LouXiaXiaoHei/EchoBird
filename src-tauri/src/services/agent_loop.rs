@@ -2145,7 +2145,7 @@ mod thinking_history_tests {
         );
         assert_eq!(calls.len(), 1);
         let first = captured.recv().await.unwrap();
-        assert_eq!(first["thinking"]["type"], "adaptive");
+        assert!(first.get("thinking").is_none());
         assert_eq!(first["output_config"]["effort"], "high");
 
         let origin = client.thinking_origin();

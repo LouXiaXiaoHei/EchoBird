@@ -1904,85 +1904,79 @@ mod tests {
             content: MessageContent::Text("fixture prompt".into()),
         }];
 
-        for (provider, model, effort) in [
-            (LlmProvider::OpenAI, "deepseek-flash", Some("high")),
-            (LlmProvider::OpenAI, "deepseek-flash", Some("medium")),
-            (LlmProvider::OpenAI, "deepseek-flash", Some("xhigh")),
-            (LlmProvider::OpenAI, "gpt-5.2", Some("xhigh")),
-            (LlmProvider::Anthropic, "claude-opus-4-6", Some("max")),
-            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("low")),
-            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("medium")),
-            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("xhigh")),
-            (LlmProvider::OpenAI, "deepseek-flash", None),
-            (LlmProvider::Anthropic, "deepseek-v4-pro", None),
-            (LlmProvider::OpenAI, "unknown", None),
-            (LlmProvider::Anthropic, "unknown", None),
+        for (provider, model) in [
+            (LlmProvider::OpenAI, "gpt-5.2-pro"),
+            (LlmProvider::OpenAI, "custom-model"),
+            (LlmProvider::Anthropic, "claude-opus-4-5"),
+            (LlmProvider::Anthropic, "custom-model"),
         ] {
-            let client = LlmClient::new(LlmConfig {
-                provider,
-                model: model.into(),
-                base_url: base_url.clone(),
-                api_key: "fixture-key".into(),
-                reasoning_effort: effort.map(str::to_owned),
-            })
-            .unwrap();
-            for _ in 0..2 {
-                let mut stream = client
-                    .chat_stream(&messages, &tools, "fixture system")
-                    .await
-                    .unwrap();
-                let mut text = String::new();
-                while let Some(event) = stream.recv().await {
-                    if let LlmEvent::TextDelta(delta) = event {
-                        text.push_str(&delta);
-                    }
-                }
-                assert_eq!(text, "fixture answer");
-                let body = captured.recv().await.unwrap();
-                assert_eq!(body["model"], model);
-                assert!(!body["tools"].as_array().unwrap().is_empty());
-                match (provider, effort) {
-                    (LlmProvider::OpenAI, Some(effort)) => {
-                        assert_eq!(body["reasoning_effort"], effort);
-                        assert!(body.get("output_config").is_none());
-                    }
-                    (LlmProvider::Anthropic, Some(effort)) => {
-                        assert_eq!(body["output_config"]["effort"], effort);
-                        assert_eq!(body["max_tokens"], 32768);
-                        assert!(body.get("reasoning_effort").is_none());
-                    }
-                    (_, None) => {
-                        assert!(body.get("reasoning_effort").is_none());
-                        assert!(body.get("output_config").is_none());
-                        assert!(body.get("thinking").is_none());
-                        if provider == LlmProvider::Anthropic {
-                            assert_eq!(body["max_tokens"], 4096);
+            for effort in [
+                None,
+                Some("low"),
+                Some("medium"),
+                Some("high"),
+                Some("xhigh"),
+                Some("max"),
+            ] {
+                let client = LlmClient::new(LlmConfig {
+                    provider,
+                    model: model.into(),
+                    base_url: base_url.clone(),
+                    api_key: "fixture-key".into(),
+                    reasoning_effort: effort.map(str::to_owned),
+                })
+                .unwrap();
+                for _ in 0..2 {
+                    let mut stream = client
+                        .chat_stream(&messages, &tools, "fixture system")
+                        .await
+                        .unwrap();
+                    let mut text = String::new();
+                    while let Some(event) = stream.recv().await {
+                        if let LlmEvent::TextDelta(delta) = event {
+                            text.push_str(&delta);
                         }
                     }
+                    assert_eq!(text, "fixture answer");
+                    let body = captured.recv().await.unwrap();
+                    assert_eq!(body["model"], model);
+                    assert!(!body["tools"].as_array().unwrap().is_empty());
+                    match (provider, effort) {
+                        (LlmProvider::OpenAI, Some(effort)) => {
+                            assert_eq!(body["reasoning_effort"], effort);
+                            assert!(body.get("output_config").is_none());
+                        }
+                        (LlmProvider::Anthropic, Some(effort)) => {
+                            assert_eq!(body["output_config"]["effort"], effort);
+                            assert!(body.get("reasoning_effort").is_none());
+                        }
+                        (_, None) => {
+                            assert!(body.get("reasoning_effort").is_none());
+                            assert!(body.get("output_config").is_none());
+                        }
+                    }
+                    assert!(body.get("thinking").is_none());
+                    if provider == LlmProvider::Anthropic {
+                        assert_eq!(body["max_tokens"], 4096);
+                    }
+                    messages = vec![
+                        Message {
+                            role: "assistant".into(),
+                            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                                id: "fixture-call".into(),
+                                name: "fixture_tool".into(),
+                                input: json!({}),
+                            }]),
+                        },
+                        Message {
+                            role: "user".into(),
+                            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                                tool_use_id: "fixture-call".into(),
+                                content: "fixture result".into(),
+                            }]),
+                        },
+                    ];
                 }
-                if model.starts_with("deepseek") && effort.is_some() {
-                    assert_eq!(body["thinking"]["type"], "enabled");
-                }
-                if model.starts_with("claude") {
-                    assert_eq!(body["thinking"]["type"], "adaptive");
-                }
-                messages = vec![
-                    Message {
-                        role: "assistant".into(),
-                        content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
-                            id: "fixture-call".into(),
-                            name: "fixture_tool".into(),
-                            input: json!({}),
-                        }]),
-                    },
-                    Message {
-                        role: "user".into(),
-                        content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
-                            tool_use_id: "fixture-call".into(),
-                            content: "fixture result".into(),
-                        }]),
-                    },
-                ];
             }
         }
         server.abort();

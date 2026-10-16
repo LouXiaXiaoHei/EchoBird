@@ -13,72 +13,42 @@ const model = (modelId: string, changes: Partial<ModelConfig> = {}): ModelConfig
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe('Mother reasoning capability selection', () => {
-  it('offers all five accepted DeepSeek levels through either supported protocol', () => {
-    expect(getReasoningLevels(model('deepseek-flash'))).toEqual([
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-      'max',
-    ]);
-    expect(
-      getReasoningLevels(
-        model('deepseek-v4-pro', {
-          baseUrl: '',
-          anthropicUrl: 'https://api.example.test/anthropic',
-        })
-      )
-    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
-  });
-
-  it('uses the selected wire protocol and exact model family', () => {
-    expect(getReasoningLevels(model('gpt-5.2-2025-12-11'))).toEqual([
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-    ]);
-    expect(
-      getReasoningLevels(
-        model('claude-opus-4-6-20260205', { baseUrl: '', anthropicUrl: 'https://api.example.test' })
-      )
-    ).toEqual(['low', 'medium', 'high', 'max']);
-    expect(
-      getReasoningLevels(model('claude-opus-4-6', { anthropicUrl: 'https://api.example.test' }))
-    ).toEqual([]);
-    for (const id of [
-      'gpt-5.2-chat-latest',
-      'gpt-5.2-pro',
-      'gpt-5.20',
-      'gpt-5.2-2025-1211',
-      'gpt-6.1-sol',
-    ]) {
-      expect(getReasoningLevels(model(id))).toEqual([]);
+describe('Mother reasoning levels', () => {
+  it.each(['gpt-5', 'gpt-5.2-pro', 'claude-opus-4-5', 'deepseek-flash', 'custom-model'])(
+    'offers the same five choices for %s through either protocol',
+    (id) => {
+      for (const changes of [
+        {},
+        { baseUrl: '', anthropicUrl: 'https://api.example.test/anthropic' },
+        { anthropicUrl: 'https://api.example.test/anthropic' },
+      ]) {
+        expect(getReasoningLevels(model(id, changes))).toEqual([
+          'low',
+          'medium',
+          'high',
+          'xhigh',
+          'max',
+        ]);
+      }
     }
-  });
+  );
 
-  it('keeps missing, unknown, dynamic router, and unsupported gateway capabilities at default', () => {
+  it('keeps all five choices for routers, gateways and incomplete endpoints', () => {
+    for (const changes of [
+      { scope: 'smartRouter' as const },
+      { baseUrl: 'https://openrouter.ai/api/v1' },
+      { baseUrl: 'http://127.0.0.1:55536' },
+      { baseUrl: '' },
+    ]) {
+      expect(getReasoningLevels(model('custom-model', changes))).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+    }
     expect(getReasoningLevels()).toEqual([]);
-    expect(getReasoningLevels(model('custom-model'))).toEqual([]);
-    expect(getReasoningLevels(model('gpt-5.2', { scope: 'smartRouter' }))).toEqual([]);
-    expect(
-      getReasoningLevels(model('gpt-5.2', { baseUrl: 'https://openrouter.ai/api/v1' }))
-    ).toEqual([]);
-    expect(getReasoningLevels(model('gpt-5.2', { baseUrl: '' }))).toEqual([]);
-  });
-
-  it('uses the real provider capabilities when a Messages endpoint maps Claude aliases', () => {
-    expect(
-      getReasoningLevels(
-        model('claude-opus-5', { baseUrl: '', anthropicUrl: 'https://api.deepseek.com/anthropic' })
-      )
-    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
-    expect(
-      getReasoningLevels(
-        model('claude-opus-5', { baseUrl: '', anthropicUrl: 'https://api.anthropic.com' })
-      )
-    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('recovers safely from missing, malformed, and stale local preferences', () => {
