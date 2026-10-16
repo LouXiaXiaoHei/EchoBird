@@ -10,6 +10,7 @@ interface RoutingToggleProps {
   hint?: string;
   checked: boolean;
   disabled?: boolean;
+  pending?: boolean;
   onChange: (v: boolean) => void;
 }
 
@@ -19,6 +20,7 @@ export function RoutingToggle({
   hint,
   checked,
   disabled = false,
+  pending = false,
   onChange,
 }: RoutingToggleProps) {
   const [open, setOpen] = useState(false);
@@ -89,9 +91,10 @@ export function RoutingToggle({
         role="switch"
         aria-checked={checked}
         aria-label={label}
-        disabled={disabled}
+        aria-busy={pending || undefined}
+        disabled={disabled || pending}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-cyber-accent ${hideLabel ? '' : 'mr-2'} disabled:opacity-50 ${
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors outline-none focus-visible:ring-2 focus-visible:ring-cyber-accent ${hideLabel ? '' : 'mr-2'} ${disabled ? 'disabled:opacity-50' : ''} ${
           checked ? 'bg-cyber-accent' : 'bg-cyber-border'
         }`}
       >

@@ -170,7 +170,7 @@ export const Sidebar = ({
               label={t('nav.smartRouter')}
               hideLabel
               checked={smartRouterEnabled}
-              disabled={smartRouterTogglePending}
+              pending={smartRouterTogglePending}
               onChange={onSmartRouterChange}
             />
           </div>
