@@ -20,6 +20,8 @@ pub mod cline_accounts;
 pub mod cline_native;
 pub mod codex_accounts;
 pub mod codex_catalog;
+#[cfg(any(target_os = "macos", test))]
+mod codex_keychain;
 #[path = "codex_proxy/mod.rs"]
 pub mod codex_runtime;
 pub mod codex_session_merge;

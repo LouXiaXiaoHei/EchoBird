@@ -294,28 +294,28 @@ fn keychain_account(base_dir: &Path) -> String {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn read_keychain_raw(base_dir: &Path) -> Result<Option<Vec<u8>>, String> {
-    let output = crate::utils::process::command("security")
-        .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a"])
-        .arg(keychain_account(base_dir))
-        .args(["-w"])
-        .output()
-        .map_err(|error| format!("accountError.keychain|{error}"))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let raw = output.stdout;
-    if raw.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(raw))
-    }
+    super::codex_keychain::read(base_dir, keychain_account(base_dir))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn read_keychain_raw(_base_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    #[cfg(test)]
+    if let Some(value) = TEST_KEYCHAIN_READ.with(|value| value.borrow().clone()) {
+        return value;
+    }
     Ok(None)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_KEYCHAIN_READ: std::cell::RefCell<Option<Result<Option<Vec<u8>>, String>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn retry_keychain(_base_dir: &Path) {
+    #[cfg(all(target_os = "macos", not(test)))]
+    super::codex_keychain::retry(_base_dir);
 }
 
 #[cfg(target_os = "macos")]
@@ -330,6 +330,8 @@ fn write_keychain_raw(base_dir: &Path, raw: &[u8]) -> Result<(), String> {
         .output()
         .map_err(|error| format!("accountError.keychain|{error}"))?;
     if output.status.success() {
+        #[cfg(not(test))]
+        super::codex_keychain::forget(base_dir);
         Ok(())
     } else {
         Err(format!(
@@ -440,13 +442,18 @@ fn read_oauth_snapshot(path: &Path) -> Option<(Vec<u8>, Value)> {
     is_oauth_auth(&auth).then_some((raw, auth))
 }
 
-fn read_current_oauth_snapshot(auth_path: &Path) -> Option<(Vec<u8>, Value)> {
-    read_oauth_snapshot(auth_path).or_else(|| {
-        let base_dir = auth_path.parent()?;
-        let raw = read_keychain_raw(base_dir).ok()??;
-        let auth: Value = serde_json::from_slice(&raw).ok()?;
-        is_oauth_auth(&auth).then_some((raw, auth))
-    })
+fn read_current_oauth_snapshot(auth_path: &Path) -> Result<Option<(Vec<u8>, Value)>, String> {
+    if let Some(snapshot) = read_oauth_snapshot(auth_path) {
+        return Ok(Some(snapshot));
+    }
+    let Some(base_dir) = auth_path.parent() else {
+        return Ok(None);
+    };
+    let Some(raw) = read_keychain_raw(base_dir)? else {
+        return Ok(None);
+    };
+    let auth: Value = serde_json::from_slice(&raw).map_err(|_| "accountError.format")?;
+    Ok(is_oauth_auth(&auth).then_some((raw, auth)))
 }
 
 pub(crate) fn has_effective_oauth_snapshot(auth_path: &Path, backup_path: &Path) -> bool {
@@ -454,7 +461,7 @@ pub(crate) fn has_effective_oauth_snapshot(auth_path: &Path, backup_path: &Path)
 }
 
 fn effective_snapshot(auth_path: &Path, backup_path: &Path) -> Result<(Vec<u8>, Value), String> {
-    if let Some(snapshot) = read_current_oauth_snapshot(auth_path) {
+    if let Some(snapshot) = read_current_oauth_snapshot(auth_path)? {
         return Ok(snapshot);
     }
     read_oauth_snapshot(backup_path).ok_or_else(|| "accountError.noAccount".to_string())
@@ -482,20 +489,20 @@ fn read_quota_cache(store_dir: &Path, account_id: &str) -> Option<AccountQuotaCa
     Some(cache)
 }
 
-fn active_account_id(auth_path: &Path) -> Option<String> {
-    read_current_oauth_snapshot(auth_path)
+fn active_account_id(auth_path: &Path) -> Result<Option<String>, String> {
+    Ok(read_current_oauth_snapshot(auth_path)?
         .and_then(|(raw, auth)| metadata_from_auth(&auth, &raw).ok())
-        .map(|metadata| metadata.id)
+        .map(|metadata| metadata.id))
 }
 
 fn persist_active_snapshot(codex_dir: &Path, account_id: &str, raw: &[u8]) -> Result<(), String> {
     let auth_path = codex_dir.join("auth.json");
-    if active_account_id(&auth_path).as_deref() != Some(account_id) {
+    if active_account_id(&auth_path)?.as_deref() != Some(account_id) {
         return Ok(());
     }
 
-    let keychain_is_current = read_keychain_raw(codex_dir).ok().flatten().is_some()
-        && read_oauth_snapshot(&auth_path).is_none();
+    let keychain_is_current =
+        read_oauth_snapshot(&auth_path).is_none() && read_keychain_raw(codex_dir)?.is_some();
     if keychain_is_current {
         write_keychain_raw(codex_dir, raw)
     } else {
@@ -641,6 +648,7 @@ pub(crate) fn save_effective_snapshot_at(
 
 pub fn capture_current_account() -> Result<CodexAccountSummary, String> {
     let codex_dir = codex_home()?;
+    retry_keychain(&codex_dir);
     let state_dir = echobird_dir()?;
     let summary = save_effective_snapshot_at(
         &codex_dir.join("auth.json"),
@@ -926,7 +934,7 @@ fn list_accounts_at(
     auth_path: &Path,
     store_dir: &Path,
 ) -> Result<Vec<CodexAccountSummary>, String> {
-    let active_id = active_account_id(auth_path);
+    let active_id = active_account_id(auth_path)?;
     list_saved_accounts_at(store_dir, active_id.as_deref())
 }
 
@@ -1101,8 +1109,12 @@ fn switch_account_at(
         return Err("accountError.invalidAccount".to_string());
     }
 
-    if let Ok((raw, auth)) = effective_snapshot(auth_path, backup_path) {
-        let _ = save_snapshot(&raw, &auth, store_dir);
+    match effective_snapshot(auth_path, backup_path) {
+        Ok((raw, auth)) => {
+            let _ = save_snapshot(&raw, &auth, store_dir);
+        }
+        Err(error) if error.starts_with("accountError.keychain") => return Err(error),
+        Err(_) => {}
     }
 
     let saved_path = store_dir.join(format!("{account_id}.json"));
@@ -1111,11 +1123,8 @@ fn switch_account_at(
         .map_err(|error| format!("accountError.invalidAccount|{error}"))?;
     let metadata = metadata_from_auth(&auth, &raw)?;
 
-    let keychain_is_current = read_keychain_raw(auth_path.parent().unwrap_or(Path::new("")))
-        .ok()
-        .flatten()
-        .is_some()
-        && read_oauth_snapshot(auth_path).is_none();
+    let keychain_is_current = read_oauth_snapshot(auth_path).is_none()
+        && read_keychain_raw(auth_path.parent().unwrap_or(Path::new("")))?.is_some();
     let target = if !keychain_is_current
         && (read_oauth_snapshot(auth_path).is_some() || !backup_path.exists())
     {
@@ -1139,10 +1148,9 @@ pub(crate) fn restore_legacy_oauth(auth_path: &Path, backup_path: &Path) -> Resu
         return Ok(false);
     }
     let raw = fs::read(backup_path).map_err(|error| format!("accountError.read|{error}"))?;
-    let keychain_was_used = read_keychain_raw(auth_path.parent().unwrap_or(Path::new("")))
-        .ok()
-        .flatten()
-        .is_some();
+    retry_keychain(auth_path.parent().unwrap_or(Path::new("")));
+    let keychain_was_used =
+        read_keychain_raw(auth_path.parent().unwrap_or(Path::new("")))?.is_some();
     write_private_file(auth_path, &raw)?;
     if keychain_was_used {
         write_keychain_raw(auth_path.parent().unwrap_or(Path::new("")), &raw)?;
@@ -1153,6 +1161,7 @@ pub(crate) fn restore_legacy_oauth(auth_path: &Path, backup_path: &Path) -> Resu
 
 pub fn switch_account(account_id: &str) -> Result<CodexAccountSummary, String> {
     let codex_dir = codex_home()?;
+    retry_keychain(&codex_dir);
     let state_dir = echobird_dir()?;
     switch_account_at(
         account_id,
@@ -1206,9 +1215,11 @@ pub async fn refresh_account_quota(account_id: &str) -> Result<CodexAccountSumma
     if !valid_account_id(account_id) {
         return Err("accountError.invalidAccount".to_string());
     }
+    let codex_dir = codex_home()?;
+    retry_keychain(&codex_dir);
     refresh_account_quota_at(
         account_id,
-        &codex_home()?,
+        &codex_dir,
         &account_store_dir()?,
         OAUTH_TOKEN_URL,
         USAGE_URL,
@@ -1296,13 +1307,45 @@ async fn refresh_account_quota_at(
             .as_bytes(),
     )?;
 
-    let active_id = active_account_id(&codex_dir.join("auth.json"));
+    let active_id = active_account_id(&codex_dir.join("auth.json"))?;
     Ok(build_summary(metadata, active_id.as_deref(), store_dir))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_keychain_refusal_preserves_the_backup_and_native_files() {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_KEYCHAIN_READ.with(|value| *value.borrow_mut() = None);
+            }
+        }
+        let _reset = Reset;
+        let root = temp_dir("keychain-refused");
+        let auth_path = root.join("auth.json");
+        let backup = root.join("backup.json");
+        let store = root.join("accounts");
+        let raw = oauth("fixture@example.test", "fixture-account", "fixture-refresh");
+        fs::write(&backup, &raw).unwrap();
+        let auth: Value = serde_json::from_slice(&raw).unwrap();
+        let account = save_snapshot(&raw, &auth, &store).unwrap();
+        TEST_KEYCHAIN_READ
+            .with(|value| *value.borrow_mut() = Some(Err("accountError.keychain|Refused".into())));
+        assert!(effective_snapshot(&auth_path, &backup)
+            .unwrap_err()
+            .starts_with("accountError.keychain"));
+        assert!(list_accounts_at(&auth_path, &store).is_err());
+        assert!(switch_account_at(&account.id, &auth_path, &backup, &store).is_err());
+        assert!(restore_legacy_oauth(&auth_path, &backup).is_err());
+        assert!(!auth_path.exists());
+        assert_eq!(fs::read(&backup).unwrap(), raw);
+        TEST_KEYCHAIN_READ.with(|value| *value.borrow_mut() = None);
+        assert_eq!(effective_snapshot(&auth_path, &backup).unwrap().0, raw);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn private_credential_replacement_leaves_the_previous_file_intact() {

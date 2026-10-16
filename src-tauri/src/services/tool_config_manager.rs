@@ -30,6 +30,7 @@ mod proxy_ports;
 mod qoder;
 mod qwencode;
 mod relay;
+mod toml;
 mod vibe_trading;
 pub(crate) mod vscode;
 mod workbuddy;
@@ -570,292 +571,40 @@ pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
     read_generic_json(tool_id)
 }
 
-// ════════════════════════════════════════════════════════════════
-//  Simple TOML helpers (top-level key = "value" only)
-// ════════════════════════════════════════════════════════════════
+// TOML edits preserve unrelated values, table spelling and comments.
 
 pub(crate) fn toml_read_top(content: &str, key: &str) -> String {
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('[') || t.starts_with('#') || t.is_empty() {
-            if t.starts_with('[') {
-                break;
-            } // Entered sections, stop
-            continue;
-        }
-        if let Some((k, v)) = t.split_once('=') {
-            if k.trim() == key {
-                let v = v.trim();
-                if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-                    return v[1..v.len() - 1].to_string();
-                }
-                return v.to_string();
-            }
-        }
-    }
-    String::new()
+    toml::read(content, "", key)
 }
 
-/// Surgically remove a top-level `key = ...` line from a TOML document,
-/// preserving every other line and section verbatim. Mirrors the
-/// top-level-only scan of `toml_write_top`: only keys before the first
-/// `[section]` are candidates (the write helpers never touch keys
-/// inside a section, so a top-level key is the only shape we'd ever
-/// need to delete). No-op if the key is absent. The trailing-newline
-/// convention is re-applied by `write_codex_canonical_fields` at the
-/// end of its pipeline, so this helper — like `toml_write_top` — does
-/// not re-add it.
-///
-/// Used to evict legacy keys we no longer write (e.g. `review_model`)
-/// so a stale value left by an older EchoBird version can't survive a
-/// model switch / pre-spawn self-heal.
 fn toml_delete_top(content: &str, key: &str) -> String {
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let mut first_section: Option<usize> = None;
-    let mut i = 0;
-    while i < lines.len() {
-        let t = lines[i].trim();
-        if first_section.is_none() && t.starts_with('[') {
-            first_section = Some(i);
-        }
-        // Once we've entered the first [section], the remaining top-level
-        // keys are exhausted — stop scanning (a same-named key inside a
-        // section belongs to that section, not the top level).
-        if first_section.is_some() && i >= first_section.unwrap() {
-            break;
-        }
-        if let Some((k, _)) = t.split_once('=') {
-            if k.trim() == key {
-                lines.remove(i);
-                break;
-            }
-        }
-        i += 1;
-    }
-    lines.join("\n")
+    toml::write(content, "", key, None)
 }
 
 fn toml_write_top(content: &str, key: &str, value: &str) -> String {
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let mut found = false;
-    let mut first_section: Option<usize> = None;
-
-    for (i, line) in lines.iter_mut().enumerate() {
-        let t = line.trim();
-        if first_section.is_none() && t.starts_with('[') {
-            first_section = Some(i);
-        }
-        if first_section.is_some() && i >= first_section.unwrap() {
-            continue;
-        }
-        if let Some((k, _)) = t.split_once('=') {
-            if k.trim() == key {
-                *line = format!("{} = \"{}\"", key, toml_escape(value));
-                found = true;
-                break;
-            }
-        }
-    }
-
-    if !found {
-        let new_line = format!("{} = \"{}\"", key, toml_escape(value));
-        match first_section {
-            Some(i) => lines.insert(i, new_line),
-            None => lines.push(new_line),
-        }
-    }
-    lines.join("\n")
+    toml::write(content, "", key, Some(toml_edit::value(value)))
 }
 
-/// Variant of `toml_write_top` that writes the value verbatim, without
-/// wrapping it in `"..."`. Use for booleans (`true`/`false`) and integers
-/// — TOML rejects them when quoted. Mirrors the line-based, overwrite-
-/// or-insert semantics of the string variant.
 fn toml_write_top_raw(content: &str, key: &str, value: &str) -> String {
-    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
-    let mut found = false;
-    let mut first_section: Option<usize> = None;
-
-    for (i, line) in lines.iter_mut().enumerate() {
-        let t = line.trim();
-        if first_section.is_none() && t.starts_with('[') {
-            first_section = Some(i);
-        }
-        if first_section.is_some() && i >= first_section.unwrap() {
-            continue;
-        }
-        if let Some((k, _)) = t.split_once('=') {
-            if k.trim() == key {
-                *line = format!("{} = {}", key, value);
-                found = true;
-                break;
-            }
-        }
+    match toml::raw(value) {
+        Some(value) => toml::write(content, "", key, Some(value)),
+        None => content.to_string(),
     }
-
-    if !found {
-        let new_line = format!("{} = {}", key, value);
-        match first_section {
-            Some(i) => lines.insert(i, new_line),
-            None => lines.push(new_line),
-        }
-    }
-    lines.join("\n")
 }
 
-/// Surgically write `key = "value"` inside `[table]` of a TOML
-/// document, preserving every other line and section verbatim. If the
-/// table doesn't exist, append it at end-of-file. If the key doesn't
-/// exist inside the table, insert it just after the table header.
-/// Mirrors `toml_write_top` line-based semantics — no full parse, no
-/// reformatting, no comment loss. Used by `apply_codex` to canonicalize
-/// `[model_providers.OpenAI]` fields without clobbering Codex's own
-/// runtime state (`[projects.*]` trust, `[tui.*]` NUX, etc.) that sits
-/// in the same file.
 pub(crate) fn toml_write_table_value(content: &str, table: &str, key: &str, value: &str) -> String {
-    let header = format!("[{}]", table);
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-
-    let table_start = lines.iter().position(|l| l.trim() == header.as_str());
-
-    let table_start = match table_start {
-        Some(i) => i,
-        None => {
-            // Table missing — append. Pad with a blank line if the
-            // existing file doesn't already end with one.
-            if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
-                lines.push(String::new());
-            }
-            lines.push(header);
-            lines.push(format!("{} = \"{}\"", key, toml_escape(value)));
-            return lines.join("\n");
-        }
-    };
-
-    // Find table's end (next section header or EOF).
-    let table_end = lines
-        .iter()
-        .enumerate()
-        .skip(table_start + 1)
-        .find_map(|(i, l)| {
-            let t = l.trim();
-            if t.starts_with('[') && t.ends_with(']') {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(lines.len());
-
-    // Look for the key inside the table's range.
-    let key_line = (table_start + 1..table_end).find(|&i| {
-        let t = lines[i].trim();
-        if t.starts_with('#') || t.is_empty() {
-            return false;
-        }
-        match t.split_once('=') {
-            Some((k, _)) => k.trim() == key,
-            None => false,
-        }
-    });
-
-    let replacement = format!("{} = \"{}\"", key, toml_escape(value));
-    match key_line {
-        Some(i) => lines[i] = replacement,
-        None => lines.insert(table_start + 1, replacement),
-    }
-
-    lines.join("\n")
+    toml::write(content, table, key, Some(toml_edit::value(value)))
 }
 
-/// Variant of `toml_write_table_value` that writes the value verbatim,
-/// without wrapping it in `"..."`. For booleans / integers inside a
-/// table (e.g. `requires_openai_auth = true`). Same surgical line-based
-/// semantics; same preservation of unrelated sections.
 fn toml_write_table_value_raw(content: &str, table: &str, key: &str, value: &str) -> String {
-    let header = format!("[{}]", table);
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-
-    let table_start = lines.iter().position(|l| l.trim() == header.as_str());
-
-    let table_start = match table_start {
-        Some(i) => i,
-        None => {
-            if !lines.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
-                lines.push(String::new());
-            }
-            lines.push(header);
-            lines.push(format!("{} = {}", key, value));
-            return lines.join("\n");
-        }
-    };
-
-    let table_end = lines
-        .iter()
-        .enumerate()
-        .skip(table_start + 1)
-        .find_map(|(i, l)| {
-            let t = l.trim();
-            if t.starts_with('[') && t.ends_with(']') {
-                Some(i)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(lines.len());
-
-    let key_line = (table_start + 1..table_end).find(|&i| {
-        let t = lines[i].trim();
-        if t.starts_with('#') || t.is_empty() {
-            return false;
-        }
-        match t.split_once('=') {
-            Some((k, _)) => k.trim() == key,
-            None => false,
-        }
-    });
-
-    let replacement = format!("{} = {}", key, value);
-    match key_line {
-        Some(i) => lines[i] = replacement,
-        None => lines.insert(table_start + 1, replacement),
+    match toml::raw(value) {
+        Some(value) => toml::write(content, table, key, Some(value)),
+        None => content.to_string(),
     }
-
-    lines.join("\n")
 }
 
 pub(crate) fn toml_read_table_value(content: &str, table: &str, key: &str) -> String {
-    let header = format!("[{}]", table);
-    let mut in_table = false;
-
-    for line in content.lines() {
-        let t = line.trim();
-        if t.starts_with('[') && t.ends_with(']') {
-            in_table = t == header;
-            continue;
-        }
-        if !in_table || t.starts_with('#') || t.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = t.split_once('=') {
-            if k.trim() == key {
-                return toml_unquote(v.trim());
-            }
-        }
-    }
-
-    String::new()
-}
-
-fn toml_unquote(value: &str) -> String {
-    let v = value.trim();
-    if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 {
-        v[1..v.len() - 1]
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\")
-    } else {
-        v.to_string()
-    }
+    toml::read(content, table, key)
 }
 
 fn toml_escape(value: &str) -> String {
@@ -865,6 +614,35 @@ fn toml_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_toml_equivalent_headers_and_string_examples_are_preserved() {
+        for header in [
+            "[model_providers.\"OpenAI\"]",
+            "[ model_providers . 'OpenAI' ] # keep header",
+        ] {
+            let example = "Example:\n[model_providers.OpenAI]\nbase_url = \"example\"";
+            let content = format!(
+                "instructions = '''{example}'''\nmodel = \"old\"\n{header}\nbase_url = \"old\" # keep comment\n[projects.fixture]\ntrust_level = \"trusted\"\n"
+            );
+            let updated =
+                toml_write_table_value(&content, "model_providers.OpenAI", "base_url", "new");
+            assert!(updated.contains(&format!("instructions = '''{example}'''")));
+            assert_eq!(
+                toml_read_table_value(&updated, "model_providers.OpenAI", "base_url"),
+                "new"
+            );
+            assert!(updated.contains(header));
+            assert!(updated.contains("# keep comment"));
+            assert!(!updated.contains("base_url = \"old\""));
+            assert_eq!(
+                toml_write_table_value(&updated, "model_providers.OpenAI", "base_url", "new"),
+                updated
+            );
+            assert_eq!(updated.matches("base_url = \"new\"").count(), 1);
+            assert!(updated.contains("trust_level = \"trusted\""));
+        }
+    }
 
     #[test]
     fn toml_delete_top_removes_a_top_level_key() {

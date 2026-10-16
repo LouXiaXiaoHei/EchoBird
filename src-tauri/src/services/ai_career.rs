@@ -29,6 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod codex_pages;
 mod daily_tokens;
 mod persistent_cache;
 pub use daily_tokens::daily_tokens;
@@ -568,10 +569,14 @@ fn parse_codex_session_jsonl(file_path: &Path) -> Option<SavedSession> {
     parse_codex_session_jsonl_checked(file_path).ok().flatten()
 }
 
+#[cfg(test)]
 fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSession>, String> {
+    parse_codex_pages_checked(&[file_path.to_path_buf()])
+}
+
+fn parse_codex_pages_checked(files: &[PathBuf]) -> Result<Option<SavedSession>, String> {
+    let file_path = &files[0];
     use std::io::BufRead;
-    let file = std::fs::File::open(file_path).map_err(|e| e.to_string())?;
-    let reader = std::io::BufReader::new(file);
 
     let mut session_id = file_path
         .file_stem()
@@ -585,91 +590,97 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
     let mut usage = daily_tokens::CodexUsage::default();
     let mut metadata_seen = false;
 
-    for line in reader.lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        usage.consume(&value);
-        let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let Some(payload) = value.get("payload") else {
-            continue;
-        };
+    for path in files {
+        usage.begin_file(path);
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            usage.consume(&value);
+            let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(payload) = value.get("payload") else {
+                continue;
+            };
 
-        if row_type == "turn_context" {
-            if let Some(model) = session_model_id(payload.get("model")) {
-                model_id = Some(model);
-            }
-        } else if row_type == "thread_settings_applied"
-            || (row_type == "event_msg"
-                && payload.get("type").and_then(|v| v.as_str()) == Some("thread_settings_applied"))
-        {
-            if let Some(model) = session_model_id(payload.pointer("/thread_settings/model"))
-                .or_else(|| session_model_id(payload.pointer("/settings/model")))
+            if row_type == "turn_context" {
+                if let Some(model) = session_model_id(payload.get("model")) {
+                    model_id = Some(model);
+                }
+            } else if row_type == "thread_settings_applied"
+                || (row_type == "event_msg"
+                    && payload.get("type").and_then(|v| v.as_str())
+                        == Some("thread_settings_applied"))
             {
-                model_id = Some(model);
-            }
-        }
-
-        if row_type == "session_meta" {
-            if metadata_seen {
-                continue;
-            }
-            metadata_seen = true;
-            // Codex (incl. Codex Desktop) writes a separate rollout JSONL for
-            // every sub-agent it spawns; these inherit the parent's first user
-            // message and would surface as duplicate top-level cards. See
-            // `is_codex_subagent_session` for the marker rationale.
-            // `forked_from_id` is NOT a marker (user fork/resume = top-level).
-            if is_codex_subagent_session(payload) {
-                return Ok(None);
-            }
-            if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
-                if !id.is_empty() {
-                    session_id = id.to_string();
+                if let Some(model) = session_model_id(payload.pointer("/thread_settings/model"))
+                    .or_else(|| session_model_id(payload.pointer("/settings/model")))
+                {
+                    model_id = Some(model);
                 }
             }
-            if let Some(c) = payload.get("cwd").and_then(|v| v.as_str()) {
-                if !c.is_empty() {
-                    cwd = c.to_string();
-                }
-            }
-            continue;
-        }
 
-        let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let is_msg = (row_type == "response_item" && payload_type == "message")
-            || row_type == "user_message";
-        if !is_msg {
-            continue;
-        }
-        let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role == "user" || role == "assistant" {
-            total_messages += 1;
-        }
-        if role != "user" || !title.is_empty() {
-            continue;
-        }
-        let Some(arr) = payload.get("content").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for block in arr {
-            let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if bt != "input_text" && bt != "text" {
-                continue;
-            }
-            if let Some(raw) = block.get("text").and_then(|v| v.as_str()) {
-                // Codex Desktop packs attached files + the real question into
-                // one `input_text` block prefixed with
-                // "# Files mentioned by the user"; strip that preamble so the
-                // title is the user's actual request. Returns "" for
-                // files-only blocks (no text).
-                let text = strip_codex_desktop_file_preamble(raw);
-                if text.is_empty() || is_system_injected(text) {
+            if row_type == "session_meta" {
+                if metadata_seen {
                     continue;
                 }
-                title = make_title(text);
-                break;
+                metadata_seen = true;
+                // Codex (incl. Codex Desktop) writes a separate rollout JSONL for
+                // every sub-agent it spawns; these inherit the parent's first user
+                // message and would surface as duplicate top-level cards. See
+                // `is_codex_subagent_session` for the marker rationale.
+                // `forked_from_id` is NOT a marker (user fork/resume = top-level).
+                if is_codex_subagent_session(payload) {
+                    return Ok(None);
+                }
+                if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
+                    if !id.is_empty() {
+                        session_id = id.to_string();
+                    }
+                }
+                if let Some(c) = payload.get("cwd").and_then(|v| v.as_str()) {
+                    if !c.is_empty() {
+                        cwd = c.to_string();
+                    }
+                }
+                continue;
+            }
+
+            let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let is_msg = (row_type == "response_item" && payload_type == "message")
+                || row_type == "user_message";
+            if !is_msg {
+                continue;
+            }
+            let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "user" || role == "assistant" {
+                total_messages += 1;
+            }
+            if role != "user" || !title.is_empty() {
+                continue;
+            }
+            let Some(arr) = payload.get("content").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for block in arr {
+                let bt = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if bt != "input_text" && bt != "text" {
+                    continue;
+                }
+                if let Some(raw) = block.get("text").and_then(|v| v.as_str()) {
+                    // Codex Desktop packs attached files + the real question into
+                    // one `input_text` block prefixed with
+                    // "# Files mentioned by the user"; strip that preamble so the
+                    // title is the user's actual request. Returns "" for
+                    // files-only blocks (no text).
+                    let text = strip_codex_desktop_file_preamble(raw);
+                    if text.is_empty() || is_system_injected(text) {
+                        continue;
+                    }
+                    title = make_title(text);
+                    break;
+                }
             }
         }
     }
@@ -677,7 +688,12 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
     if title.is_empty() {
         title = "Codex Session".to_string();
     }
-    let usage = usage.total_usage();
+    let all_pages = usage.has_all_pages();
+    let usage = if all_pages {
+        usage.total_usage()
+    } else {
+        TokenUsage::default()
+    };
 
     Ok(Some(SavedSession {
         id: format!("codex_native_{}", session_id),
@@ -685,11 +701,15 @@ fn parse_codex_session_jsonl_checked(file_path: &Path) -> Result<Option<SavedSes
         tool: "codex".to_string(),
         cwd,
         session_token: Some(session_id),
-        saved_at: mtime_millis(file_path),
+        saved_at: files
+            .iter()
+            .map(|path| mtime_millis(path))
+            .max()
+            .unwrap_or_default(),
         file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turns_from_messages(total_messages)),
+        turn_count: all_pages.then_some(turns_from_messages(total_messages)),
         model_id,
-        message_count: Some(total_messages),
+        message_count: all_pages.then_some(total_messages),
         input_tokens: usage.input,
         output_tokens: usage.output,
     }))
@@ -1966,6 +1986,8 @@ struct CachedCount {
 #[derive(Serialize, Deserialize)]
 struct CachedSession {
     stamp: persistent_cache::FileStamp,
+    #[serde(default)]
+    pages: Vec<(PathBuf, persistent_cache::FileStamp)>,
     session: Option<SavedSession>,
 }
 
@@ -1981,21 +2003,31 @@ fn parse_session_cached(path: &Path, family: Family) -> Option<SavedSession> {
         .flatten()
 }
 
+#[cfg(test)]
 fn parse_session_cached_in(
     cache: &Mutex<HashMap<PathBuf, CachedSession>>,
     path: &Path,
     family: Family,
 ) -> Result<Option<SavedSession>, String> {
-    let Some(metadata) = path_metadata(path).map_err(|e| e.to_string())? else {
+    parse_session_pages_cached_in(cache, &[path.to_path_buf()], family)
+}
+
+fn parse_session_pages_cached_in(
+    cache: &Mutex<HashMap<PathBuf, CachedSession>>,
+    paths: &[PathBuf],
+    family: Family,
+) -> Result<Option<SavedSession>, String> {
+    let path = &paths[0];
+    let Some(pages) = codex_pages::stamps(paths)? else {
         if let Ok(mut entries) = cache.lock() {
             entries.remove(path);
         }
         return Ok(None);
     };
-    let stamp = persistent_cache::FileStamp::read(&metadata).map_err(|e| e.to_string())?;
+    let stamp = pages[0].1.clone();
     if let Ok(cache) = cache.lock() {
         if let Some(entry) = cache.get(path) {
-            if entry.stamp == stamp {
+            if entry.stamp == stamp && entry.pages == pages {
                 return Ok(entry.session.clone());
             }
         }
@@ -2004,23 +2036,24 @@ fn parse_session_cached_in(
     SESSION_PARSE_COUNT.with(|count| count.set(count.get() + 1));
     let result = match family {
         Family::Claude => parse_agent_jsonl_checked(path, family),
-        Family::Codex => parse_codex_session_jsonl_checked(path),
+        Family::Codex => parse_codex_pages_checked(paths),
         Family::DeepSeek => parse_dsh_session_checked(path),
         _ => Ok(None),
     };
     let mut guard = cache
         .lock()
         .map_err(|_| "session cache lock failed".to_string())?;
-    let Some(after) = path_metadata(path).map_err(|e| e.to_string())? else {
+    let Some(after) = codex_pages::stamps(paths)? else {
         guard.remove(path);
         return Ok(None);
     };
     let session = result?;
-    if persistent_cache::FileStamp::read(&after).map_err(|e| e.to_string())? == stamp {
+    if after == pages {
         guard.insert(
             path.to_path_buf(),
             CachedSession {
                 stamp,
+                pages,
                 session: session.clone(),
             },
         );
@@ -2167,8 +2200,20 @@ fn family_history_files_at(
     candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut sessions = Vec::new();
     let mut valid = 0;
-    for (_, path, _) in &candidates {
-        if let Some(session) = parse_session_cached_in(cache, path, family)? {
+    let groups = if family == Family::Codex {
+        codex_pages::groups(&candidates)?
+    } else {
+        candidates
+            .iter()
+            .map(|(_, path, _)| vec![path.clone()])
+            .collect()
+    };
+    let cache_keys: HashSet<_> = groups
+        .iter()
+        .filter_map(|paths| paths.first().cloned())
+        .collect();
+    for paths in groups {
+        if let Some(session) = parse_session_pages_cached_in(cache, &paths, family)? {
             if valid >= offset {
                 sessions.push(session);
             }
@@ -2179,8 +2224,7 @@ fn family_history_files_at(
         }
     }
     if let Ok(mut cache) = cache.lock() {
-        let keep: HashSet<_> = candidates.iter().map(|(_, path, _)| path).collect();
-        cache.retain(|path, _| !path.starts_with(root) || keep.contains(path));
+        cache.retain(|path, _| !path.starts_with(root) || cache_keys.contains(path));
     }
     if family == Family::Codex {
         apply_codex_thread_names(root, &mut sessions);
@@ -2913,6 +2957,92 @@ mod tests {
         assert!(reloaded.lock().unwrap().is_empty());
         persistent_cache::write(&cache_path, &reloaded.lock().unwrap()).unwrap();
         assert!(persistent_cache::read::<CachedSession>(&cache_path).is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn maintenance_codex_pages_form_one_session_before_list_pagination() {
+        let dir = fixture_dir();
+        let root = dir.join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        for (file, prompt, paginated) in [
+            ("rollout-1-thread.jsonl", "Original title", false),
+            ("rollout-2-thread_page.jsonl", "Next question", true),
+        ] {
+            write_jsonl(
+                &root.join(file),
+                &[
+                    serde_json::json!({"type":"session_meta","payload":{"id":"thread","cwd":"/fixture","history_mode":if paginated {"paginated"}else{"full"},"history_base":if paginated {serde_json::json!({"thread_id":"thread"})}else{serde_json::Value::Null}}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[]}}),
+                ],
+            );
+        }
+        let cache = Mutex::new(HashMap::new());
+        let sessions = family_history_files_at(&root, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].name, "Original title");
+        assert_eq!(sessions[0].message_count, Some(4));
+        assert!(family_history_files_at(&root, Family::Codex, 1, 20, &cache)
+            .unwrap()
+            .is_empty());
+        write_jsonl(
+            &root.join("rollout-3-thread_page.jsonl"),
+            &[
+                serde_json::json!({"type":"session_meta","payload":{"id":"thread","history_mode":"paginated"}}),
+                serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Third question"}]}}),
+            ],
+        );
+        let changed = family_history_files_at(&root, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].message_count, Some(5));
+        assert_eq!(changed[0].name, "Original title");
+        std::fs::remove_file(root.join("rollout-1-thread.jsonl")).unwrap();
+        let missing = family_history_files_at(&root, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].message_count, None);
+        assert_eq!(missing[0].input_tokens, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn maintenance_native_fork_pages_follow_page_ids_and_detect_a_missing_middle() {
+        let dir = fixture_dir();
+        let thread = "11111111-1111-4111-8111-111111111111";
+        let second = "22222222-2222-4222-8222-222222222222";
+        let third = "33333333-3333-4333-8333-333333333333";
+        let paths = [
+            dir.join(format!("rollout-1-{thread}.jsonl")),
+            dir.join(format!("rollout-2-{thread}_{second}.jsonl")),
+            dir.join(format!("rollout-3-{thread}_{third}.jsonl")),
+        ];
+        for (index, (total, last)) in [(10, 10), (30, 20), (60, 30)].into_iter().enumerate() {
+            let mut meta = serde_json::json!({"id":thread,"history_mode":"paginated","forked_from_id":"parent"});
+            if index == 0 {
+                meta["subagent_history_start_ordinal"] = serde_json::json!(5);
+            } else {
+                meta["history_base"] =
+                    serde_json::json!({"thread_id":if index == 1 {thread}else{second}});
+            }
+            write_jsonl(
+                &paths[index],
+                &[
+                    serde_json::json!({"type":"session_meta","payload":meta}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("question {index}")}]}}),
+                    serde_json::json!({"type":"event_msg","ordinal":if index==0 {5}else{1},"timestamp":"2026-10-15T12:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":total,"output_tokens":total},"last_token_usage":{"input_tokens":last,"output_tokens":last}}}}),
+                ],
+            );
+        }
+        let cache = Mutex::new(HashMap::new());
+        let sessions = family_history_files_at(&dir, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].message_count, Some(3));
+        assert_eq!(sessions[0].input_tokens, Some(60));
+        std::fs::remove_file(&paths[1]).unwrap();
+        let missing = family_history_files_at(&dir, Family::Codex, 0, 20, &cache).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].message_count, None);
+        assert_eq!(missing[0].input_tokens, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

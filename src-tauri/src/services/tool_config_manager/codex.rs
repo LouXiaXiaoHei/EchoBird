@@ -104,11 +104,7 @@ fn write_codex_canonical_fields(
     context_window: u64,
     web_search: Option<bool>,
 ) -> String {
-    // Preserve the input's trailing-newline convention. `toml_write_*`
-    // helpers go through `content.lines().collect().join("\n")` which
-    // strips trailing newlines; without re-adding it, a canonical-input
-    // round-trip would always show as a one-byte diff and trigger
-    // pointless rewrites on repeated model applications.
+    // Preserve the input's trailing-newline convention after helper edits.
     let trailing_nl = content.ends_with('\n');
     let mut c = content.to_string();
 
@@ -183,20 +179,7 @@ fn write_codex_canonical_fields(
         {
             // Remove only our exact list when leaving DeepSeek, keeping
             // custom effort lists and every other desktop setting.
-            let mut in_desktop = false;
-            c = c
-                .lines()
-                .filter(|line| {
-                    let t = line.trim();
-                    if t.starts_with('[') && t.ends_with(']') {
-                        in_desktop = t == "[desktop]";
-                    }
-                    !in_desktop
-                        || t.split_once('=')
-                            .map_or(true, |(key, _)| key.trim() != "enabled-reasoning-efforts")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            c = super::toml::write(&c, "desktop", "enabled-reasoning-efforts", None);
         }
     }
 
@@ -333,6 +316,12 @@ pub(crate) fn apply_codex_at(
     // runtime state (`[projects.*]` trust, `[tui.*]` NUX, `[plugins.*]`)
     // and any unrelated user-edited top-level keys stay untouched.
     let existing = fs::read_to_string(&config_path).unwrap_or_default();
+    if existing.parse::<toml_edit::DocumentMut>().is_err() {
+        return ApplyResult {
+            success: false,
+            message: "Codex configuration is not valid TOML".into(),
+        };
+    }
     let mut new_content = write_codex_canonical_fields(
         &existing,
         &base_url,
@@ -849,6 +838,39 @@ mod tests {
                 toml_read_table_value(&other, "projects.fixture", "trust_level"),
                 "trusted"
             );
+        }
+    }
+
+    #[test]
+    fn maintenance_desktop_effort_cleanup_preserves_equivalent_tables_and_examples() {
+        for header in ["[desktop]", "[ \"desktop\" ] # keep header"] {
+            let example = "[desktop]\nenabled-reasoning-efforts = \"example\"";
+            let config = format!(
+                "model_provider = \"custom\"\ninstructions = '''{example}'''\n\
+                 {header}\nenabled-reasoning-efforts = {DEEPSEEK_DESKTOP_EFFORTS}\ncustom-setting = true\n\
+                 [projects.fixture] # keep project\nenabled-reasoning-efforts = [\"user\"]\n\
+                 [model_providers.\"custom\"]\nbase_url = \"https://api.deepseek.com\"\n"
+            );
+            let other = write_codex_canonical_fields(
+                &config,
+                "https://provider.example/v1",
+                "other-model",
+                DEFAULT_CODEX_CONTEXT_WINDOW,
+                None,
+            );
+            assert!(
+                toml_read_table_value(&other, "desktop", "enabled-reasoning-efforts").is_empty()
+            );
+            assert_eq!(toml_read_top(&other, "instructions"), example);
+            assert_eq!(
+                toml_read_table_value(&other, "projects.fixture", "enabled-reasoning-efforts"),
+                r#"["user"]"#
+            );
+            assert_eq!(
+                toml_read_table_value(&other, "desktop", "custom-setting"),
+                "true"
+            );
+            assert!(other.contains(header));
         }
     }
 

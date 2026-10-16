@@ -9,6 +9,7 @@ mod protocol;
 mod providers;
 mod qoder;
 mod responses;
+mod signatures;
 mod tools;
 mod trae;
 mod zcode;
@@ -23,6 +24,14 @@ use serde_json::{json, Value};
 use crate::models::model::AccountProvider;
 
 pub(crate) use protocol::SseParser;
+#[cfg(test)]
+pub(crate) fn remember_free_model_ids(
+    provider: AccountProvider,
+    credentials: &Value,
+    ids: Vec<String>,
+) {
+    providers::remember_free_model_ids(provider, credentials, ids);
+}
 pub use providers::responses_response;
 pub(crate) use providers::{context_limit_error, stream_error};
 pub use responses::{chat_to_responses, chat_to_responses_with_tools, responses_to_chat};

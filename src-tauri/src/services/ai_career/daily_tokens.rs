@@ -40,6 +40,8 @@ struct Scan {
 #[derive(Deserialize, Serialize)]
 struct CachedScan {
     stamp: persistent_cache::FileStamp,
+    #[serde(default)]
+    pages: Vec<(PathBuf, persistent_cache::FileStamp)>,
     scan: Scan,
 }
 
@@ -138,6 +140,11 @@ pub(super) struct CodexUsage {
     previous: Option<TokenUsage>,
     previous_owned_checkpoint: Option<(u64, TokenUsage)>,
     metadata_seen: bool,
+    missing_page_baseline: bool,
+    missing_history: bool,
+    continuation_file: bool,
+    page_id: Option<String>,
+    previous_page_id: Option<String>,
     thread_id: Option<String>,
     forked: bool,
     history_start: Option<u64>,
@@ -149,11 +156,58 @@ pub(super) struct CodexUsage {
 }
 
 impl CodexUsage {
+    pub(super) fn has_all_pages(&self) -> bool {
+        !self.missing_history
+    }
+
+    pub(super) fn begin_file(&mut self, path: &Path) {
+        self.continuation_file = super::codex_pages::is_continuation(path);
+        self.previous_page_id = self.page_id.take();
+        self.page_id = super::codex_pages::page_id(path);
+    }
+
     pub(super) fn consume(&mut self, value: &Value) {
         let Some(payload) = value.get("payload") else {
             return;
         };
         let kind = value.get("type").and_then(Value::as_str);
+        if kind == Some("session_meta") && self.page_id.is_none() {
+            self.page_id = payload["id"].as_str().map(str::to_string);
+        }
+        let continuation = self.continuation_file
+            || (self.metadata_seen
+                && payload["history_mode"] == "paginated"
+                && payload
+                    .pointer("/history_base/thread_id")
+                    .and_then(Value::as_str)
+                    .is_some())
+            || payload["id"]
+                .as_str()
+                .zip(
+                    payload
+                        .pointer("/history_base/thread_id")
+                        .and_then(Value::as_str),
+                )
+                .is_some_and(|(id, base)| id == base);
+        if kind == Some("session_meta") && self.metadata_seen && continuation {
+            if let Some(base) = payload
+                .pointer("/history_base/thread_id")
+                .and_then(Value::as_str)
+            {
+                if !self
+                    .previous_page_id
+                    .as_deref()
+                    .is_some_and(|previous| previous.eq_ignore_ascii_case(base))
+                {
+                    self.missing_page_baseline = true;
+                    self.missing_history = true;
+                    self.incomplete = true;
+                }
+            }
+            self.forked = false;
+            self.history_start = None;
+            self.previous_owned_checkpoint = None;
+        }
         if kind == Some("session_meta") && !self.metadata_seen {
             self.metadata_seen = true;
             self.thread_id = payload
@@ -167,6 +221,13 @@ impl CodexUsage {
             self.history_start = payload
                 .get("subagent_history_start_ordinal")
                 .and_then(Value::as_u64);
+            if continuation {
+                self.forked = false;
+                self.history_start = None;
+                self.missing_page_baseline = true;
+                self.missing_history = true;
+                self.incomplete = true;
+            }
             if self.forked && self.history_start.is_none() {
                 self.incomplete = true;
             }
@@ -251,6 +312,17 @@ impl CodexUsage {
             self.rebase_after_rollback = false;
             self.incomplete = true;
             self.previous = Some(total);
+            return;
+        }
+        if self.missing_page_baseline {
+            self.missing_page_baseline = false;
+            self.previous = Some(total);
+            if owns_record && last.input.is_some() && last.output.is_some() {
+                self.legacy_samples.push(CodexSample {
+                    usage: last,
+                    ts: iso_timestamp(value.get("timestamp")),
+                });
+            }
             return;
         }
         let mut ts = iso_timestamp(value.get("timestamp"));
@@ -397,15 +469,23 @@ fn scan_codex(path: &Path) -> Scan {
     })
 }
 
+#[cfg(test)]
 fn scan_codex_checked(path: &Path) -> Result<Scan, String> {
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    scan_codex_pages_checked(&[path.to_path_buf()])
+}
+
+fn scan_codex_pages_checked(paths: &[PathBuf]) -> Result<Scan, String> {
     let mut usage = CodexUsage::default();
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|e| e.to_string())?;
-        match serde_json::from_str::<Value>(&line) {
-            Ok(value) => usage.consume(&value),
-            Err(_) if !line.trim().is_empty() => usage.incomplete = true,
-            Err(_) => {}
+    for path in paths {
+        usage.begin_file(path);
+        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        for line in BufReader::new(file).lines() {
+            let line = line.map_err(|e| e.to_string())?;
+            match serde_json::from_str::<Value>(&line) {
+                Ok(value) => usage.consume(&value),
+                Err(_) if !line.trim().is_empty() => usage.incomplete = true,
+                Err(_) => {}
+            }
         }
     }
     Ok(usage.into_scan())
@@ -502,18 +582,31 @@ fn cached_scan(path: &Path, family: Family) -> Scan {
 #[cfg(test)]
 thread_local! { static DAILY_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+#[cfg(test)]
 fn cached_scan_in(
     cache: &Mutex<HashMap<PathBuf, CachedScan>>,
     path: &Path,
     family: Family,
 ) -> Result<Option<Scan>, String> {
-    let Some(metadata) = path_metadata(path).map_err(|e| e.to_string())? else {
+    cached_scan_pages_in(cache, &[path.to_path_buf()], family)
+}
+
+fn cached_scan_pages_in(
+    cache: &Mutex<HashMap<PathBuf, CachedScan>>,
+    paths: &[PathBuf],
+    family: Family,
+) -> Result<Option<Scan>, String> {
+    let path = &paths[0];
+    let Some(pages) = super::codex_pages::stamps(paths)? else {
         cache.lock().map_err(|e| e.to_string())?.remove(path);
         return Ok(None);
     };
-    let stamp = persistent_cache::FileStamp::read(&metadata).map_err(|e| e.to_string())?;
+    let stamp = pages[0].1.clone();
     if let Ok(cache) = cache.lock() {
-        if let Some(cached) = cache.get(path).filter(|cached| cached.stamp == stamp) {
+        if let Some(cached) = cache
+            .get(path)
+            .filter(|cached| cached.stamp == stamp && cached.pages == pages)
+        {
             return Ok(Some(cached.scan.clone()));
         }
     }
@@ -521,21 +614,22 @@ fn cached_scan_in(
     DAILY_PARSE_COUNT.with(|count| count.set(count.get() + 1));
     let result = match family {
         Family::Claude => scan_claude_checked(path),
-        Family::Codex => scan_codex_checked(path),
+        Family::Codex => scan_codex_pages_checked(paths),
         Family::DeepSeek => scan_deepseek_checked(path),
         _ => Ok(Scan::default()),
     };
     let mut cache = cache.lock().map_err(|e| e.to_string())?;
-    let Some(after) = path_metadata(path).map_err(|e| e.to_string())? else {
+    let Some(after) = super::codex_pages::stamps(paths)? else {
         cache.remove(path);
         return Ok(None);
     };
     let scan = result?;
-    if persistent_cache::FileStamp::read(&after).map_err(|e| e.to_string())? == stamp {
+    if after == pages {
         cache.insert(
             path.to_path_buf(),
             CachedScan {
                 stamp,
+                pages,
                 scan: scan.clone(),
             },
         );
@@ -747,17 +841,36 @@ fn daily_tokens_at_checked(
                     collect_jsonl_paths(root.clone(), depth, family, &mut candidates)
                         .map_err(|e| e.to_string())?;
                 }
-                candidates.retain(|(mtime, _, _)| *mtime >= cutoff_time);
+                let groups = if family == Family::Codex {
+                    let recent: HashSet<_> = candidates
+                        .iter()
+                        .filter(|(mtime, _, _)| *mtime >= cutoff_time)
+                        .map(|(_, path, _)| path)
+                        .collect();
+                    super::codex_pages::groups(&candidates)?
+                        .into_iter()
+                        .filter(|paths| paths.iter().any(|path| recent.contains(path)))
+                        .collect::<Vec<_>>()
+                } else {
+                    candidates.retain(|(mtime, _, _)| *mtime >= cutoff_time);
+                    candidates
+                        .iter()
+                        .map(|(_, path, _)| vec![path.clone()])
+                        .collect()
+                };
                 let mut scan = Scan::default();
-                for (_, path, _) in &candidates {
-                    if let Some(cached) = cached_scan_in(cache, path, family)? {
+                let cache_keys: HashSet<_> = groups
+                    .iter()
+                    .filter_map(|paths| paths.first().cloned())
+                    .collect();
+                for paths in groups {
+                    if let Some(cached) = cached_scan_pages_in(cache, &paths, family)? {
                         scan.incomplete |= cached.incomplete;
                         scan.samples.extend(cached.samples);
                     }
                 }
                 if let Ok(mut cache) = cache.lock() {
-                    let keep: HashSet<_> = candidates.iter().map(|(_, path, _)| path).collect();
-                    cache.retain(|path, _| !path.starts_with(&root) || keep.contains(path));
+                    cache.retain(|path, _| !path.starts_with(&root) || cache_keys.contains(path));
                 }
                 scan
             }
@@ -820,6 +933,76 @@ mod tests {
 
     fn counter(ts: &str, input: u64, output: u64, last_input: u64, last_output: u64) -> Value {
         json!({"type":"event_msg","timestamp":ts,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"output_tokens":output},"last_token_usage":{"input_tokens":last_input,"output_tokens":last_output}}}})
+    }
+
+    #[test]
+    fn maintenance_codex_page_counters_keep_the_previous_page_baseline() {
+        let dir = fixture_dir();
+        let first = dir.join("rollout-1.jsonl");
+        let next = dir.join("rollout-2.jsonl");
+        write_rows(
+            &first,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture","history_mode":"paginated"}}),
+                counter(FIRST_DAY, 1000, 100, 1000, 100),
+            ],
+        );
+        write_rows(
+            &next,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture","forked_from_id":"parent","history_mode":"paginated","history_base":{"thread_id":"fixture"}}}),
+                counter(NEXT_DAY, 1250, 125, 250, 25),
+            ],
+        );
+        let combined = scan_codex_pages_checked(&[first.clone(), next.clone()]).unwrap();
+        assert_eq!(totals(&combined), (1250, 125));
+        assert!(!combined.incomplete);
+        assert_eq!(combined.samples[1].entry.input_tokens, 250);
+        let gap = dir.join("gap.jsonl");
+        write_rows(
+            &gap,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture","history_mode":"paginated","history_base":{"thread_id":"missing-page"}}}),
+                counter(NEXT_DAY, 1500, 150, 100, 10),
+            ],
+        );
+        let missing_middle = scan_codex_pages_checked(&[first, gap]).unwrap();
+        assert_eq!(totals(&missing_middle), (1100, 110));
+        assert!(missing_middle.incomplete);
+        let missing_base = scan_codex_checked(&next).unwrap();
+        assert_eq!(totals(&missing_base), (250, 25));
+        assert!(missing_base.incomplete);
+        write_rows(
+            &next,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture","history_mode":"paginated","history_base":{"thread_id":"fixture"}}}),
+                json!({"type":"event_msg","timestamp":NEXT_DAY,"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"output_tokens":150}}}}),
+                counter(NEXT_DAY, 1600, 160, 100, 10),
+            ],
+        );
+        assert_eq!(totals(&scan_codex_checked(&next).unwrap()), (100, 10));
+        let other = dir.join("modern-1.jsonl");
+        let duplicate = modern_response(FIRST_DAY, "same-response", 10, 2, 10, 2);
+        write_rows(
+            &other,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture"}}),
+                duplicate.clone(),
+            ],
+        );
+        write_rows(
+            &next,
+            &[
+                json!({"type":"session_meta","payload":{"id":"fixture","history_mode":"paginated"}}),
+                duplicate,
+                modern_response(NEXT_DAY, "new-response", 20, 4, 30, 6),
+            ],
+        );
+        assert_eq!(
+            totals(&scan_codex_pages_checked(&[other, next]).unwrap()),
+            (30, 6)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn modern_response(

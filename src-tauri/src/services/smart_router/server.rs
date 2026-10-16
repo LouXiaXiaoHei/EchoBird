@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, State};
+use axum::extract::{rejection::JsonRejection, DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
@@ -471,8 +471,15 @@ async fn handle_models(headers: HeaderMap) -> Response {
 async fn handle_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return openai_error(error.status(), &error.body_text())
+        }
+        Err(error) => return error.into_response(),
+    };
     let request_config = match request_config_for_use() {
         Ok(config) => config,
         Err(e) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -506,8 +513,15 @@ fn is_supported_router_model(model_id: &str) -> bool {
 async fn handle_responses(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return openai_error(error.status(), &error.body_text())
+        }
+        Err(error) => return error.into_response(),
+    };
     let request_config = match request_config_for_use() {
         Ok(config) => config,
         Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
@@ -530,8 +544,15 @@ async fn handle_responses(
 async fn handle_messages(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
+    let body = match body {
+        Ok(Json(body)) => body,
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            return anthropic_error(error.status(), &error.body_text())
+        }
+        Err(error) => return error.into_response(),
+    };
     let request_config = match request_config_for_use() {
         Ok(config) => config,
         Err(e) => return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -949,6 +970,19 @@ async fn send_api_request(
     } else {
         crate::services::account_proxy::normalize_responses_tool_rounds(&mut body);
     }
+    if protocol == RouteProtocol::Chat
+        && url::Url::parse(&candidate.base_url)
+            .ok()
+            .is_some_and(|url| url.host_str() == Some("api.deepseek.com"))
+        && body.get("max_tokens").is_none()
+    {
+        if let Some(value) = body
+            .as_object_mut()
+            .and_then(|body| body.remove("max_completion_tokens"))
+        {
+            body["max_tokens"] = value;
+        }
+    }
     let mut request = state
         .http_client
         .post(if protocol == RouteProtocol::Responses {
@@ -1198,6 +1232,12 @@ async fn route_with_policy(
                     break;
                 }
             };
+            if status == StatusCode::PAYLOAD_TOO_LARGE {
+                return openai_error(
+                    status,
+                    "Upstream rejected the request because its body is too large",
+                );
+            }
             if bound_continuation && is_continuation_failure(status, &response_body) {
                 let mut response = upstream_response(
                     status,
@@ -2075,6 +2115,7 @@ async fn openai_error_to_anthropic(response: Response) -> Response {
 fn anthropic_error(status: StatusCode, message: &str) -> Response {
     let error_type = match status {
         StatusCode::BAD_REQUEST => "invalid_request_error",
+        StatusCode::PAYLOAD_TOO_LARGE => "request_too_large",
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => "authentication_error",
         StatusCode::TOO_MANY_REQUESTS => "rate_limit_error",
         _ => "api_error",
@@ -2144,10 +2185,7 @@ fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<C
     candidates
         .into_iter()
         .filter(|candidate| {
-            !account_health_key(candidate)
-                .and_then(|key| memory.accounts.get(&key))
-                .and_then(|health| health.cooldown_until_ms)
-                .is_some_and(|until| until > now)
+            !account_is_cooling_down(&memory, candidate, now)
                 && !memory
                     .candidates
                     .get(&candidate.internal_id)
@@ -2155,6 +2193,30 @@ fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<C
                     .is_some_and(|until| until > now)
         })
         .collect()
+}
+
+fn account_is_cooling_down(memory: &RouteMemory, candidate: &Candidate, now: u64) -> bool {
+    let Some(health) = account_health_key(candidate).and_then(|key| memory.accounts.get(&key))
+    else {
+        return false;
+    };
+    if health.failure == Some(FailureClass::Billing) {
+        if let Some(source) = &candidate.account_source {
+            if matches!(
+                source.provider,
+                AccountProvider::WorkBuddy | AccountProvider::WorkBuddyAi
+            ) && crate::services::account_proxy::cached_free_model_ids(
+                source.provider,
+                &source.account_id,
+            )
+            .iter()
+            .any(|model| model.eq_ignore_ascii_case(&candidate.model_id))
+            {
+                return false;
+            }
+        }
+    }
+    health.cooldown_until_ms.is_some_and(|until| until > now)
 }
 
 fn account_health_key(candidate: &Candidate) -> Option<String> {
@@ -2177,10 +2239,7 @@ fn candidate_is_cooling_down(state: &AppState, candidate: &Candidate) -> bool {
         .get(&candidate.internal_id)
         .and_then(|health| health.cooldown_until_ms)
         .is_some_and(|until| until > now)
-        || account_health_key(candidate)
-            .and_then(|key| memory.accounts.get(&key))
-            .and_then(|health| health.cooldown_until_ms)
-            .is_some_and(|until| until > now)
+        || account_is_cooling_down(&memory, candidate, now)
 }
 
 #[derive(Default)]
@@ -3232,7 +3291,7 @@ fn openai_error(status: StatusCode, message: &str) -> Response {
 fn json_error(status: StatusCode, message: &str, attempts: Option<Value>) -> Response {
     let mut error = json!({
         "message": message,
-        "type": "echobird_router_error",
+        "type": if status == StatusCode::PAYLOAD_TOO_LARGE { "request_too_large" } else { "echobird_router_error" },
         "code": status.as_u16(),
     });
     if let Some(attempts) = attempts {
@@ -3334,6 +3393,179 @@ mod tests {
         );
         assert!(resolved.iter().all(|item| item.api_key.trim().is_empty()));
         assert!(resolved[0].account_source.is_some());
+    }
+
+    #[test]
+    fn maintenance_billing_cooldown_preserves_known_free_models() {
+        use crate::models::model::AccountSource;
+        for provider in [AccountProvider::WorkBuddy, AccountProvider::WorkBuddyAi] {
+            let state = AppState::for_tests().unwrap();
+            let account_id = uuid::Uuid::new_v4().to_string();
+            crate::services::account_proxy::remember_free_model_ids(
+                provider,
+                &json!({"accountId":account_id}),
+                vec!["free-model".into()],
+            );
+            let mut paid = candidate("127.0.0.1:1".parse().unwrap(), "paid");
+            paid.account_source = Some(AccountSource {
+                provider,
+                account_id,
+            });
+            let mut free = paid.clone();
+            free.internal_id = "free".into();
+            free.model_id = "free-model".into();
+            begin_attempt(&state, &mut paid);
+            mark_failure(&state, &paid, FailureClass::Billing, None);
+            assert!(candidate_is_cooling_down(&state, &paid));
+            assert!(!candidate_is_cooling_down(&state, &free));
+            assert_eq!(
+                prioritized_candidates(&state, vec![paid.clone(), free.clone()]).len(),
+                1
+            );
+            let mut unknown = free.clone();
+            unknown.model_id = "unknown-free-status".into();
+            assert!(candidate_is_cooling_down(&state, &unknown));
+            mark_failure(&state, &paid, FailureClass::Authentication, None);
+            assert!(candidate_is_cooling_down(&state, &free));
+            let limited = AppState::for_tests().unwrap();
+            begin_attempt(&limited, &mut paid);
+            mark_failure(&limited, &paid, FailureClass::RateLimit, None);
+            assert!(candidate_is_cooling_down(&limited, &free));
+        }
+    }
+
+    #[tokio::test]
+    async fn maintenance_deepseek_token_limit_reaches_the_chat_upstream() {
+        let captured = Arc::new(Mutex::new(Value::Null));
+        let addr = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let captured = captured.clone();
+                move |Json(body): Json<Value>| {
+                    *captured.lock().unwrap() = body;
+                    async { Json(json!({"choices":[{"message":{"content":"ok"}}]})) }
+                }
+            }),
+        ))
+        .await;
+        let mut state = AppState::for_tests().unwrap();
+        state.http_client = reqwest::Client::builder()
+            .no_proxy()
+            .resolve("api.deepseek.com", addr)
+            .build()
+            .unwrap();
+        let mut model = candidate(addr, "fixture");
+        model.base_url = format!("http://api.deepseek.com:{}/v1", addr.port());
+        let body = json!({"messages":[],"max_completion_tokens":32768,"custom":"keep"});
+        send_api_request(
+            &state,
+            &HeaderMap::new(),
+            &model,
+            &body,
+            RouteProtocol::Chat,
+        )
+        .await
+        .unwrap();
+        let sent = captured.lock().unwrap().clone();
+        assert_eq!(sent["max_tokens"], 32768);
+        assert!(sent.get("max_completion_tokens").is_none());
+        assert_eq!(sent["custom"], "keep");
+        let dual = json!({"messages":[],"max_tokens":8192,"max_completion_tokens":32768});
+        send_api_request(
+            &state,
+            &HeaderMap::new(),
+            &model,
+            &dual,
+            RouteProtocol::Chat,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*captured.lock().unwrap(), dual);
+        model.base_url = format!("http://{addr}/v1");
+        send_api_request(
+            &state,
+            &HeaderMap::new(),
+            &model,
+            &body,
+            RouteProtocol::Chat,
+        )
+        .await
+        .unwrap();
+        assert_eq!(*captured.lock().unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn maintenance_413_error_names_the_request_size_failure() {
+        let response = json_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "Request body is too large",
+            None,
+        );
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["type"], "request_too_large");
+    }
+
+    #[tokio::test]
+    async fn maintenance_local_and_upstream_413_are_structured_without_retry() {
+        let state = AppState::for_tests().unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(handle_chat))
+            .route("/v1/responses", post(handle_responses))
+            .route("/v1/messages", post(handle_messages))
+            .layer(DefaultBodyLimit::max(4))
+            .with_state(state.clone());
+        let addr = spawn_mock(app).await;
+        let client = reqwest::Client::new();
+        for endpoint in ["chat/completions", "responses", "messages"] {
+            let response = client
+                .post(format!("http://{addr}/v1/{endpoint}"))
+                .json(&json!({"oversized":true}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"]["type"],
+                "request_too_large"
+            );
+        }
+        let upstream = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post(|| async { (StatusCode::PAYLOAD_TOO_LARGE, "<html>body too big</html>") }),
+        ))
+        .await;
+        let fallback_hits = Arc::new(AtomicUsize::new(0));
+        let backup = spawn_mock(Router::new().route(
+            "/v1/chat/completions",
+            post({
+                let hits = fallback_hits.clone();
+                move || {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    async { "unexpected" }
+                }
+            }),
+        ))
+        .await;
+        let response = route_chat_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"model":SMART_ROUTER_MODEL_ID,"messages":[]}),
+            vec![candidate(upstream, "large"), candidate(backup, "backup")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&bytes).unwrap()["error"]["type"],
+            "request_too_large"
+        );
+        assert_eq!(fallback_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

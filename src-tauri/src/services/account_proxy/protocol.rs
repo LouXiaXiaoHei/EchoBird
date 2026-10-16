@@ -178,15 +178,14 @@ fn responses_content(content: &Value, assistant: bool) -> Vec<Value> {
         .collect()
 }
 
-fn signed_call_id(id: &str, signature: &str) -> String {
-    if signature.is_empty() {
-        return id.to_string();
-    }
-    let encoded = URL_SAFE_NO_PAD.encode(signature.as_bytes());
-    format!("{id}__ebsig{}__{encoded}", encoded.len())
+fn signed_call_id(id: &str, signature: &str) -> Result<String, String> {
+    super::signatures::encode(id, signature)
 }
 
 fn split_call_id(id: &str) -> (String, Option<String>) {
+    if let Some((original, signature)) = super::signatures::decode(id) {
+        return (original, Some(signature));
+    }
     let Some((bare, suffix)) = id.rsplit_once("__ebsig") else {
         return (id.to_string(), None);
     };
@@ -624,7 +623,7 @@ impl ChatDecoder {
         match self.protocol {
             WireProtocol::Trae => unreachable!("Trae uses its named events"),
             WireProtocol::Responses => self.decode_responses(&value, &mut output),
-            WireProtocol::CodeAssist => self.decode_code_assist(&value, &mut output),
+            WireProtocol::CodeAssist => self.decode_code_assist(&value, &mut output)?,
             WireProtocol::Anthropic => self.decode_anthropic(&value, &mut output),
             WireProtocol::Chat => {
                 if let Some(usage) = value.get("usage") {
@@ -982,7 +981,7 @@ impl ChatDecoder {
         self.chunk(json!({"_echobird_response_item":item}), Value::Null)
     }
 
-    fn decode_code_assist(&mut self, value: &Value, output: &mut Vec<Bytes>) {
+    fn decode_code_assist(&mut self, value: &Value, output: &mut Vec<Bytes>) -> Result<(), String> {
         let response = value.get("response").unwrap_or(value);
         if let Some(usage) = response.get("usageMetadata") {
             self.set_usage(usage, true);
@@ -1006,8 +1005,10 @@ impl ChatDecoder {
                     let key = call["id"].as_str().map(str::to_string).unwrap_or_else(|| {
                         format!("call_{}_{index}", uuid::Uuid::new_v4().simple())
                     });
-                    let id =
-                        signed_call_id(&key, part["thoughtSignature"].as_str().unwrap_or_default());
+                    let id = signed_call_id(
+                        &key,
+                        part["thoughtSignature"].as_str().unwrap_or_default(),
+                    )?;
                     let arguments = call.get("args").cloned().unwrap_or(json!({})).to_string();
                     output.extend(self.emit_tool(
                         &key,
@@ -1034,6 +1035,7 @@ impl ChatDecoder {
                 output.extend(self.complete(reason));
             }
         }
+        Ok(())
     }
 
     fn decode_anthropic(&mut self, value: &Value, output: &mut Vec<Bytes>) {
@@ -1484,10 +1486,28 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_long_code_assist_signature_has_a_short_round_trip_id() {
+        let signature = "signed-thought".repeat(512);
+        let id = signed_call_id("call-original", &signature).unwrap();
+        assert!(id.len() <= 64, "tool call id is {} bytes", id.len());
+        assert_eq!(
+            split_call_id(&id),
+            ("call-original".into(), Some(signature))
+        );
+    }
+
+    #[test]
     fn truncated_signature_is_never_sent_as_a_partial_signature() {
-        let id = signed_call_id("call", "signature");
+        let id = signed_call_id("call", "signature").unwrap();
         let (_, signature) = split_call_id(&id[..id.len() - 1]);
         assert!(signature.is_none());
+        let encoded = URL_SAFE_NO_PAD.encode(b"legacy-signature");
+        let legacy = format!("original__ebsig{}__{encoded}", encoded.len());
+        assert_eq!(
+            split_call_id(&legacy),
+            ("original".into(), Some("legacy-signature".into()))
+        );
+        assert!(split_call_id(&legacy[..legacy.len() - 1]).1.is_none());
     }
 
     #[test]
