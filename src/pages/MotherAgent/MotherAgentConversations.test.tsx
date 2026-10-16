@@ -2,7 +2,7 @@ import React, { useLayoutEffect } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
-import type { AgentEvent, ModelConfig, ParasiteEvent } from '../../api/types';
+import type { AgentEvent, ModelConfig, ParasiteEvent, ReasoningEffort } from '../../api/types';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { MotherAgentProvider } from './MotherAgentProvider';
 import { useMotherAgent } from './context';
@@ -165,7 +165,7 @@ describe('Mother Agent reasoning workflow', () => {
   it('starts with default and sends no extra parameter without an explicit choice', async () => {
     await mount();
     expect(state.reasoningEffort).toBeUndefined();
-    expect(state.reasoningLevels).toEqual(['low', 'high', 'max']);
+    expect(state.reasoningLevels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     expect(stored.has(REASONING_STORAGE_KEY)).toBe(false);
     expect(api.sendAgentMessage).not.toHaveBeenCalled();
     await send('Use model default');
@@ -198,6 +198,31 @@ describe('Mother Agent reasoning workflow', () => {
     renderer = undefined;
     await mount();
     expect(state.reasoningEffort).toBe('xhigh');
+  });
+
+  it('keeps all five DeepSeek choices and sends them unchanged only on explicit turns', async () => {
+    await mount();
+    const levels: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+    for (const effort of levels) {
+      const requestCount = vi.mocked(api.sendAgentMessage).mock.calls.length;
+      act(() => state.setReasoningEffort(effort));
+      expect(state.reasoningEffort).toBe(effort);
+      expect(api.sendAgentMessage).toHaveBeenCalledTimes(requestCount);
+      await send(`Use ${effort}`);
+      expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe(effort);
+      emitAgent({ type: 'done', conversation_id: activeSession() });
+    }
+    act(() => state.setReasoningEffort('medium'));
+    act(() => renderer?.unmount());
+    renderer = undefined;
+    await mount();
+    expect(state.reasoningEffort).toBe('medium');
+    expect(api.sendAgentMessage).toHaveBeenCalledTimes(levels.length);
+    act(() => state.setReasoningEffort(undefined));
+    await send('Return to model default');
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0]).not.toHaveProperty(
+      'reasoning_effort'
+    );
   });
 
   it('saves next-turn effort during pending startup and streaming without interrupting the active run', async () => {
@@ -277,12 +302,13 @@ describe('Mother Agent reasoning workflow', () => {
   });
 
   it('omits stale or unsupported choices and keeps Claude Code native settings', async () => {
-    stored.set(REASONING_STORAGE_KEY, JSON.stringify({ [preferenceKey(deepseek)]: 'medium' }));
+    stored.set(REASONING_STORAGE_KEY, JSON.stringify({ [preferenceKey(deepseek)]: 'unsupported' }));
     await mount();
     expect(state.reasoningEffort).toBeUndefined();
     const original = stored.get(REASONING_STORAGE_KEY);
     act(() => state.setReasoningEffort('medium'));
-    expect(stored.get(REASONING_STORAGE_KEY)).toBe(original);
+    expect(state.reasoningEffort).toBe('medium');
+    expect(stored.get(REASONING_STORAGE_KEY)).not.toBe(original);
     act(() => state.setReasoningEffort('high'));
     act(() => state.setParasiteAgent('claudecode'));
     expect(state.reasoningLevels).toEqual([]);

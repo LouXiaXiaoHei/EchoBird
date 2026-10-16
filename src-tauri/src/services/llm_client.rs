@@ -1906,9 +1906,15 @@ mod tests {
 
         for (provider, model, effort) in [
             (LlmProvider::OpenAI, "deepseek-flash", Some("high")),
+            (LlmProvider::OpenAI, "deepseek-flash", Some("medium")),
+            (LlmProvider::OpenAI, "deepseek-flash", Some("xhigh")),
             (LlmProvider::OpenAI, "gpt-5.2", Some("xhigh")),
             (LlmProvider::Anthropic, "claude-opus-4-6", Some("max")),
             (LlmProvider::Anthropic, "deepseek-v4-pro", Some("low")),
+            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("medium")),
+            (LlmProvider::Anthropic, "deepseek-v4-pro", Some("xhigh")),
+            (LlmProvider::OpenAI, "deepseek-flash", None),
+            (LlmProvider::Anthropic, "deepseek-v4-pro", None),
             (LlmProvider::OpenAI, "unknown", None),
             (LlmProvider::Anthropic, "unknown", None),
         ] {

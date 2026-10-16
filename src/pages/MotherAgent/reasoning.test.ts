@@ -14,8 +14,14 @@ const model = (modelId: string, changes: Partial<ModelConfig> = {}): ModelConfig
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Mother reasoning capability selection', () => {
-  it('offers DeepSeek native levels through either supported protocol', () => {
-    expect(getReasoningLevels(model('deepseek-flash'))).toEqual(['low', 'high', 'max']);
+  it('offers all five accepted DeepSeek levels through either supported protocol', () => {
+    expect(getReasoningLevels(model('deepseek-flash'))).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+    ]);
     expect(
       getReasoningLevels(
         model('deepseek-v4-pro', {
@@ -23,7 +29,7 @@ describe('Mother reasoning capability selection', () => {
           anthropicUrl: 'https://api.example.test/anthropic',
         })
       )
-    ).toEqual(['low', 'high', 'max']);
+    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
   });
 
   it('uses the selected wire protocol and exact model family', () => {
@@ -67,7 +73,7 @@ describe('Mother reasoning capability selection', () => {
       getReasoningLevels(
         model('claude-opus-5', { baseUrl: '', anthropicUrl: 'https://api.deepseek.com/anthropic' })
       )
-    ).toEqual(['low', 'high', 'max']);
+    ).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
     expect(
       getReasoningLevels(
         model('claude-opus-5', { baseUrl: '', anthropicUrl: 'https://api.anthropic.com' })

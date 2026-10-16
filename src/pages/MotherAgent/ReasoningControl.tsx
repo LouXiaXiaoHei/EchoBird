@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import type { ReasoningEffort } from '../../api/types';
 import { useI18n } from '../../hooks/useI18n';
+import { ReasoningEnergy } from './ReasoningEnergy';
 
 interface Props {
   levels: ReasoningEffort[];
@@ -65,33 +66,56 @@ export function ReasoningControl({ levels, value, disabled, onChange }: Props) {
         <div
           role="dialog"
           aria-label={t('mother.reasoning.title')}
-          className="absolute bottom-full mb-2 right-0 z-50 w-[202px] rounded-lg border border-cyber-border bg-cyber-surface p-2 shadow-xl"
+          className="absolute bottom-full mb-2 right-0 z-50 w-[220px] rounded-xl border border-cyber-border bg-cyber-surface p-3 shadow-xl"
         >
           <div className="mb-1 flex items-center justify-between gap-3 text-xs">
             <span className="text-cyber-text-secondary">{t('mother.reasoning.title')}</span>
-            <span className={value === 'max' ? 'text-cyber-accent' : 'text-cyber-text'}>
-              {label}
+            <span className="overflow-hidden">
+              <span
+                key={value || 'default'}
+                className={`mother-reasoning-label block ${value === 'max' ? 'text-cyber-accent' : 'text-cyber-text'}`}
+              >
+                {label}
+              </span>
             </span>
           </div>
-          <input
-            type="range"
-            min={0}
-            max={levels.length}
-            step={1}
-            value={index}
-            autoFocus
-            aria-label={t('mother.reasoning.title')}
-            aria-valuetext={label}
-            onChange={(event) => {
-              if (!unavailable) onChange(choices[Number(event.currentTarget.value)]);
-            }}
-            className="mother-reasoning-slider block m-0 w-full"
+          <div
+            className="relative h-8"
             style={
               {
-                '--reasoning-progress': `calc(16px + (100% - 32px) * ${index / levels.length})`,
+                '--reasoning-progress': `calc(9px + (100% - 18px) * ${index / levels.length})`,
               } as CSSProperties
             }
-          />
+          >
+            <div aria-hidden="true" className="mother-reasoning-track">
+              <div className="mother-reasoning-fill" />
+              <ReasoningEnergy active={value === 'max'} />
+              {value !== 'max' &&
+                choices.map((effort, position) => (
+                  <span
+                    key={effort || 'default'}
+                    className="mother-reasoning-stop"
+                    style={{
+                      left: `calc(9px + (100% - 18px) * ${position / levels.length})`,
+                    }}
+                  />
+                ))}
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={levels.length}
+              step={1}
+              value={index}
+              autoFocus
+              aria-label={t('mother.reasoning.title')}
+              aria-valuetext={label}
+              onChange={(event) => {
+                if (!unavailable) onChange(choices[Number(event.currentTarget.value)]);
+              }}
+              className="mother-reasoning-slider relative block m-0 w-full"
+            />
+          </div>
         </div>
       )}
     </div>

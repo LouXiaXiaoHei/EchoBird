@@ -133,7 +133,6 @@ mod tests {
     #[test]
     fn unsupported_choices_fail_without_changing_payload() {
         for (model, provider, effort) in [
-            ("deepseek-flash", LlmProvider::OpenAI, "medium"),
             ("claude-opus-4-6", LlmProvider::Anthropic, "xhigh"),
             ("claude-opus-4-5", LlmProvider::Anthropic, "max"),
             ("claude-opus-5", LlmProvider::OpenAI, "high"),
@@ -145,6 +144,24 @@ mod tests {
             let mut body = json!({ "messages": [] });
             assert!(apply(&mut body, &config(model, provider, Some(effort))).is_err());
             assert_eq!(body, json!({ "messages": [] }));
+        }
+    }
+
+    #[test]
+    fn deepseek_passes_all_five_accepted_levels_to_each_protocol() {
+        // DeepSeek accepts medium/xhigh and maps both to high server-side.
+        for provider in [LlmProvider::OpenAI, LlmProvider::Anthropic] {
+            for effort in ["low", "medium", "high", "xhigh", "max"] {
+                let mut body = json!({ "max_tokens": 4096, "messages": [] });
+                apply(&mut body, &config("deepseek-flash", provider, Some(effort))).unwrap();
+                assert_eq!(body["thinking"]["type"], "enabled");
+                match provider {
+                    LlmProvider::OpenAI => assert_eq!(body["reasoning_effort"], effort),
+                    LlmProvider::Anthropic => {
+                        assert_eq!(body["output_config"]["effort"], effort);
+                    }
+                }
+            }
         }
     }
 
@@ -200,7 +217,10 @@ mod tests {
         apply(&mut body, &cfg).unwrap();
         assert_eq!(body["thinking"]["type"], "enabled");
         cfg.reasoning_effort = Some("medium".into());
-        assert!(apply(&mut json!({}), &cfg).is_err());
+        let mut body = json!({});
+        apply(&mut body, &cfg).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["output_config"]["effort"], "medium");
         cfg.base_url = "https://api.anthropic.com".into();
         let mut body = json!({});
         apply(&mut body, &cfg).unwrap();

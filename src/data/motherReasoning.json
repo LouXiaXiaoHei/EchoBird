@@ -14,7 +14,7 @@
   {
     "models": ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "deepseek-v4.1-flash"],
     "protocols": ["openai", "anthropic"],
-    "levels": ["low", "high", "max"],
+    "levels": ["low", "medium", "high", "xhigh", "max"],
     "thinking": "enabled"
   },
   {

@@ -88,7 +88,7 @@ export function characterInk(
   const channels = source.map(
     (channel) => base + (range ? (channel - minimum) / range : 0.5) * span
   );
-  return [channels[0], channels[1], channels[2], dark ? 1 : 0.48];
+  return [channels[0], channels[1], channels[2], dark ? 1 : 0.72];
 }
 
 export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRenderer | null {
