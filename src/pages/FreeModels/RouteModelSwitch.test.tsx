@@ -1457,7 +1457,7 @@ describe('Direct route card model selection', () => {
     expectNoPassiveChanges();
   });
 
-  it('loads no account metadata outside the active smart view and ignores a late earlier entry', async () => {
+  it('loads no account metadata outside the active page and ignores a late earlier entry', async () => {
     useNavigationStore.setState({ activePage: 'models' });
     await open();
     expect(accountApi.listProxyAccounts).not.toHaveBeenCalled();
@@ -1465,9 +1465,9 @@ describe('Direct route card model selection', () => {
     vi.mocked(accountApi.listProxyAccounts).mockReturnValueOnce(earlier.promise);
     await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
     expect(accountApi.listProxyAccounts).toHaveBeenCalledExactlyOnceWith('codex');
-    await act(async () => context.setViewMode('super'));
+    await act(async () => useNavigationStore.getState().setActivePage('models'));
     expect(accountApi.listProxyAccounts).toHaveBeenCalledOnce();
-    await act(async () => context.setViewMode('smart'));
+    await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
     expect(accountApi.listProxyAccounts).toHaveBeenCalledTimes(2);
     expect(textOf(card('account-old'))).toContain('codex@example.com');
     await act(async () =>
@@ -1853,9 +1853,9 @@ describe('Direct route card model selection', () => {
       await open();
       await select('account-old', 'account-new');
       if (exit === 'presentation') {
-        await act(async () => context.setViewMode('super'));
-        expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(0);
-        await act(async () => context.setViewMode('smart'));
+        await act(async () => context.setLayout('list'));
+        expect(picker('account-old').props.disabled).toBe(true);
+        await act(async () => context.setLayout('cards'));
       } else {
         await act(async () => useNavigationStore.getState().setActivePage('models'));
         expect(renderer.root.findAllByType(ModelIdCombobox)).toHaveLength(0);

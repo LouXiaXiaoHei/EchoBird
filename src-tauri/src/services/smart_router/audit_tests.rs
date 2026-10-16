@@ -3,6 +3,36 @@ use std::net::SocketAddr;
 
 use super::*;
 
+#[tokio::test]
+async fn no_enabled_candidates_fail_without_contacting_an_upstream_for_all_protocols() {
+    let state = AppState::for_tests().unwrap();
+    let chat = route_chat_with_candidates(
+        &state,
+        &HeaderMap::new(),
+        json!({"model":"auto","messages":[{"role":"user","content":"hello"}]}),
+        Vec::new(),
+    )
+    .await;
+    let responses = route_responses_with_candidates(
+        &state,
+        &HeaderMap::new(),
+        json!({"model":"auto","input":"hello"}),
+        Vec::new(),
+    )
+    .await;
+    let messages = route_messages_with_candidates(
+        &state,
+        &HeaderMap::new(),
+        json!({"model":"auto","messages":[{"role":"user","content":"hello"}],"max_tokens":16}),
+        Vec::new(),
+    )
+    .await;
+    for response in [chat, responses, messages] {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert!(state.route_memory.lock().unwrap().candidates.is_empty());
+}
+
 fn audit_candidate(id: &str) -> Candidate {
     let mut candidate = audit_http_candidate("127.0.0.1:1".parse().unwrap(), id);
     candidate.base_url = format!("fixture://{id}");

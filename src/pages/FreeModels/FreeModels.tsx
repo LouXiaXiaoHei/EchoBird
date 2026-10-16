@@ -27,11 +27,13 @@ import {
   useSensors,
   type DragEndEvent,
   type CollisionDetection,
+  type Modifier,
 } from '@dnd-kit/core';
 import {
   SortableContext,
   useSortable,
   rectSortingStrategy,
+  verticalListSortingStrategy,
   sortableKeyboardCoordinates,
   arrayMove,
 } from '@dnd-kit/sortable';
@@ -43,8 +45,12 @@ import {
   CircleHelp,
   ExternalLink,
   KeyRound,
+  GripVertical,
+  LayoutGrid,
+  List,
   Plus,
   RefreshCw,
+  SquarePen,
   Waypoints,
   Trash2,
   X,
@@ -64,7 +70,7 @@ import type { AccountProvider, AccountSource, ModelConfig } from '../../api/type
 import type { FreeModelDirectory, FreeModelEntry } from '../../api/freeModels';
 import { getModelIcon } from '../../components';
 import { ModelListCard } from '../../components/ModelListCard';
-import { ViewModeTabs } from '../../components/ViewModeTabs';
+import { RoutingToggle } from '../../components/RoutingToggle';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
 import { useConfirm } from '../../components/ConfirmDialog';
@@ -80,7 +86,7 @@ import './FreeModels.css';
 
 const NODE_COLUMN_GAP = 24;
 const NODE_ROW_GAP = 36;
-const NODE_SIDE_PADDING = 20;
+const NODE_SIDE_PADDING = 0;
 const HUB_TO_NODE_GAP = 64;
 const HUB_ARROW_GAP = 4;
 const HUB_ARROW_HEIGHT = 12;
@@ -91,6 +97,8 @@ const ROUTER_ACTIVITY_POLL_MS = 750;
 const ROUTER_ACTIVITY_GRACE_MS = 2200;
 const ACCOUNT_PROXY_RISK_ACKNOWLEDGED_KEY = 'echobird-account-proxy-risk-acknowledged';
 const ROUTER_REMOVE_DROP_ID = 'router-remove-drop-zone';
+const ROUTER_LAYOUT_KEY = 'echobird-router-layout';
+const restrictRouteToVerticalAxis: Modifier = ({ transform }) => ({ ...transform, x: 0 });
 
 const routeCollisionDetection: CollisionDetection = (args) => {
   const removeTargets = args.droppableContainers.filter(
@@ -110,8 +118,10 @@ const routeCollisionDetection: CollisionDetection = (args) => {
 };
 
 interface FreeModelsContextValue {
-  viewMode: 'smart' | 'super';
-  setViewMode: (mode: 'smart' | 'super') => void;
+  layout: 'cards' | 'list';
+  setLayout: (layout: 'cards' | 'list') => void;
+  activeDragId: string | null;
+  setActiveDragId: (id: string | null) => void;
   catalog: FreeModelDirectory;
   models: FreeModelEntry[];
   customModels: RouteModelNode[];
@@ -123,6 +133,9 @@ interface FreeModelsContextValue {
   routerBaseUrl: string;
   routerEnabled: boolean;
   routerTogglePending: boolean;
+  pausedIds: Set<string>;
+  candidateTogglePending: Set<string>;
+  setCandidateEnabled: (id: string, enabled: boolean) => Promise<void>;
   setRouterEnabled: (enabled: boolean) => Promise<void>;
   refresh: () => Promise<void>;
   addSelectedModel: (model: RouteModelInput) => Promise<void>;
@@ -223,7 +236,22 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   const { t } = useI18n();
   const { showToast } = useToast();
   const activePage = useNavigationStore((state) => state.activePage);
-  const [viewMode, setViewMode] = useState<'smart' | 'super'>('smart');
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [layout, setLayoutState] = useState<'cards' | 'list'>(() => {
+    try {
+      return localStorage.getItem(ROUTER_LAYOUT_KEY) === 'list' ? 'list' : 'cards';
+    } catch {
+      return 'cards';
+    }
+  });
+  const setLayout = useCallback((next: 'cards' | 'list') => {
+    setLayoutState(next);
+    try {
+      localStorage.setItem(ROUTER_LAYOUT_KEY, next);
+    } catch {
+      // Keep the choice for this session when local storage is unavailable.
+    }
+  }, []);
   const [catalog, setCatalog] = useState<FreeModelDirectory>(emptyCatalog);
   const [customModels, setCustomModels] = useState<RouteModelNode[]>([]);
   const [proxyAccounts, setProxyAccounts] = useState<
@@ -237,6 +265,11 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   const [routerEnabled, setRouterEnabledState] = useState(true);
   const [routerTogglePending, setRouterTogglePending] = useState(false);
   const [routerLoaded, setRouterLoaded] = useState(false);
+  const [pausedIds, setPausedIds] = useState<Set<string>>(() => new Set());
+  const [candidateTogglePending, setCandidateTogglePending] = useState<Set<string>>(
+    () => new Set()
+  );
+  const candidateTogglePendingRef = useRef(new Set<string>());
   const [savingModelIds, setSavingModelIds] = useState<Set<string>>(() => new Set());
   const savingModelIdsRef = useRef(new Set<string>());
   const refreshInFlightRef = useRef(false);
@@ -254,7 +287,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   );
 
   useEffect(() => {
-    if (activePage !== 'freeModels' || viewMode !== 'smart') return;
+    if (activePage !== 'freeModels') return;
     const providers: AccountProvider[] = JSON.parse(accountProvidersKey);
     if (providers.length === 0) return;
     let ignore = false;
@@ -273,7 +306,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
     return () => {
       ignore = true;
     };
-  }, [activePage, viewMode, accountProvidersKey]);
+  }, [activePage, accountProvidersKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -330,6 +363,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
     });
     setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
     setRouterEnabledState(router.enabled);
+    setPausedIds(new Set(router.disabledCandidateIds ?? []));
     setRouterLoaded(true);
     routerLoadedRef.current = true;
   }, []);
@@ -361,6 +395,31 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
         showToast('error', t('error.requestFailed'));
       } finally {
         setRouterTogglePending(false);
+      }
+    },
+    [showToast, t]
+  );
+
+  const setCandidateEnabled = useCallback(
+    async (id: string, enabled: boolean) => {
+      if (candidateTogglePendingRef.current.has(id)) return;
+      candidateTogglePendingRef.current.add(id);
+      setCandidateTogglePending(new Set(candidateTogglePendingRef.current));
+      const change = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const router = await api.setSmartRouterCandidateEnabled(id, enabled);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
+        });
+      routerMutationRef.current = change;
+      try {
+        await change;
+      } catch (error) {
+        console.error('Toggle smart router candidate failed:', error);
+        showToast('error', t('error.requestFailed'));
+      } finally {
+        candidateTogglePendingRef.current.delete(id);
+        setCandidateTogglePending(new Set(candidateTogglePendingRef.current));
       }
     },
     [showToast, t]
@@ -420,6 +479,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           const nextIds = new Set(router.candidateIds);
           selectedIdsRef.current = nextIds;
           setSelectedIds(nextIds);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
           setCustomModels((current) => [
             ...current.filter((entry) => entry.id !== id),
             {
@@ -520,6 +580,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           setCustomModels((current) => current.filter((model) => model.id !== id));
           setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
           setRouterEnabledState(router.enabled);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
         });
       routerMutationRef.current = removal;
       try {
@@ -569,8 +630,10 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   return (
     <FreeModelsContext.Provider
       value={{
-        viewMode,
-        setViewMode,
+        layout,
+        setLayout,
+        activeDragId,
+        setActiveDragId,
         catalog,
         models,
         customModels,
@@ -582,6 +645,9 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
         routerBaseUrl,
         routerEnabled,
         routerTogglePending: routerTogglePending || !routerLoaded,
+        pausedIds,
+        candidateTogglePending,
+        setCandidateEnabled,
         setRouterEnabled,
         refresh,
         addSelectedModel,
@@ -599,7 +665,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
 export function FreeModelsTitleActions() {
   const { t } = useI18n();
-  const { viewMode, setViewMode } = useFreeModels();
+  const { layout, setLayout, activeDragId } = useFreeModels();
   const [showHelp, setShowHelp] = useState(false);
 
   useEffect(() => {
@@ -614,14 +680,30 @@ export function FreeModelsTitleActions() {
   return (
     <div className="flex shrink-0 items-center gap-3">
       <AccountPrivacyButton />
-      <ViewModeTabs
-        value={viewMode}
-        onChange={setViewMode}
-        options={[
-          { value: 'smart', label: t('freeModels.view.smart') },
-          { value: 'super', label: t('freeModels.view.super') },
-        ]}
-      />
+      <div
+        role="group"
+        aria-label={t('freeModels.layout.label')}
+        className="view-mode-tabs flex h-9 overflow-hidden rounded-button border border-cyber-border"
+      >
+        {(['cards', 'list'] as const).map((mode) => {
+          const Icon = mode === 'cards' ? LayoutGrid : List;
+          return (
+            <button
+              key={mode}
+              type="button"
+              aria-label={t(
+                mode === 'cards' ? 'freeModels.layout.cards' : 'freeModels.layout.list'
+              )}
+              aria-pressed={layout === mode}
+              disabled={activeDragId !== null}
+              onClick={() => setLayout(mode)}
+              className={`view-mode-tab flex w-9 items-center justify-center transition-[color] ${layout === mode ? 'bg-cyber-elevated text-cyber-text' : 'text-cyber-text-secondary hover:text-cyber-text'}`}
+            >
+              <Icon size={16} aria-hidden="true" />
+            </button>
+          );
+        })}
+      </div>
       <button
         type="button"
         onClick={() => setShowHelp(true)}
@@ -695,48 +777,60 @@ function RouterHub({
   baseUrl,
   hubRef,
   onCopy,
+  list = false,
 }: {
   title: string;
   enabled: boolean;
   baseUrl: string;
   hubRef?: ComponentPropsWithRef<'div'>['ref'];
   onCopy?: (endpoint: string) => void;
+  list?: boolean;
 }) {
   const { t } = useI18n();
+  const status = (
+    <span
+      className={`free-model-router-status flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none ${enabled ? 'text-green-500 [[data-theme=light]_&]:text-green-800' : 'text-cyber-text-muted'}`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
+      {t(enabled ? 'freeModels.router.enabled' : 'freeModels.router.disabled')}
+    </span>
+  );
   return (
     <div
       ref={hubRef}
-      className="free-model-router-hub relative z-10 mx-auto w-full max-w-[380px] rounded-xl p-5"
+      className={`free-model-router-hub relative z-10 mx-auto ${list ? 'free-model-router-hub-bar rounded-card' : 'w-full max-w-[380px] rounded-xl p-5'}`}
     >
-      <div className="grid h-8 grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-2">
-        <Waypoints size={22} aria-hidden="true" className="text-cyber-accent" />
-        <div className="min-w-0 truncate text-lg font-semibold leading-none text-cyber-text">
-          {title}
+      {list ? (
+        <Waypoints size={20} aria-hidden="true" className="text-cyber-accent" />
+      ) : (
+        <div className="free-model-router-heading grid h-8 grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-2">
+          <Waypoints size={22} aria-hidden="true" className="text-cyber-accent" />
+          <div className="min-w-0 truncate text-lg font-semibold leading-none text-cyber-text">
+            {title}
+          </div>
+          {status}
         </div>
-        <span
-          className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none ${enabled ? 'text-green-500 [[data-theme=light]_&]:text-green-800' : 'text-cyber-text-muted'}`}
-        >
-          <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
-          {t(enabled ? 'freeModels.router.enabled' : 'freeModels.router.disabled')}
-        </span>
-      </div>
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      )}
+      <div className={`free-model-router-endpoints grid grid-cols-2 gap-3 ${list ? '' : 'mt-4'}`}>
         {[
           ['OpenAI', baseUrl],
           ['Anthropic', baseUrl.replace(/\/v1\/?$/, '')],
         ].map(([protocol, endpoint]) => {
           const content = (
             <>
-              <span className="flex h-5 items-center text-[10px] font-semibold text-cyber-text-muted">
+              <span
+                className={`${list ? 'shrink-0 text-xs' : 'flex h-5 items-center text-[10px]'} font-semibold text-cyber-text-muted`}
+              >
                 {protocol}
               </span>
-              <span className="mt-1 block break-all text-xs font-mono text-cyber-text-secondary">
+              <span
+                className={`${list ? 'min-w-0 whitespace-nowrap' : 'mt-1 block break-all'} text-xs font-mono text-cyber-text-secondary`}
+              >
                 {endpoint}
               </span>
             </>
           );
-          const className =
-            'block min-w-0 rounded-button bg-cyber-bg/60 px-3 py-2 text-left select-none';
+          const className = `${list ? 'flex items-center gap-2 px-2 py-1' : 'block px-3 py-2'} min-w-0 rounded-button bg-cyber-bg/60 text-left select-none`;
           return onCopy ? (
             <button
               key={protocol}
@@ -754,6 +848,7 @@ function RouterHub({
           );
         })}
       </div>
+      {list && status}
     </div>
   );
 }
@@ -775,6 +870,13 @@ interface RouteModelCardProps {
   saving?: boolean;
   dragging?: boolean;
   onModelChange?: (id: string, modelId: string) => Promise<void>;
+  list?: boolean;
+  paused?: boolean;
+  pending?: boolean;
+  statusLabel?: string;
+  onEnabledChange?: (enabled: boolean) => void;
+  onEdit?: () => void;
+  onRemove?: () => void;
 }
 
 function RouteModelCard({
@@ -794,6 +896,13 @@ function RouteModelCard({
   saving = false,
   dragging = false,
   onModelChange,
+  list = false,
+  paused = false,
+  pending = false,
+  statusLabel,
+  onEnabledChange,
+  onEdit,
+  onRemove,
   dragHandleProps,
   overlay = false,
 }: RouteModelCardProps & {
@@ -821,18 +930,159 @@ function RouteModelCard({
       ? providerIconSrc
       : getModelIcon(model.provider, model.modelId);
   const hasModelPicker = Boolean(onModelChange && modelIdOptions.length > 0 && !overlay);
-  if (pickerOpen && (!hasModelPicker || saving || dragging)) setPickerOpen(false);
+  if (pickerOpen && (!hasModelPicker || saving || dragging || pending)) setPickerOpen(false);
   const changePickerOpen = (open: boolean) => {
-    if (open && (!hasModelPicker || saving || dragging)) return;
+    if (open && (!hasModelPicker || saving || dragging || pending)) return;
     setPickerOpen(open);
     if (open && !pickerOpen) onLoadModels?.();
   };
+  const modelPicker = hasModelPicker ? (
+    <div
+      className="free-model-route-picker pointer-events-auto min-w-0"
+      aria-busy={saving || refreshing}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        if (event.currentTarget.contains(event.target as Node)) dragPointerDown?.(event);
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <ModelIdCombobox
+        compact
+        selectOnly
+        value={model.modelId}
+        options={modelIdOptions}
+        optionLabels={account?.modelLabels}
+        freeModelIds={account?.freeModelIds ?? freeModelIds}
+        paidModelIds={paidModelIds}
+        optionMultipliers={optionMultipliers}
+        freeLabel={t('model.free')}
+        refreshing={refreshing}
+        disabled={saving || dragging || pending}
+        open={pickerOpen}
+        onOpenChange={changePickerOpen}
+        externalTriggerRef={list ? undefined : cardRef}
+        ariaLabel={`${t('model.modelId')}: ${displayName} (${priority})`}
+        onChange={(modelId) => void onModelChange?.(model.id, modelId)}
+      />
+    </div>
+  ) : (
+    <span className="block min-w-0 text-xs text-cyber-text-secondary truncate">
+      {account?.modelLabels?.[model.modelId] ?? model.modelId}
+    </span>
+  );
+  const activator = (dragHandleProps || overlay) && (
+    <button
+      {...dragHandleProps}
+      type="button"
+      tabIndex={overlay ? -1 : dragHandleProps?.tabIndex}
+      disabled={list ? pending || saving || overlay : undefined}
+      aria-label={`${t('freeModels.router.priority')} ${priority}: ${model.modelId}`}
+      aria-pressed={list ? !paused : undefined}
+      aria-expanded={!list && hasModelPicker ? pickerOpen : undefined}
+      onPointerDown={dragPointerDown}
+      onClick={() => {
+        if (saving || dragging || pending || overlay) return;
+        if (list) onEnabledChange?.(paused);
+        else if (hasModelPicker) changePickerOpen(!pickerOpen);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          if (saving || dragging || pending || overlay) return;
+          if (list) onEnabledChange?.(paused);
+          else if (hasModelPicker) changePickerOpen(true);
+        } else {
+          dragHandleProps?.onKeyDown?.(event);
+        }
+      }}
+      className={`absolute inset-0 rounded-card ${list ? 'touch-pan-y' : 'touch-none'} focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cyber-accent`}
+    />
+  );
+
+  if (list) {
+    return (
+      <div
+        ref={cardRef}
+        aria-hidden={overlay || undefined}
+        className={`free-model-route-row relative rounded-card ${active ? 'is-active' : ''} ${paused ? 'is-paused' : ''} ${overlay ? 'shadow-2xl' : ''}`}
+      >
+        {activator}
+        <div className="free-model-route-row-identity relative pointer-events-none flex min-w-0 items-center">
+          <span className="flex w-6 shrink-0 items-center justify-center" aria-hidden="true">
+            <GripVertical size={14} className="text-cyber-text-muted" />
+          </span>
+          <span className="free-model-route-row-number w-6 shrink-0 text-center text-sm font-semibold tabular-nums text-cyber-accent">
+            {priority}
+          </span>
+          {iconSrc ? (
+            <img src={iconSrc} alt="" className="h-6 w-6 shrink-0 object-contain" />
+          ) : (
+            <Box
+              size={24}
+              className="h-6 w-6 shrink-0 text-cyber-text-secondary"
+              aria-hidden="true"
+            />
+          )}
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="min-w-0 truncate text-sm font-semibold text-cyber-text">
+              {displayName}
+            </span>
+            {keyless && <KeylessModelLabel />}
+            {model.accountSource && displayPlan && (
+              <span className="shrink-0 text-xs text-cyber-text-secondary">{displayPlan}</span>
+            )}
+          </div>
+        </div>
+        <div className="free-model-route-row-details relative pointer-events-none">
+          <span
+            className={`truncate text-xs ${active ? 'text-cyber-accent' : 'text-cyber-text-muted'}`}
+          >
+            {statusLabel}
+          </span>
+          {modelPicker}
+        </div>
+        <div className="free-model-route-row-actions relative flex shrink-0 items-center gap-1">
+          {onRemove && !overlay && (
+            <button
+              type="button"
+              disabled={pending || saving || dragging}
+              onClick={onRemove}
+              aria-label={`${t('btn.remove')}: ${displayName} (${priority})`}
+              className="flex h-7 w-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-red-500 disabled:opacity-50"
+            >
+              <Trash2 size={15} />
+            </button>
+          )}
+          {onEdit && !overlay && (
+            <button
+              type="button"
+              disabled={pending || saving || dragging}
+              onClick={onEdit}
+              aria-label={`${t('btn.edit')}: ${displayName} (${priority})`}
+              className="flex h-7 w-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-cyber-text disabled:opacity-50"
+            >
+              <SquarePen size={15} />
+            </button>
+          )}
+          {onEnabledChange && !overlay && (
+            <RoutingToggle
+              hideLabel
+              label={`${t('freeModels.router.candidateEnabled')}: ${displayName} (${priority})`}
+              checked={!paused}
+              pending={pending || saving || dragging}
+              onChange={onEnabledChange}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
       ref={cardRef}
       aria-hidden={overlay || undefined}
-      className={`free-model-route-node relative min-h-[80px] rounded-card p-3 flex items-center ${hasModelPicker ? 'has-model-picker' : ''} ${active ? 'is-active' : ''} ${overlay ? 'is-dragging shadow-2xl' : ''}`}
+      className={`free-model-route-node relative min-h-[80px] rounded-card p-3 flex items-center ${hasModelPicker ? 'has-model-picker' : ''} ${active ? 'is-active' : ''} ${paused ? 'is-paused' : ''} ${overlay ? 'is-dragging shadow-2xl' : ''}`}
     >
       <div
         aria-hidden="true"
@@ -844,27 +1094,7 @@ function RouteModelCard({
           {priority}
         </span>
       </div>
-      {(dragHandleProps || overlay) && (
-        <button
-          {...dragHandleProps}
-          type="button"
-          tabIndex={overlay ? -1 : dragHandleProps?.tabIndex}
-          aria-label={`${t('freeModels.router.priority')} ${priority}: ${model.modelId}`}
-          aria-expanded={hasModelPicker ? pickerOpen : undefined}
-          onClick={() => {
-            if (hasModelPicker && !saving && !dragging) changePickerOpen(!pickerOpen);
-          }}
-          onKeyDown={(event) => {
-            if (hasModelPicker && !saving && !dragging && event.key === 'Enter') {
-              event.preventDefault();
-              changePickerOpen(true);
-            } else {
-              dragHandleProps?.onKeyDown?.(event);
-            }
-          }}
-          className="absolute inset-0 rounded-card touch-none focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cyber-accent"
-        />
-      )}
+      {activator}
       <div className="relative z-10 pointer-events-none flex w-full items-center gap-2.5">
         {iconSrc ? (
           <img src={iconSrc} alt="" className="h-12 w-12 shrink-0 object-contain" />
@@ -889,40 +1119,7 @@ function RouteModelCard({
               </span>
             )}
           </div>
-          {hasModelPicker ? (
-            <div
-              className="free-model-route-picker pointer-events-auto min-w-0"
-              aria-busy={saving || refreshing}
-              onPointerDown={(event) => {
-                event.stopPropagation();
-                if (event.currentTarget.contains(event.target as Node)) dragPointerDown?.(event);
-              }}
-              onKeyDown={(event) => event.stopPropagation()}
-            >
-              <ModelIdCombobox
-                compact
-                selectOnly
-                value={model.modelId}
-                options={modelIdOptions}
-                optionLabels={account?.modelLabels}
-                freeModelIds={account?.freeModelIds ?? freeModelIds}
-                paidModelIds={paidModelIds}
-                optionMultipliers={optionMultipliers}
-                freeLabel={t('model.free')}
-                refreshing={refreshing}
-                disabled={saving || dragging}
-                open={pickerOpen}
-                onOpenChange={changePickerOpen}
-                externalTriggerRef={cardRef}
-                ariaLabel={`${t('model.modelId')}: ${displayName} (${priority})`}
-                onChange={(modelId) => void onModelChange?.(model.id, modelId)}
-              />
-            </div>
-          ) : (
-            <span className="block min-w-0 text-xs text-cyber-text-secondary truncate">
-              {account?.modelLabels?.[model.modelId] ?? model.modelId}
-            </span>
-          )}
+          {modelPicker}
         </div>
       </div>
     </div>
@@ -1035,136 +1232,6 @@ function RouterRemoveDropZone({
   );
 }
 
-const SUPER_ROUTER_MODELS: RouteModelNode[] = [
-  ['Anthropic', 'claude-opus-5-5'],
-  ['OpenAI', 'gpt-6-astra'],
-  ['Google Gemini', 'gemini-3.7-flash'],
-  ['DeepSeek', 'deepseek-v4-pro'],
-  ['Z.ai', 'glm-5.3'],
-  ['MiniMax', 'MiniMax-M3'],
-  ['Qwen', 'qwen3.8-max'],
-].map(([provider, modelId], index) => ({
-  id: `super-preview-${index}`,
-  internalId: `super-preview-${index}`,
-  provider,
-  modelId,
-  baseUrl: '',
-}));
-
-function SuperRouterMain() {
-  const { t } = useI18n();
-  const stageRef = useRef<HTMLDivElement | null>(null);
-  const hubRef = useRef<HTMLDivElement | null>(null);
-  const leadRef = useRef<HTMLDivElement | null>(null);
-  const gridRef = useRef<HTMLDivElement | null>(null);
-  const [diagram, setDiagram] = useState({ width: 1, height: 1, paths: '', arrows: '' });
-
-  useLayoutEffect(() => {
-    const stage = stageRef.current;
-    const hub = hubRef.current;
-    const lead = leadRef.current;
-    const grid = gridRef.current;
-    if (!stage || !hub || !lead || !grid) return;
-    const update = () => {
-      const bounds = stage.getBoundingClientRect();
-      const box = (node: Element) => {
-        const rect = node.getBoundingClientRect();
-        return {
-          left: rect.left - bounds.left,
-          right: rect.right - bounds.left,
-          top: rect.top - bounds.top,
-          bottom: rect.bottom - bounds.top,
-          x: rect.left - bounds.left + rect.width / 2,
-          y: rect.top - bounds.top + rect.height / 2,
-        };
-      };
-      const hubBox = box(hub);
-      const leadBox = box(lead);
-      const nodes = [...grid.children].map(box);
-      const firstRow = nodes.filter((node) => Math.abs(node.top - nodes[0].top) < 12);
-      const busY = (Math.max(hubBox.bottom, leadBox.bottom) + firstRow[0].top) / 2;
-      const stacked = leadBox.top >= hubBox.bottom;
-      const paths = [
-        stacked
-          ? `M ${leadBox.x} ${leadBox.top - 3} V ${hubBox.bottom + 18}`
-          : `M ${leadBox.left - 3} ${hubBox.y} H ${hubBox.right + 18}`,
-        `M ${leadBox.x} ${busY} V ${leadBox.bottom + 18}`,
-      ];
-      nodes.forEach((node, index) => {
-        const parent = nodes
-          .slice(0, index)
-          .reverse()
-          .find((entry) => Math.abs(entry.x - node.x) < 1);
-        const outerBranch =
-          !parent &&
-          firstRow.length > 1 &&
-          (node === firstRow[0] || node === firstRow[firstRow.length - 1]);
-        paths.push(
-          `M ${node.x} ${node.top - 3} ${outerBranch ? routeBranchToBus(node.x, node.top - 3, busY, leadBox.x) : `V ${parent ? parent.bottom + 3 : busY}`}`
-        );
-      });
-      setDiagram({
-        width: bounds.width,
-        height: bounds.height,
-        paths: paths.join(' '),
-        arrows: `${
-          stacked
-            ? `M ${hubBox.x} ${hubBox.bottom + 4} L ${hubBox.x - 6} ${hubBox.bottom + 16} H ${hubBox.x + 6} Z`
-            : `M ${hubBox.right + 4} ${hubBox.y} L ${hubBox.right + 16} ${hubBox.y - 6} V ${hubBox.y + 6} Z`
-        } M ${leadBox.x} ${leadBox.bottom + 4} L ${leadBox.x - 6} ${leadBox.bottom + 16} H ${leadBox.x + 6} Z`,
-      });
-    };
-    const frame = requestAnimationFrame(update);
-    const observer = new ResizeObserver(update);
-    [stage, hub, lead, grid].forEach((element) => observer.observe(element));
-    return () => {
-      cancelAnimationFrame(frame);
-      observer.disconnect();
-    };
-  }, []);
-
-  return (
-    <div className="free-model-router super-router cursor-default">
-      <div ref={stageRef} className="is-disabled relative">
-        <svg
-          className="pointer-events-none absolute inset-0 h-full w-full"
-          viewBox={`0 0 ${diagram.width} ${diagram.height}`}
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          <path d={diagram.paths} className="free-model-route-path" />
-          <path d={diagram.arrows} className="free-model-route-arrow" />
-        </svg>
-        <div className="super-router-header">
-          <RouterHub
-            hubRef={hubRef}
-            title={t('freeModels.super.title')}
-            enabled={false}
-            baseUrl="127.0.0.1:62186/v1"
-          />
-          <div ref={leadRef} className="relative z-10 min-w-0">
-            <RouteModelCard model={SUPER_ROUTER_MODELS[0]} priority={0} />
-          </div>
-        </div>
-        <div ref={gridRef} className="super-router-grid relative z-10">
-          {SUPER_ROUTER_MODELS.slice(1).map((model, index) => (
-            <RouteModelCard key={model.id} model={model} priority={index + 1} />
-          ))}
-        </div>
-      </div>
-      <p className="mx-auto mt-14 max-w-[680px] cursor-default text-sm leading-6 text-cyber-text-secondary">
-        {t('freeModels.super.description')}{' '}
-        <span className="font-medium text-red-500">{t('freeModels.super.unavailable')}</span>
-      </p>
-    </div>
-  );
-}
-
-export function FreeModelsMain() {
-  const { viewMode } = useFreeModels();
-  return viewMode === 'super' ? <SuperRouterMain /> : <SmartRouterMain />;
-}
-
 type RouteCatalogInput = modelApi.UpstreamModelCatalogInput | { accountSource: AccountSource };
 type RouteModelCatalog = modelApi.UpstreamModelCatalog & {
   account?: ProxyAccount;
@@ -1187,11 +1254,15 @@ function routeCatalogBinding(model: RouteModelNode) {
   return { input, key: JSON.stringify(input) };
 }
 
-function SmartRouterMain() {
+export function FreeModelsMain() {
   const { t } = useI18n();
   const { showToast } = useToast();
-  const { updateUserModel } = useModelNexus();
+  const confirm = useConfirm();
+  const { updateUserModel, handleCardEdit } = useModelNexus();
   const {
+    layout,
+    activeDragId,
+    setActiveDragId,
     models: freeModels,
     customModels,
     proxyAccounts,
@@ -1202,7 +1273,30 @@ function SmartRouterMain() {
     reorderSelectedModel,
     changeSelectedModel,
     savingModelIds,
+    pausedIds,
+    candidateTogglePending,
+    setCandidateEnabled,
   } = useFreeModels();
+  const [removingIds, setRemovingIds] = useState<Set<string>>(() => new Set());
+  const removalRequests = useRef(new Set<string>());
+  const removeFromList = async (id: string) => {
+    if (removalRequests.current.has(id)) return;
+    removalRequests.current.add(id);
+    setRemovingIds(new Set(removalRequests.current));
+    try {
+      const accepted = await confirm({
+        title: t('freeModels.router.removeTitle'),
+        message: t('freeModels.router.removeConfirm'),
+        confirmText: t('btn.remove'),
+        cancelText: t('btn.cancel'),
+        type: 'danger',
+      });
+      if (accepted) await removeSelectedModel(id);
+    } finally {
+      removalRequests.current.delete(id);
+      setRemovingIds(new Set(removalRequests.current));
+    }
+  };
   const [routeCatalogs, setRouteCatalogs] = useState<Map<string, RouteModelCatalog>>(
     () => new Map()
   );
@@ -1464,15 +1558,17 @@ function SmartRouterMain() {
       return model ? [model] : [];
     });
   }, [customModels, selectedIds]);
-  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  useEffect(() => () => setActiveDragId(null), [setActiveDragId]);
   const activeDragModel = selectedModels.find((model) => model.id === activeDragId);
   const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(PointerSensor, {
+      activationConstraint: { distance: 5 },
+    }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
   const handleDragEnd = ({ active, over }: DragEndEvent) => {
     setActiveDragId(null);
-    if (over?.id === ROUTER_REMOVE_DROP_ID) {
+    if (layout === 'cards' && over?.id === ROUTER_REMOVE_DROP_ID) {
       if (activeDragId === String(active.id)) void removeSelectedModel(String(active.id));
       return;
     }
@@ -1566,6 +1662,14 @@ function SmartRouterMain() {
     }
 
     const nextPaths: RoutePath[] = [];
+    entries.forEach((entry) => {
+      if (pausedIds.has(entry.id)) {
+        nextPaths.push({
+          id: `paused-through:${entry.id}`,
+          d: `M ${entry.x} ${entry.top - 3} V ${entry.bottom + 3}`,
+        });
+      }
+    });
     const nextActivityPaths: RoutePath[] = [];
     const parentById = new Map<string, (typeof entries)[number]>();
     const firstRow = rows[0];
@@ -1659,9 +1763,10 @@ function SmartRouterMain() {
     setRoutePaths(nextPaths);
     setActivityPaths(nextActivityPaths);
     setRouteArrow(nextArrow);
-  }, []);
+  }, [pausedIds]);
 
   useLayoutEffect(() => {
+    if (layout === 'list') return;
     const frame = requestAnimationFrame(updatePaths);
     const stage = stageRef.current;
     if (!stage) return () => cancelAnimationFrame(frame);
@@ -1672,15 +1777,20 @@ function SmartRouterMain() {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [selectedModels, nodeColumns, updatePaths]);
+  }, [selectedModels, nodeColumns, updatePaths, layout]);
 
   const activityIsVisible =
     routerActivity.candidateId !== null &&
     (routerActivity.active ||
       activityObservedAtMs - routerActivity.updatedAtMs < ROUTER_ACTIVITY_GRACE_MS);
-  const activeRoutePath = activityIsVisible
-    ? activityPaths.find((path) => path.id === routerActivity.candidateId)
-    : undefined;
+  const activeRoutePath =
+    activityIsVisible && !pausedIds.has(routerActivity.candidateId ?? '')
+      ? activityPaths.find((path) => path.id === routerActivity.candidateId)
+      : undefined;
+  const workingIds = routerActivity.active
+    ? (routerActivity.activeCandidateIds ??
+      (routerActivity.candidateId ? [routerActivity.candidateId] : []))
+    : [];
   const routeRowCount = Math.ceil(selectedModels.length / nodeColumns);
   const stageMinHeight = Math.max(
     550,
@@ -1693,46 +1803,51 @@ function SmartRouterMain() {
   );
 
   return (
-    <div className="free-model-router h-full min-h-[620px] pb-1">
+    <div
+      className={`free-model-router smart-router flex ${layout === 'list' ? 'min-h-full' : 'h-full'} min-h-[620px] flex-col pb-1`}
+    >
       <div
         ref={stageRef}
-        className={`relative overflow-hidden ${routerEnabled ? '' : 'is-disabled'}`}
-        style={{ minHeight: `max(100%, ${stageMinHeight}px)` }}
+        className={`relative ${layout === 'list' ? 'grow shrink-0' : 'overflow-hidden flex-1 shrink-0'} ${routerEnabled ? '' : 'is-disabled'}`}
+        style={{ minHeight: layout === 'cards' ? stageMinHeight : 550 }}
       >
-        <svg
-          className="absolute inset-0 z-0 h-full w-full pointer-events-none"
-          viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
-          preserveAspectRatio="none"
-          aria-hidden="true"
-        >
-          {routePaths.map((path) => (
-            <path key={path.id} d={path.d} className="free-model-route-path" />
-          ))}
-          {routerEnabled && activeRoutePath && (
-            <path
-              key={activeRoutePath.id}
-              d={activeRoutePath.d}
-              pathLength="1"
-              ref={(path) => {
-                if (path)
-                  path.style.setProperty(
-                    '--free-model-route-glow-span',
-                    String(Math.min(1, Math.max(0.07, 20 / path.getTotalLength())))
-                  );
-              }}
-              className="free-model-route-glow"
-            />
-          )}
-          {routeArrow && (
-            <path
-              d={`M ${routeArrow.x} ${routeArrow.y} L ${routeArrow.x - 6} ${routeArrow.y + HUB_ARROW_HEIGHT} H ${routeArrow.x + 6} Z`}
-              className="free-model-route-arrow"
-            />
-          )}
-        </svg>
+        {layout === 'cards' && (
+          <svg
+            className="absolute inset-0 z-0 h-full w-full pointer-events-none"
+            viewBox={`0 0 ${canvasSize.width} ${canvasSize.height}`}
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            {routePaths.map((path) => (
+              <path key={path.id} d={path.d} className="free-model-route-path" />
+            ))}
+            {routerEnabled && activeRoutePath && (
+              <path
+                key={activeRoutePath.id}
+                d={activeRoutePath.d}
+                pathLength="1"
+                ref={(path) => {
+                  if (path)
+                    path.style.setProperty(
+                      '--free-model-route-glow-span',
+                      String(Math.min(1, Math.max(0.07, 20 / path.getTotalLength())))
+                    );
+                }}
+                className="free-model-route-glow"
+              />
+            )}
+            {routeArrow && (
+              <path
+                d={`M ${routeArrow.x} ${routeArrow.y} L ${routeArrow.x - 6} ${routeArrow.y + HUB_ARROW_HEIGHT} H ${routeArrow.x + 6} Z`}
+                className="free-model-route-arrow"
+              />
+            )}
+          </svg>
+        )}
 
         <RouterHub
           hubRef={hubRef}
+          list={layout === 'list'}
           title={t('freeModels.router.title')}
           enabled={routerEnabled}
           baseUrl={routerBaseUrl}
@@ -1761,6 +1876,7 @@ function SmartRouterMain() {
           <>
             <DndContext
               sensors={sensors}
+              modifiers={layout === 'list' ? [restrictRouteToVerticalAxis] : undefined}
               collisionDetection={routeCollisionDetection}
               onDragStart={({ active }) => setActiveDragId(String(active.id))}
               onDragEnd={handleDragEnd}
@@ -1768,17 +1884,21 @@ function SmartRouterMain() {
             >
               <SortableContext
                 items={selectedModels.map((model) => model.id)}
-                strategy={rectSortingStrategy}
+                strategy={layout === 'list' ? verticalListSortingStrategy : rectSortingStrategy}
               >
                 <div
-                  className="free-model-node-grid relative z-10"
-                  style={{
-                    gridTemplateColumns: `repeat(${Math.min(selectedModels.length, nodeColumns)}, minmax(0, calc((100% - ${(nodeColumns - 1) * NODE_COLUMN_GAP}px) / ${nodeColumns})))`,
-                    columnGap: NODE_COLUMN_GAP,
-                    rowGap: NODE_ROW_GAP,
-                    paddingInline: NODE_SIDE_PADDING,
-                    marginTop: HUB_TO_NODE_GAP,
-                  }}
+                  className={`${layout === 'list' ? 'free-model-route-list' : 'free-model-node-grid'} relative z-10`}
+                  style={
+                    layout === 'cards'
+                      ? {
+                          gridTemplateColumns: `repeat(${Math.min(selectedModels.length, nodeColumns)}, minmax(0, calc((100% - ${(nodeColumns - 1) * NODE_COLUMN_GAP}px) / ${nodeColumns})))`,
+                          columnGap: NODE_COLUMN_GAP,
+                          rowGap: NODE_ROW_GAP,
+                          paddingInline: NODE_SIDE_PADDING,
+                          marginTop: HUB_TO_NODE_GAP,
+                        }
+                      : { paddingInline: NODE_SIDE_PADDING, marginTop: 40 }
+                  }
                 >
                   {selectedModels.map((model, index) => (
                     <SortableRouteModel
@@ -1788,7 +1908,42 @@ function SmartRouterMain() {
                       keyless={keylessFor(model)}
                       providerIconSrc={providerIconFor(model)}
                       priority={index + 1}
-                      active={routerEnabled && activeRoutePath?.id === model.id}
+                      list={layout === 'list'}
+                      paused={pausedIds.has(model.id)}
+                      pending={candidateTogglePending.has(model.id) || removingIds.has(model.id)}
+                      active={
+                        routerEnabled &&
+                        !pausedIds.has(model.id) &&
+                        (layout === 'list'
+                          ? workingIds.includes(model.id)
+                          : activeRoutePath?.id === model.id)
+                      }
+                      statusLabel={t(
+                        pausedIds.has(model.id)
+                          ? 'freeModels.router.paused'
+                          : !routerEnabled
+                            ? 'freeModels.router.disabled'
+                            : workingIds.includes(model.id)
+                              ? 'freeModels.router.working'
+                              : 'freeModels.router.idle'
+                      )}
+                      onEnabledChange={(enabled) => void setCandidateEnabled(model.id, enabled)}
+                      onRemove={() => void removeFromList(model.id)}
+                      onEdit={
+                        model.id === 'local-server'
+                          ? undefined
+                          : () =>
+                              void handleCardEdit({
+                                internalId: model.internalId,
+                                name: model.provider,
+                                baseUrl: model.baseUrl,
+                                anthropicUrl: model.anthropicUrl,
+                                apiKey: model.apiKey ?? '',
+                                modelId: model.modelId,
+                                accountSource: model.accountSource,
+                                scope: model.scope,
+                              })
+                      }
                       modelIdOptions={modelIdOptionsFor(model)}
                       {...modelMetadataFor(model)}
                       saving={savingModelIds.has(model.id)}
@@ -1798,15 +1953,16 @@ function SmartRouterMain() {
                   ))}
                 </div>
               </SortableContext>
-              {createPortal(
-                <RouterRemoveDropZone visible={activeDragId !== null} stageRef={stageRef} />,
-                document.body
-              )}
+              {layout === 'cards' &&
+                createPortal(
+                  <RouterRemoveDropZone visible={activeDragId !== null} stageRef={stageRef} />,
+                  document.body
+                )}
               {createPortal(
                 <DragOverlay
                   dropAnimation={null}
                   zIndex={1002}
-                  className="pointer-events-none font-sans text-cyber-text"
+                  className={`pointer-events-none font-sans text-cyber-text ${layout === 'list' ? 'smart-router' : ''}`}
                 >
                   {activeDragModel && (
                     <RouteModelCard
@@ -1815,6 +1971,8 @@ function SmartRouterMain() {
                       keyless={keylessFor(activeDragModel)}
                       providerIconSrc={providerIconFor(activeDragModel)}
                       compact
+                      list={layout === 'list'}
+                      paused={pausedIds.has(activeDragModel.id)}
                       priority={selectedModels.indexOf(activeDragModel) + 1}
                       overlay
                     />
@@ -1824,15 +1982,25 @@ function SmartRouterMain() {
               )}
             </DndContext>
             <p className="mx-auto mt-14 flex max-w-[680px] flex-wrap items-center justify-center gap-x-2 gap-y-1 cursor-default text-center text-sm leading-6 text-cyber-text-secondary">
-              <span>{t('freeModels.router.reorderHint')}</span>
-              <span aria-hidden="true" className="text-cyber-text-muted">
-                |
+              <span>
+                {t(
+                  layout === 'list'
+                    ? 'freeModels.router.listReorderHint'
+                    : 'freeModels.router.reorderHint'
+                )}
               </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span>{t('freeModels.router.removeHintPrefix')}</span>
-                <Trash2 size={14} role="img" aria-label={t('btn.delete')} />
-                <span>{t('freeModels.router.removeHintSuffix')}</span>
-              </span>
+              {layout === 'cards' && (
+                <>
+                  <span aria-hidden="true" className="text-cyber-text-muted">
+                    |
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span>{t('freeModels.router.removeHintPrefix')}</span>
+                    <Trash2 size={14} role="img" aria-label={t('btn.delete')} />
+                    <span>{t('freeModels.router.removeHintSuffix')}</span>
+                  </span>
+                </>
+              )}
             </p>
           </>
         )}

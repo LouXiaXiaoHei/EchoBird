@@ -148,14 +148,20 @@ const ja: Partial<Translations> = {
   'freeModels.disclaimer':
     '無料枠や利用条件は変更される場合があります。利用前にプロバイダーの最新条件をご確認ください。',
   'freeModels.router.title': '切替不要ルーター',
-  'freeModels.view.smart': 'スマート',
-  'freeModels.view.super': '編成',
+  'freeModels.layout.label': '表示形式',
+  'freeModels.layout.cards': 'カード表示',
+  'freeModels.layout.list': 'リスト表示',
+  'freeModels.router.idle': '待機中',
+  'freeModels.router.working': '処理中',
+  'freeModels.router.paused': '一時停止',
+  'freeModels.router.candidateEnabled': 'ルーティングに使用',
+  'freeModels.router.removeTitle': '接続から外す',
+  'freeModels.router.removeConfirm':
+    'この項目を接続から外します。元のモデルとアカウントは保持されます。',
+  'freeModels.router.listReorderHint':
+    '長押ししてドラッグで優先順位を変更。行をクリックして有効化・一時停止。',
   'freeModels.hideAccountNames': 'アカウント名を非表示',
   'freeModels.showAccountNames': 'アカウント名を表示',
-  'freeModels.super.title': 'モデル編成ルーター',
-  'freeModels.super.description':
-    '主モデルが AI アプリに接続し、ルーティング時に他のモデルへタスクを割り当てます。例えば Claude Code や Codex でタスクを送信すると、各モデルが独立してタスクに取り組みます。すべてのモデルの処理が完了すると、主モデルが結果を集約し、相互に検証して各モデルの長所を組み合わせ、最終的な計画をまとめて実行します。複雑なタスクでは、こうした協働によって単一の最先端モデルの能力を超える可能性がありますが、複数モデルの並列実行は Token の消費量と利用コストも何倍にも押し上げます。',
-  'freeModels.super.unavailable': '（開発・検証中のため、現在は利用できません）',
   'freeModels.router.disabled': '無効',
   'freeModels.router.enabled': '有効',
   'freeModels.router.waiting': 'モデルの追加待ち',

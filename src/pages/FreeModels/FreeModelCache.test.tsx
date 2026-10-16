@@ -109,7 +109,7 @@ describe('Free model directory cache', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.stubGlobal('window', { setTimeout });
-    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null) });
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null), setItem: vi.fn() });
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
     useNavigationStore.setState({ activePage: 'freeModels' });
     vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue(cached);
@@ -143,8 +143,8 @@ describe('Free model directory cache', () => {
     await selectTab('free');
     await act(async () => useNavigationStore.getState().setActivePage('models'));
     await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
-    await act(async () => context.setViewMode('super'));
-    await act(async () => context.setViewMode('smart'));
+    await act(async () => context.setLayout('list'));
+    await act(async () => context.setLayout('cards'));
     expect(context.models).toEqual(cached.models);
     expect(api.getCachedFreeModelDirectory).toHaveBeenCalledOnce();
     act(() => renderer.unmount());

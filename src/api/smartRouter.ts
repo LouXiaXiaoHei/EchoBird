@@ -6,6 +6,7 @@ export const SMART_ROUTER_CANDIDATE_LIMIT = 20;
 export interface SmartRouterConfig {
   enabled: boolean;
   candidateIds: string[];
+  disabledCandidateIds?: string[];
   usableCandidateCount: number;
   baseUrl: string;
   modelId: string;
@@ -16,6 +17,7 @@ export interface SmartRouterConfig {
 export interface SmartRouterActivity {
   candidateId: string | null;
   active: boolean;
+  activeCandidateIds?: string[];
   sequence: number;
   updatedAtMs: number;
 }
@@ -26,6 +28,13 @@ export async function getSmartRouterConfig(): Promise<SmartRouterConfig> {
 
 export async function setSmartRouterEnabled(enabled: boolean): Promise<SmartRouterConfig> {
   return invoke('set_smart_router_enabled', { enabled });
+}
+
+export async function setSmartRouterCandidateEnabled(
+  internalId: string,
+  enabled: boolean
+): Promise<SmartRouterConfig> {
+  return invoke('set_smart_router_candidate_enabled', { internalId, enabled });
 }
 
 export async function getSmartRouterActivity(): Promise<SmartRouterActivity> {

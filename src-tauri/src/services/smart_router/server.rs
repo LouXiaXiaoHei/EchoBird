@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -18,8 +18,8 @@ use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
-    api_key_for_use, candidate_ids, request_config_for_use, PublicActivity,
-    SMART_ROUTER_INTERNAL_ID, SMART_ROUTER_MODEL_ID,
+    api_key_for_use, request_config_for_use, PublicActivity, SMART_ROUTER_INTERNAL_ID,
+    SMART_ROUTER_MODEL_ID,
 };
 use crate::models::model::AccountProvider;
 use crate::services::{free_model_directory, model_manager};
@@ -83,6 +83,13 @@ impl RouteActivity {
         PublicActivity {
             candidate_id: self.last_candidate_id.clone(),
             active: !self.active_attempts.is_empty(),
+            active_candidate_ids: self
+                .active_attempts
+                .values()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             sequence: self.sequence,
             updated_at_ms: self.updated_at_ms,
         }
@@ -126,6 +133,7 @@ pub(crate) fn public_activity() -> PublicActivity {
         .unwrap_or(PublicActivity {
             candidate_id: None,
             active: false,
+            active_candidate_ids: Vec::new(),
             sequence: 0,
             updated_at_ms: 0,
         })
@@ -437,14 +445,18 @@ pub(super) fn start(
     Ok(super::runtime::ServerControl::start(listener, app))
 }
 
-async fn handle_health() -> Json<Value> {
-    let ids = candidate_ids();
+async fn handle_health() -> Response {
+    let config = match super::get_public_config() {
+        Ok(config) => config,
+        Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
     Json(json!({
         "status": "ok",
         "model": SMART_ROUTER_MODEL_ID,
-        "candidates": ids.len(),
-        "usableCandidates": super::usable_candidate_count(&ids),
+        "candidates": config.candidate_ids.len(),
+        "usableCandidates": config.usable_candidate_count,
     }))
+    .into_response()
 }
 
 async fn handle_models(headers: HeaderMap) -> Response {
@@ -3695,16 +3707,19 @@ mod tests {
         let snapshot = activity.snapshot();
         assert_eq!(snapshot.candidate_id.as_deref(), Some("second"));
         assert!(snapshot.active);
+        assert_eq!(snapshot.active_candidate_ids, ["first", "second"]);
 
         activity.end(second, 30);
         let snapshot = activity.snapshot();
         assert_eq!(snapshot.candidate_id.as_deref(), Some("first"));
         assert!(snapshot.active);
+        assert_eq!(snapshot.active_candidate_ids, ["first"]);
 
         activity.end(first, 40);
         let snapshot = activity.snapshot();
         assert_eq!(snapshot.candidate_id.as_deref(), Some("first"));
         assert!(!snapshot.active);
+        assert!(snapshot.active_candidate_ids.is_empty());
         assert_eq!(snapshot.sequence, 4);
         assert_eq!(snapshot.updated_at_ms, 40);
     }

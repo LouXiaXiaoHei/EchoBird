@@ -56,6 +56,8 @@ struct StoredConfig {
     #[serde(default)]
     candidate_ids: Vec<String>,
     #[serde(default)]
+    disabled_candidate_ids: Vec<String>,
+    #[serde(default)]
     api_key: String,
     #[serde(default)]
     defaults_initialization_pending: bool,
@@ -67,9 +69,31 @@ impl Default for StoredConfig {
             enabled: true,
             version: default_version(),
             candidate_ids: Vec::new(),
+            disabled_candidate_ids: Vec::new(),
             api_key: String::new(),
             defaults_initialization_pending: false,
         }
+    }
+}
+
+impl StoredConfig {
+    fn active_candidate_ids(&self) -> Vec<String> {
+        self.candidate_ids
+            .iter()
+            .filter(|id| !self.disabled_candidate_ids.contains(id))
+            .cloned()
+            .collect()
+    }
+
+    fn set_candidate_enabled(&mut self, internal_id: &str, enabled: bool) -> Result<(), String> {
+        if !self.candidate_ids.iter().any(|id| id == internal_id) {
+            return Err(format!("Smart Router candidate not found: {internal_id}"));
+        }
+        self.disabled_candidate_ids.retain(|id| id != internal_id);
+        if !enabled {
+            self.disabled_candidate_ids.push(internal_id.to_string());
+        }
+        Ok(())
     }
 }
 
@@ -78,6 +102,7 @@ impl Default for StoredConfig {
 pub struct PublicConfig {
     pub enabled: bool,
     pub candidate_ids: Vec<String>,
+    pub disabled_candidate_ids: Vec<String>,
     pub usable_candidate_count: usize,
     pub base_url: String,
     pub model_id: String,
@@ -90,6 +115,7 @@ pub struct PublicConfig {
 pub struct PublicActivity {
     pub candidate_id: Option<String>,
     pub active: bool,
+    pub active_candidate_ids: Vec<String>,
     pub sequence: u64,
     pub updated_at_ms: u64,
 }
@@ -191,10 +217,11 @@ fn load_config() -> Result<StoredConfig, String> {
 
 fn public_config(config: StoredConfig) -> PublicConfig {
     let port = port();
-    let usable_candidate_count = usable_candidate_count(&config.candidate_ids);
+    let usable_candidate_count = usable_candidate_count(&config.active_candidate_ids());
     PublicConfig {
         enabled: config.enabled,
         candidate_ids: config.candidate_ids,
+        disabled_candidate_ids: config.disabled_candidate_ids,
         usable_candidate_count,
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model_id: SMART_ROUTER_MODEL_ID.to_string(),
@@ -223,8 +250,21 @@ pub fn set_candidate_ids(candidate_ids: Vec<String>) -> Result<PublicConfig, Str
         &user_models,
         &crate::services::local_llm::get_server_info_sync(),
     )?;
+    config
+        .disabled_candidate_ids
+        .retain(|id| config.candidate_ids.contains(id));
     save_config_unlocked(&config)?;
     server::retain_candidate_memory(&config.candidate_ids);
+    Ok(public_config(config))
+}
+
+pub fn set_candidate_enabled(internal_id: &str, enabled: bool) -> Result<PublicConfig, String> {
+    let _guard = config_lock()
+        .lock()
+        .map_err(|_| "smart router config lock poisoned".to_string())?;
+    let mut config = load_config_unlocked()?;
+    config.set_candidate_enabled(internal_id, enabled)?;
+    save_config_unlocked(&config)?;
     Ok(public_config(config))
 }
 
@@ -406,7 +446,7 @@ fn request_config_from_loader(
     } else {
         Ok(RequestConfig {
             api_key,
-            candidate_ids: config.candidate_ids,
+            candidate_ids: config.active_candidate_ids(),
         })
     }
 }
@@ -501,6 +541,72 @@ pub async fn set_enabled(enabled: bool) -> Result<PublicConfig, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn candidate_pause_round_trip_preserves_priority_and_legacy_defaults() {
+        let mut config: StoredConfig =
+            serde_json::from_str(r#"{"candidateIds":["first","second"],"apiKey":"fixture-key"}"#)
+                .unwrap();
+        assert!(config.disabled_candidate_ids.is_empty());
+        assert_eq!(config.active_candidate_ids(), ["first", "second"]);
+        config.set_candidate_enabled("first", false).unwrap();
+        config.set_candidate_enabled("first", false).unwrap();
+        assert_eq!(config.disabled_candidate_ids, ["first"]);
+        assert_eq!(config.candidate_ids, ["first", "second"]);
+        config.candidate_ids.reverse();
+        let mut restored: StoredConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.active_candidate_ids(), ["second"]);
+        restored.set_candidate_enabled("first", true).unwrap();
+        assert_eq!(restored.active_candidate_ids(), ["second", "first"]);
+        assert_eq!(restored.api_key, "fixture-key");
+        assert!(restored.set_candidate_enabled("missing", false).is_err());
+        assert!(restored.disabled_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn paused_candidates_are_retained_but_only_new_requests_skip_them() {
+        let path = std::env::temp_dir().join(format!(
+            "echobird-router-pause-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let load = || {
+            serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        };
+        let original = serde_json::json!({
+            "apiKey": "fixture-key",
+            "candidateIds": ["first", "second"]
+        });
+        fs::write(&path, original.to_string()).unwrap();
+        let accepted = request_config_from_loader(load).unwrap();
+        assert_eq!(accepted.candidate_ids, ["first", "second"]);
+
+        let mut paused_json = original.clone();
+        paused_json["disabledCandidateIds"] = serde_json::json!(["first"]);
+        let paused: StoredConfig = serde_json::from_value(paused_json).unwrap();
+        save_config_at(&path, &paused).unwrap();
+        assert_eq!(paused.candidate_ids, ["first", "second"]);
+        assert_eq!(
+            request_config_from_loader(load).unwrap().candidate_ids,
+            ["second"]
+        );
+        assert_eq!(accepted.candidate_ids, ["first", "second"]);
+
+        let all_paused: StoredConfig = serde_json::from_value(serde_json::json!({
+            "apiKey": "fixture-key",
+            "candidateIds": ["first", "second"],
+            "disabledCandidateIds": ["first", "second"]
+        }))
+        .unwrap();
+        save_config_at(&path, &all_paused).unwrap();
+        assert!(request_config_from_loader(load)
+            .unwrap()
+            .candidate_ids
+            .is_empty());
+        assert_eq!(all_paused.candidate_ids, ["first", "second"]);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn request_snapshot_follows_config_updates_without_changing_inflight_ids() {

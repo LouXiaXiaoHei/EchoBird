@@ -288,9 +288,9 @@ describe('Remove router candidates by dragging', () => {
     const measuredPositions: unknown[] = [];
     measure.mockImplementation(() => measuredPositions.push({ ...target().props.style }));
     await start();
-    expect(target().props.style).toEqual({ left: 120, width: 760, bottom: 162 });
+    expect(target().props.style).toEqual({ left: 100, width: 800, bottom: 162 });
     expect(measure).toHaveBeenCalledWith([REMOVE_TARGET]);
-    expect(measuredPositions).toEqual([{ left: 120, width: 760, bottom: 162 }]);
+    expect(measuredPositions).toEqual([{ left: 100, width: 800, bottom: 162 }]);
     expectNoRemoval();
   });
 
@@ -330,8 +330,9 @@ describe('Remove router candidates by dragging', () => {
     );
     expect(stageHost.props.className.split(/\s+/)).not.toContain('h-full');
     expect(stageHost.props.style.height).toBeUndefined();
-    expect(stageHost.props.style.minHeight).toMatch(/^max\(100%, \d+px\)$/);
-    const initial = { left: 120, width: 760, bottom: 162 };
+    expect(stageHost.props.className.split(/\s+/)).toContain('flex-1');
+    expect(stageHost.props.style.minHeight).toBeGreaterThanOrEqual(550);
+    const initial = { left: 100, width: 800, bottom: 162 };
     expect(target().props.style).toEqual(initial);
     expect(measure).not.toHaveBeenCalled();
     const committedPositions: unknown[] = [];
@@ -344,7 +345,7 @@ describe('Remove router candidates by dragging', () => {
 
     bounds = { left: 80, width: 680, bottom: 1100 };
     await act(async () => listeners.get('scroll')!());
-    const scrolled = { left: 100, width: 640, bottom: 12 };
+    const scrolled = { left: 80, width: 680, bottom: 12 };
     expect(target().props.style).toEqual(scrolled);
     expect(measure).toHaveBeenCalledTimes(2);
     expect(measure).toHaveBeenLastCalledWith([REMOVE_TARGET]);
@@ -352,7 +353,7 @@ describe('Remove router candidates by dragging', () => {
 
     bounds = { left: 150, width: 900, bottom: 750 };
     await act(async () => listeners.get('resize')!());
-    const resized = { left: 170, width: 860, bottom: 162 };
+    const resized = { left: 150, width: 900, bottom: 162 };
     expect(target().props.style).toEqual(resized);
     expect(measure).toHaveBeenCalledTimes(3);
     expect(committedPositions).toEqual([initial, scrolled, resized]);
@@ -442,7 +443,7 @@ describe('Remove router candidates by dragging', () => {
             const index = savedModels.findIndex((candidate) => candidate.internalId === model.id);
             return {
               getBoundingClientRect: () => {
-                const columns = stageWidth >= 568 ? 3 : stageWidth >= 384 ? 2 : 1;
+                const columns = stageWidth >= 528 ? 3 : stageWidth >= 344 ? 2 : 1;
                 const x = stageWidth / 2 + ((index % columns) - (columns - 1) / 2) * 200;
                 return rect(40 + x - 80, 50 + 204 + Math.floor(index / columns) * 116, 160, 80);
               },

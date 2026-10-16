@@ -7,6 +7,14 @@ pub async fn set_smart_router_enabled(enabled: bool) -> Result<PublicConfig, Str
 }
 
 #[tauri::command]
+pub fn set_smart_router_candidate_enabled(
+    internal_id: String,
+    enabled: bool,
+) -> Result<PublicConfig, String> {
+    smart_router::set_candidate_enabled(&internal_id, enabled)
+}
+
+#[tauri::command]
 pub fn get_smart_router_config() -> Result<PublicConfig, String> {
     smart_router::get_public_config()
 }

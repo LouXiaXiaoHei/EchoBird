@@ -1243,6 +1243,7 @@ pub fn run() {
             model_commands::save_zhipu_team_access,
             smart_router_commands::get_smart_router_config,
             smart_router_commands::set_smart_router_enabled,
+            smart_router_commands::set_smart_router_candidate_enabled,
             smart_router_commands::get_smart_router_activity,
             smart_router_commands::get_smart_router_candidates,
             smart_router_commands::remove_smart_router_candidate,
