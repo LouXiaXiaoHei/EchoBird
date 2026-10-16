@@ -349,10 +349,10 @@ export function MotherAgentPanel() {
             {/* Local server — always first */}
             <div
               onClick={() => !isProcessing && selectServer('local')}
-              className={`p-3 rounded transition-colors select-none flex items-center border bg-cyber-surface ${isProcessing && selectedServerId !== 'local' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'} ${
+              className={`p-3 rounded transition-colors select-none flex items-center border bg-cyber-surface/60 ${isProcessing && selectedServerId !== 'local' ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'} ${
                 selectedServerId === 'local'
                   ? 'border-cyber-accent'
-                  : 'border-transparent hover:bg-cyber-elevated'
+                  : 'border-transparent hover:bg-cyber-elevated/70'
               }`}
             >
               <div className="mr-3">
@@ -378,10 +378,10 @@ export function MotherAgentPanel() {
               <div
                 key={server.id}
                 onClick={() => !isProcessing && selectServer(server.id)}
-                className={`p-3 rounded transition-colors select-none flex items-center border bg-cyber-surface ${isProcessing && selectedServerId !== server.id ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'} ${
+                className={`p-3 rounded transition-colors select-none flex items-center border bg-cyber-surface/60 ${isProcessing && selectedServerId !== server.id ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'} ${
                   selectedServerId === server.id
                     ? 'border-cyber-accent'
-                    : 'border-transparent hover:bg-cyber-elevated'
+                    : 'border-transparent hover:bg-cyber-elevated/70'
                 }`}
               >
                 <div className="mr-3">

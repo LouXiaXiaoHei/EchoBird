@@ -114,7 +114,7 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
 
 // Card skeleton (loading state)
 export const ModelCardSkeleton = () => (
-  <div className="h-48 p-4 bg-cyber-surface rounded-card animate-pulse">
+  <div className="h-48 p-4 bg-cyber-surface/60 rounded-card animate-pulse">
     <div className="h-3 w-16 bg-cyber-border rounded mb-2"></div>
     <div className="h-5 w-32 bg-cyber-border rounded mb-4"></div>
     <div className="space-y-2">
@@ -293,7 +293,7 @@ export const ModelCard = React.memo(
     );
 
     return (
-      <div className="h-48 p-4 border border-transparent bg-cyber-surface hover:bg-cyber-elevated relative overflow-hidden rounded-card cursor-default transition-colors flex flex-col">
+      <div className="h-48 p-4 border border-transparent bg-cyber-surface/60 hover:bg-cyber-elevated/70 relative overflow-hidden rounded-card cursor-default transition-colors flex flex-col">
         {/* Action buttons — top right, different for config vs usage mode */}
         {viewMode === 'config' ? (
           // Config mode: [删除] [编辑]

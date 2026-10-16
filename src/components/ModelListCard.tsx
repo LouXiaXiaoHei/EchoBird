@@ -53,7 +53,7 @@ export function ModelListCard({
       aria-disabled={disabled || undefined}
       className={`relative overflow-hidden p-3 rounded-card transition-colors flex items-center gap-3 border border-transparent ${
         disabled ? 'opacity-50' : ''
-      } ${selected ? 'bg-cyber-elevated' : 'bg-cyber-surface hover:bg-cyber-elevated'}`}
+      } ${selected ? 'bg-cyber-elevated/75' : 'bg-cyber-surface/60 hover:bg-cyber-elevated/70'}`}
     >
       <button
         type="button"

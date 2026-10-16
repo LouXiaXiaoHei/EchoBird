@@ -34,6 +34,15 @@ const applyColorTheme = (id: ColorThemeId, resolved: Resolved) => {
   root.style.setProperty('--bg-elevated-rgb', hexToRgbChannels(variant.tertiary));
   root.style.setProperty('--bg-deep-rgb', hexToRgbChannels(variant.shell));
   root.style.setProperty('--bg-input-rgb', hexToRgbChannels(variant.input));
+  const tabColor = hexToRgbChannels(variant.tertiary);
+  const channels = tabColor.split(' ').map(Number);
+  // Match the character background's neutral-palette fallback without changing primary buttons.
+  const neutral = Math.max(...channels) - Math.min(...channels) < 18;
+  root.style.setProperty('--view-mode-accent-rgb', neutral ? 'var(--accent-rgb)' : tabColor);
+  root.style.setProperty(
+    '--view-mode-wave-rgb',
+    neutral && resolved === 'light' ? '255 246 235' : 'var(--view-mode-accent-rgb)'
+  );
   try {
     localStorage.setItem('color-theme', id);
   } catch {

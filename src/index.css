@@ -17,6 +17,8 @@
   --border-rgb: 59 54 47; /* #3B362F — soft warm border */
   --accent-rgb: 217 119 87; /* Claude coral — used sparingly */
   --accent-secondary-rgb: 192 132 100;
+  --view-mode-accent-rgb: var(--accent-rgb);
+  --view-mode-wave-rgb: var(--view-mode-accent-rgb);
   --warning-rgb: 250 204 21;
   --error-rgb: 224 109 109;
   --text-primary-rgb: 232 226 213; /* #E8E2D5 — brighter warm cream, better legibility */
@@ -36,6 +38,7 @@
   --border-rgb: 220 218 211;
   --accent-rgb: 201 100 66; /* Claude coral, slightly deeper for AA contrast */
   --accent-secondary-rgb: 176 88 56;
+  --view-mode-wave-rgb: 255 246 235;
   --warning-rgb: 181 130 14;
   --error-rgb: 198 60 60;
   --text-primary-rgb: 46 41 36; /* #2E2924 — warm dark (NOT pure black) */
@@ -148,8 +151,11 @@
 
 .view-mode-tab[aria-pressed='true'],
 .view-mode-tab[aria-selected='true'] {
-  background-color: color-mix(in srgb, rgb(var(--accent-rgb)) 30%, rgb(var(--bg-base-rgb)));
-  --view-mode-wave-rgb: var(--accent-rgb);
+  background-color: color-mix(
+    in srgb,
+    rgb(var(--view-mode-accent-rgb)) 30%,
+    rgb(var(--bg-base-rgb))
+  );
   --view-mode-wave-stops:
     rgb(var(--view-mode-wave-rgb) / 0.5) 0%, rgb(var(--view-mode-wave-rgb) / 0.46) 20%,
     rgb(var(--view-mode-wave-rgb) / 0.32) 45%, rgb(var(--view-mode-wave-rgb) / 0.12) 70%,
@@ -166,8 +172,11 @@
 
 :root[data-theme='light'] .view-mode-tab[aria-pressed='true'],
 :root[data-theme='light'] .view-mode-tab[aria-selected='true'] {
-  --view-mode-wave-rgb: 255 246 235;
-  background-color: color-mix(in srgb, rgb(var(--bg-elevated-rgb)) 94%, rgb(var(--accent-rgb)));
+  background-color: color-mix(
+    in srgb,
+    rgb(var(--bg-elevated-rgb)) 94%,
+    rgb(var(--view-mode-accent-rgb))
+  );
 }
 
 @keyframes view-mode-gradient-flow {
@@ -604,22 +613,22 @@ html.is-macos .page-scroll::-webkit-scrollbar {
 /* Account pills use a compact inverse black/white treatment. Keep every
    child tied to the pill's current color so icons remain visible on hover. */
 [data-theme='light'] .account-pill {
-  background-color: #ffffff;
+  background-color: rgb(255 255 255 / 0.85);
   color: #000000;
 }
 
 [data-theme='dark'] .account-pill {
-  background-color: #000000;
+  background-color: rgb(0 0 0 / 0.8);
   color: #ffffff;
 }
 
 [data-theme='dark'] .claude-account-pill {
-  background-color: #151515;
+  background-color: rgb(21 21 21 / 0.85);
   color: #f0efec;
 }
 
 [data-theme='light'] .claude-account-pill {
-  background-color: #fcfcfb;
+  background-color: rgb(252 252 251 / 0.85);
   color: #0b0b0b;
 }
 
@@ -653,12 +662,12 @@ html.is-macos .page-scroll::-webkit-scrollbar {
 }
 
 [data-theme='light'] .workbuddy-account-pill {
-  background-color: #b7e8d9;
+  background-color: rgb(183 232 217 / 0.85);
   color: #145c49;
 }
 
 [data-theme='dark'] .workbuddy-account-pill {
-  background-color: #176a55;
+  background-color: rgb(23 106 85 / 0.85);
   color: #ffffff;
 }
 
@@ -667,12 +676,12 @@ html.is-macos .page-scroll::-webkit-scrollbar {
 }
 
 [data-theme='light'] .deepseek-account-pill {
-  background-color: #dce4ff;
+  background-color: rgb(220 228 255 / 0.85);
   color: #29458f;
 }
 
 [data-theme='dark'] .deepseek-account-pill {
-  background-color: #304a9b;
+  background-color: rgb(48 74 155 / 0.85);
   color: #ffffff;
 }
 

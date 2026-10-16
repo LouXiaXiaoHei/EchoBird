@@ -34,7 +34,7 @@ export function DirectoryRow({
     }
   })();
   return (
-    <div className="relative flex items-stretch rounded overflow-hidden bg-cyber-surface">
+    <div className="relative flex items-stretch rounded overflow-hidden bg-cyber-surface/60">
       {add && (
         <button
           type="button"

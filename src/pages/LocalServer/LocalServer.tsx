@@ -976,7 +976,7 @@ export const LocalServerMain: React.FC = () => {
           <div
             ref={logsContainerRef}
             onScroll={handleScroll}
-            className="absolute inset-0 overflow-y-auto py-3 bg-cyber-surface border border-transparent font-mono text-sm space-y-0.5 custom-scrollbar rounded-lg"
+            className="absolute inset-0 overflow-y-auto py-3 bg-cyber-surface/60 border border-transparent font-mono text-sm space-y-0.5 custom-scrollbar rounded-lg"
           >
             {logs.length === 0 && (
               <div
@@ -1633,14 +1633,14 @@ export const LocalServerPanel: React.FC = () => {
                   return (
                     <div
                       key={groupKey}
-                      className={`p-3 rounded transition-colors border bg-cyber-surface ${
+                      className={`p-3 rounded transition-colors border bg-cyber-surface/60 ${
                         isDeleteMode
                           ? isGroupSelected
                             ? 'border-red-500'
-                            : 'border-transparent hover:bg-cyber-elevated'
+                            : 'border-transparent hover:bg-cyber-elevated/70'
                           : selected
                             ? 'border-cyber-accent'
-                            : 'border-transparent hover:bg-cyber-elevated'
+                            : 'border-transparent hover:bg-cyber-elevated/70'
                       }`}
                     >
                       {/* Card Header */}
@@ -1753,7 +1753,7 @@ export const LocalServerPanel: React.FC = () => {
                             return (
                               <div
                                 key={v.filePath}
-                                className={`flex items-center gap-3 p-2 rounded transition-colors ${isSelected ? 'bg-cyber-elevated' : 'hover:bg-cyber-elevated'}`}
+                                className={`flex items-center gap-3 p-2 rounded transition-colors ${isSelected ? 'bg-cyber-elevated/75' : 'hover:bg-cyber-elevated/70'}`}
                                 onClick={() => setSelectedModelPath(v.filePath)}
                               >
                                 <span
@@ -1821,7 +1821,7 @@ export const LocalServerPanel: React.FC = () => {
             {/* Download directory — clickable to change */}
             {downloadDir && (
               <div
-                className="mb-3 text-[10px] text-cyber-text-secondary p-2 bg-cyber-surface border border-cyber-border rounded truncate hover:bg-cyber-elevated transition-colors"
+                className="mb-3 text-[10px] text-cyber-text-secondary p-2 bg-cyber-surface/60 border border-cyber-border rounded truncate hover:bg-cyber-elevated/70 transition-colors"
                 aria-disabled={downloadDirectoryLocked}
                 onClick={handleChangeDownloadDir}
               >
@@ -1850,10 +1850,10 @@ export const LocalServerPanel: React.FC = () => {
                   return (
                     <div
                       key={model.id}
-                      className={`p-3 rounded transition-colors border bg-cyber-surface ${
+                      className={`p-3 rounded transition-colors border bg-cyber-surface/60 ${
                         isExpanded
                           ? 'border-cyber-accent'
-                          : 'border-transparent hover:bg-cyber-elevated'
+                          : 'border-transparent hover:bg-cyber-elevated/70'
                       }`}
                       onClick={() => setExpandedModelId(isExpanded ? null : model.id)}
                     >

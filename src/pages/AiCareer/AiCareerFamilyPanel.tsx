@@ -14,7 +14,7 @@ export function AiCareerFamilyPanel() {
   const setSelectedFamily = useAiCareerStore((s) => s.setSelectedFamily);
   const cardClass = (selected: boolean) =>
     'w-full min-h-16 flex border border-transparent rounded transition-colors ' +
-    (selected ? 'bg-cyber-elevated' : 'bg-cyber-surface hover:bg-cyber-elevated');
+    (selected ? 'bg-cyber-elevated/75' : 'bg-cyber-surface/60 hover:bg-cyber-elevated/70');
   const openWebsite = async (url: string) => {
     try {
       await openExternal(url);

@@ -400,7 +400,7 @@ export function MotherAgentMain() {
 
       {/* Rich input area — Claude-style elevated rounded card */}
       <div className="flex-shrink-0 mt-1 mb-1">
-        <div className="bg-cyber-elevated rounded-2xl p-2.5 border border-cyber-border">
+        <div className="bg-cyber-elevated/75 rounded-2xl p-2.5 border border-cyber-border">
           {/* Pending attachments chips — shared component */}
           <PendingChipsRow
             files={pendingFiles}

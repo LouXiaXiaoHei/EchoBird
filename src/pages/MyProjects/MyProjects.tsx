@@ -165,7 +165,7 @@ export const MyProjectsMain: React.FC = () => {
           ))}
           <button
             onClick={openAdd}
-            className="relative p-5 border border-dashed border-cyber-border rounded-card bg-cyber-surface/40 flex flex-col items-center justify-center min-h-[160px] text-cyber-text-secondary hover:text-cyber-text hover:border-cyber-text/40 hover:bg-cyber-surface transition-colors outline-none"
+            className="relative p-5 border border-dashed border-cyber-border rounded-card bg-cyber-surface/40 flex flex-col items-center justify-center min-h-[160px] text-cyber-text-secondary hover:text-cyber-text hover:border-cyber-text/40 hover:bg-cyber-surface/60 transition-colors outline-none"
           >
             <Plus size={28} className="mb-2" />
             <span className="text-[14px] font-medium">{t('myProjects.empty.title')}</span>

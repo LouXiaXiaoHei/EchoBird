@@ -82,11 +82,13 @@ export function ToolCallCard({ name, args, status, output }: ToolCallCardProps) 
       : output;
 
   return (
-    <div className={`mb-3 border ${borderColor} rounded-md bg-cyber-surface text-[12px] font-mono`}>
+    <div
+      className={`mb-3 border ${borderColor} rounded-md bg-cyber-surface/60 text-[12px] font-mono`}
+    >
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-cyber-elevated transition-colors rounded-md"
+        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left hover:bg-cyber-elevated/70 transition-colors rounded-md"
       >
         <Icon size={12} className="flex-shrink-0 text-cyber-text-muted" />
         <span className="flex-shrink-0 text-cyber-text font-bold">{meta.label}</span>

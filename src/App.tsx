@@ -13,6 +13,7 @@ import { isNewerVersion } from './utils/version';
 import { DownloadProvider } from './components/DownloadContext';
 import { DownloadBar } from './components/DownloadBar';
 import { TitleBar } from './components/TitleBar';
+import { DesktopCharacterBackground } from './components/DesktopCharacterBackground';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ChangelogDialog } from './components/ChangelogDialog';
 import { getSettings } from './api/tauri';
@@ -257,8 +258,9 @@ function AppContent() {
                 <AppManagerProvider>
                   <LocalServerProvider>
                     <div
-                      className={`flex flex-col h-screen w-full bg-cyber-bg overflow-hidden ${isMaximized || IS_MACOS ? '' : 'rounded-xl'}`}
+                      className={`relative isolate flex flex-col h-screen w-full bg-cyber-bg overflow-hidden ${isMaximized || IS_MACOS ? '' : 'rounded-xl'}`}
                     >
+                      <DesktopCharacterBackground />
                       {/* Title bar */}
                       <TitleBar
                         onSettingsClick={() => setShowSettings(true)}

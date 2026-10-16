@@ -228,7 +228,7 @@ export function AiCareerMain() {
           {statCards.map((card) => (
             <div
               key={card.label}
-              className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-cyber-border/40 bg-cyber-surface px-2 py-4"
+              className="flex flex-col items-center justify-center gap-1.5 rounded-xl border border-cyber-border/40 bg-cyber-surface/60 px-2 py-4"
             >
               <span className="text-3xl font-bold text-cyber-text tabular-nums">
                 {dashboard ? card.value : '—'}

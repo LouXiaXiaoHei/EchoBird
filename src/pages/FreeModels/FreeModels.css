@@ -7,7 +7,7 @@
 }
 
 .free-model-router-hub {
-  background: rgb(var(--bg-surface-rgb));
+  background: rgb(var(--bg-surface-rgb) / 0.6);
   border: 1px solid transparent;
 }
 
@@ -41,7 +41,7 @@
   gap: 10px 0.25rem;
   min-height: 40px;
   padding: 5px 10px 5px 8px;
-  background: rgb(var(--bg-surface-rgb));
+  background: rgb(var(--bg-surface-rgb) / 0.6);
   border: 1px solid transparent;
   transition: border-color 180ms ease;
 }
@@ -157,7 +157,7 @@
 }
 
 .free-model-route-node {
-  background: rgb(var(--bg-surface-rgb));
+  background: rgb(var(--bg-surface-rgb) / 0.6);
   border: 1px solid transparent;
   transition:
     background-color 150ms cubic-bezier(0.4, 0, 0.2, 1),
@@ -238,7 +238,7 @@
 }
 
 .free-model-route-node:hover {
-  background: rgb(var(--bg-elevated-rgb));
+  background: rgb(var(--bg-elevated-rgb) / 0.7);
 }
 
 .free-model-route-picker > div > button[aria-expanded] {

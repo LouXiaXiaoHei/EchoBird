@@ -104,10 +104,10 @@ export const ToolCard = React.memo(
 
     return (
       <div
-        className={`p-5 min-h-[160px] border bg-cyber-surface ${
+        className={`p-5 min-h-[160px] border bg-cyber-surface/60 ${
           selected
             ? 'border-cyber-accent'
-            : `border-transparent ${installed ? 'hover:bg-cyber-elevated' : ''}`
+            : `border-transparent ${installed ? 'hover:bg-cyber-elevated/70' : ''}`
         } relative overflow-hidden rounded-card ${installed ? 'cursor-pointer' : 'cursor-default'} transition-colors flex flex-col`}
         onClick={handleCardClick}
       >
@@ -180,7 +180,7 @@ export const ToolCard = React.memo(
                   e.stopPropagation();
                   onMotherAgentInstall?.();
                 }}
-                className="py-1.5 px-5 text-xs font-bold rounded bg-cyber-elevated text-cyber-text hover:bg-cyber-elevated/80 transition-all"
+                className="py-1.5 px-5 text-xs font-bold rounded bg-cyber-elevated/70 text-cyber-text hover:bg-cyber-elevated/80 transition-all"
               >
                 {t('agent.installViaMother')}
               </button>

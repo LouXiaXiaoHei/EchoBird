@@ -82,7 +82,7 @@ export function AccountCard({
   return (
     <article
       aria-label={`${name} ${identity}`}
-      className="flex h-44 flex-col gap-2 rounded-card border border-transparent bg-cyber-surface p-3 transition-colors hover:bg-cyber-elevated"
+      className="flex h-44 flex-col gap-2 rounded-card border border-transparent bg-cyber-surface/60 p-3 transition-colors hover:bg-cyber-elevated/70"
     >
       <div className={`flex items-center ${dragHandle ? 'gap-1.5' : 'gap-2.5'}`}>
         <span className="flex flex-shrink-0 items-center gap-1.5">
@@ -366,7 +366,7 @@ export function AccountCenterMain() {
       className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3"
     >
       {[0, 1, 2].map((index) => (
-        <div key={index} className="h-44 animate-pulse rounded-card bg-cyber-surface" />
+        <div key={index} className="h-44 animate-pulse rounded-card bg-cyber-surface/60" />
       ))}
     </div>
   ) : (
@@ -534,7 +534,7 @@ export function AccountCenterPanel() {
           </span>
           <span className="flex-1 h-px bg-cyber-border/60" />
         </h3>
-        <div className="flex min-h-16 items-center justify-center rounded bg-cyber-surface text-xs text-cyber-text-muted">
+        <div className="flex min-h-16 items-center justify-center rounded bg-cyber-surface/60 text-xs text-cyber-text-muted">
           {t('accountCenter.noSubscriptionProviders')}
         </div>
       </section>

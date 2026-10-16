@@ -16,8 +16,8 @@ export const NavItem = React.memo(
       color === 'warning'
         ? 'bg-cyber-warning/15 text-cyber-warning'
         : color === 'secondary' || color === 'blue'
-          ? 'bg-cyber-elevated text-cyber-text'
-          : 'bg-cyber-elevated text-cyber-text';
+          ? 'bg-cyber-elevated/75 text-cyber-text'
+          : 'bg-cyber-elevated/75 text-cyber-text';
     return (
       <div
         className={`flex items-center gap-3 p-2 cursor-pointer transition-colors rounded-lg font-medium ${

@@ -248,12 +248,12 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
       {/* Dialog */}
       <div
         ref={dialogRef}
-        className={`relative flex h-[560px] max-h-[88vh] w-[720px] max-w-[92vw] overflow-hidden rounded-xl border border-cyber-border/30 bg-cyber-surface shadow-2xl transition-all duration-200 ${
+        className={`relative flex h-[560px] max-h-[88vh] w-[720px] max-w-[92vw] overflow-hidden rounded-xl border border-cyber-border/30 bg-cyber-bg shadow-2xl transition-all duration-200 ${
           isAnimatingOut ? 'scale-95 opacity-0' : 'scale-100 opacity-100'
         }`}
         onClick={(e) => e.stopPropagation()}
       >
-        <aside className="flex w-[168px] flex-shrink-0 flex-col border-r border-cyber-border/50 bg-cyber-bg/35 p-3">
+        <aside className="flex w-[168px] flex-shrink-0 flex-col p-3">
           <div className="px-3 pt-2 pb-4 text-[12px] font-semibold tracking-wide text-cyber-text-muted">
             {t('settings.title')}
           </div>

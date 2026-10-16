@@ -116,7 +116,7 @@ export function AccountProxyPanel({
             if (acknowledged) openAccountModelForm(provider.id, context);
           }}
           aria-label={`${t('freeModels.addToRouter')}: ${provider.name}`}
-          className="w-full min-h-[64px] flex items-center gap-3 px-3 bg-cyber-surface rounded text-left enabled:hover:bg-cyber-elevated disabled:opacity-40 disabled:grayscale transition-colors"
+          className="w-full min-h-[64px] flex items-center gap-3 px-3 bg-cyber-surface/60 rounded text-left enabled:hover:bg-cyber-elevated/70 disabled:opacity-40 disabled:grayscale transition-colors"
         >
           <img
             src={`/icons/tools/${provider.icon}`}

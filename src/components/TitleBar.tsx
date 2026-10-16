@@ -112,7 +112,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
   return (
     <>
       <div
-        className="h-8 bg-cyber-bg flex items-center justify-end select-none flex-shrink-0 cursor-default"
+        className="h-8 flex items-center justify-end select-none flex-shrink-0 cursor-default"
         onMouseDown={(e) => {
           // Use startDragging for Linux (WebkitAppRegion doesn't work on Linux GTK)
           // Also works cross-platform as a reliable fallback

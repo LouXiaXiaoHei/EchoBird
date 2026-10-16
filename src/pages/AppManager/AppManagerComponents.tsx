@@ -203,6 +203,7 @@ const DesktopIcon: React.FC<DesktopIconProps> = ({ tool, selected, onClick, drag
       {...dragProps}
       onClick={onClick}
       aria-label={displayName}
+      data-desktop-tool-id={tool.id}
       className={`flex w-full flex-col items-center gap-1.5 rounded-xl border-2 px-1.5 py-3 outline-none transition-colors select-none focus-visible:ring-2 focus-visible:ring-cyber-accent ${
         selected
           ? 'border-cyber-accent/70 bg-cyber-accent/10'

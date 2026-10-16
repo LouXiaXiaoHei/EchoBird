@@ -61,7 +61,7 @@ export function ConversationList() {
           return (
             <div
               key={conversation.id}
-              className={`relative w-full p-3 pr-9 rounded-card border border-transparent text-left transition-colors ${active ? 'bg-cyber-elevated' : 'bg-cyber-surface hover:bg-cyber-elevated'} ${isProcessing ? 'opacity-40' : ''}`}
+              className={`relative w-full p-3 pr-9 rounded-card border border-transparent text-left transition-colors ${active ? 'bg-cyber-elevated/75' : 'bg-cyber-surface/60 hover:bg-cyber-elevated/70'} ${isProcessing ? 'opacity-40' : ''}`}
             >
               <button
                 type="button"
