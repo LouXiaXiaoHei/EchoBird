@@ -17,7 +17,6 @@ import { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useCodexAccounts } from './useCodexAccounts';
-import { EFFORT_PULSE_ONESHOT_MS } from '../../components';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
 import type { ModelConfig } from '../../api/types';
@@ -30,16 +29,6 @@ import { getOfficialEndpoint, isOfficialModelSentinel } from '../../data/officia
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
 // ===== Provider =====
-
-// Only Xiaomi's MiMo model series gets the apply pulse + sound (per request);
-// every other model applies silently. Same keys ModelCard uses for the Xiaomi
-// icon — a model counts as MiMo when its name/modelId contains xiaomi / 小米 / mimo.
-const MIMO_KEYS = ['xiaomi', '小米', 'mimo'];
-const isMimoModel = (m?: ModelConfig): boolean => {
-  if (!m) return false;
-  const text = `${m.name} ${m.modelId || ''}`.toLowerCase();
-  return MIMO_KEYS.some((k) => text.includes(k));
-};
 
 interface AppManagerProviderProps {
   children: React.ReactNode;
@@ -189,37 +178,6 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     remove: deleteCodexAccount,
     refresh: refreshCodexAccountQuota,
   } = codexManaged;
-
-  // One-shot "applied!" pulse. When a model config takes effect (via
-  // handleLaunch) the just-applied model's card plays the effort pulse once.
-  // `nonce` bumps on every fire so re-applying the same model replays it; the
-  // trigger auto-clears after the pulse's own duration so the card returns to rest.
-  const [appliedPulse, setAppliedPulse] = useState<{ id: string; nonce: number } | null>(null);
-  const pulseNonce = useRef(0);
-  const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const firePulse = useCallback((id: string) => {
-    pulseNonce.current += 1;
-    setAppliedPulse({ id, nonce: pulseNonce.current });
-    if (pulseTimer.current) clearTimeout(pulseTimer.current);
-    pulseTimer.current = setTimeout(() => setAppliedPulse(null), EFFORT_PULSE_ONESHOT_MS);
-  }, []);
-  useEffect(
-    () => () => {
-      if (pulseTimer.current) clearTimeout(pulseTimer.current);
-    },
-    []
-  );
-  // A pulse belongs to the tool it was applied to. `appliedPulse`/`userModels`
-  // are global and the card gate matches only on model id, so switching tools
-  // would otherwise replay the pulse on a different tool's card that happens to
-  // list the same model — clear it whenever the selected tool changes. Adjust
-  // state during render (React's "reset on prop change" pattern) rather than in
-  // an effect, so it applies before paint without a setState-in-effect cascade.
-  const [pulseTool, setPulseTool] = useState<string | null>(selectedTool);
-  if (pulseTool !== selectedTool) {
-    setPulseTool(selectedTool);
-    setAppliedPulse(null);
-  }
 
   // Bottom-bar checkbox states are persisted across sessions — users get tired of
   // re-checking the same boxes every launch. Default both to true so picking an app
@@ -1157,10 +1115,6 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         finishLaunch();
         return;
       }
-      // Only Xiaomi's MiMo models get the apply pulse + sound; every other model
-      // (and restore-to-official) applies silently.
-      const appliedModel = userModels.find((m) => m.internalId === pending);
-      if (readBool('echobird_easter_egg', true) && isMimoModel(appliedModel)) firePulse(pending);
     }
     // Launch tool when "launch directly" is checked, or unconditionally for desktop apps
     if (
@@ -1202,8 +1156,6 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
                 : t
             )
           );
-          if (readBool('echobird_easter_egg', true) && isMimoModel(selectedModel))
-            firePulse(selectedModel.internalId);
         }
       } else {
         // Only "CLI Code" tools prompt for a working folder — their launch goes
@@ -1400,7 +1352,6 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         setClaudeDesktop1mMode,
         claude1mMode,
         setClaude1mMode,
-        appliedPulse,
         handleLaunch,
         onGoToMother: handleGoToMother,
         aiInstallableIds,

@@ -18,7 +18,7 @@ vi.mock('../../hooks/useI18n', () => {
   return { useI18n: () => ({ t, locale: 'en' }) };
 });
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => async () => true }));
-vi.mock('../../components', () => ({ EFFORT_PULSE_ONESHOT_MS: 0 }));
+vi.mock('../../components', () => ({ getModelIcon: () => null }));
 vi.mock('../ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };

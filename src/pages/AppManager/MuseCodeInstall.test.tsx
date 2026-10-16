@@ -8,7 +8,6 @@ import { AppManagerContext, type AppManagerContextType } from './context';
 
 vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('../../components', () => ({
-  EffortPulse: () => null,
   getModelIcon: () => null,
 }));
 vi.mock('../../utils/platform', () => ({ IS_WINDOWS: false, IS_LINUX: true, IS_MACOS: false }));

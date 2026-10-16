@@ -40,7 +40,7 @@ import {
 } from '@dnd-kit/sortable';
 import { useIsomorphicLayoutEffect } from '@dnd-kit/utilities';
 import { Box as BoxIcon, ExternalLink, RefreshCw, Settings } from 'lucide-react';
-import { getModelIcon, EffortPulse } from '../../components';
+import { getModelIcon } from '../../components';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
@@ -577,9 +577,6 @@ interface ModelListSectionProps {
   toolModelConfig: Record<string, string | null>;
   selectedTool: string | null;
   handleSelectModel: (toolId: string, modelId: string) => void;
-  /** When set, the card whose model id matches plays a one-shot apply pulse
-   *  (keyed by nonce so re-applying replays it). Omitted where unused. */
-  appliedPulse?: { id: string; nonce: number } | null;
   modelUsageData?: Record<string, api.ModelUsageData>;
   refreshingUsageIds?: Set<string>;
   isRefreshingUsage?: boolean;
@@ -602,35 +599,6 @@ function isModelCompatibleWithTool(
   return hasOpenAI || hasAnthropic;
 }
 
-// The coral "effort pulse" played once on a model card the instant its config
-// is applied (生效). It OVERLAYS the card (z-20, above the model info) and fills
-// it, so for its ~11s it obscures the icon / name / URL, plays, then dissolves to
-// reveal them again. It paints its own envelope-faded page-colour backdrop,
-// carries its own timing, and unmounts when the trigger clears.
-// pointer-events-none lets clicks fall through to the card.
-// Apply sound, played in sync with the pulse for its whole ~11s. Different
-// models will get different tracks later; for now every apply plays the
-// "xiaomi" test track. The keyed remount (see the callers) restarts it on
-// re-apply; unmounting (pulse cancelled, e.g. tool switch) stops it.
-const APPLY_SOUND = '/sounds/xiaomi.mp3';
-const ModelCardPulse: React.FC = () => {
-  useEffect(() => {
-    const audio = new Audio(APPLY_SOUND);
-    audio.play().catch(() => {
-      /* autoplay blocked or file missing — the visual still plays */
-    });
-    return () => {
-      audio.pause();
-      audio.currentTime = 0;
-    };
-  }, []);
-  return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 z-20 overflow-hidden">
-      <EffortPulse fill oneShot />
-    </div>
-  );
-};
-
 export const ModelListSection: React.FC<ModelListSectionProps> = ({
   smartRouterEnabled = true,
   selectedToolData,
@@ -638,7 +606,6 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
   toolModelConfig,
   selectedTool,
   handleSelectModel,
-  appliedPulse,
   modelUsageData,
   refreshingUsageIds,
   isRefreshingUsage,
@@ -710,11 +677,6 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
             {isSelected && <div className="w-[8px] h-[8px] rounded-full bg-cyber-accent" />}
           </div>
         }
-        overlay={
-          appliedPulse && appliedPulse.id === model.internalId ? (
-            <ModelCardPulse key={appliedPulse.nonce} />
-          ) : undefined
-        }
         badge={
           badge && (
             <span
@@ -782,9 +744,6 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
         }`}
         onClick={() => selectedTool && handleSelectModel(selectedTool, officialSentinel)}
       >
-        {appliedPulse && appliedPulse.id === officialSentinel && (
-          <ModelCardPulse key={appliedPulse.nonce} />
-        )}
         <div className="relative z-10 flex items-center gap-3 flex-shrink-0">
           <div
             className={`w-[16px] h-[16px] rounded-full border-2 flex items-center justify-center ${
@@ -968,7 +927,6 @@ export const AppManagerPanel: React.FC = () => {
     userModels,
     toolModelConfig,
     handleSelectModel,
-    appliedPulse,
     claudeDesktopRelayMode,
     setClaudeDesktopRelayMode,
     claudeCodeRelayMode,
@@ -1147,7 +1105,6 @@ export const AppManagerPanel: React.FC = () => {
                   toolModelConfig={toolModelConfig}
                   selectedTool={selectedTool}
                   handleSelectModel={handleSelectModel}
-                  appliedPulse={appliedPulse}
                   modelUsageData={modelUsageData}
                   refreshingUsageIds={refreshingUsageIds}
                   isRefreshingUsage={isRefreshingUsage}

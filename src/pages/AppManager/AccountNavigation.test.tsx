@@ -32,7 +32,6 @@ vi.mock('../../hooks/useI18n', () => {
 });
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => async () => true }));
 vi.mock('../../components', () => ({
-  EFFORT_PULSE_ONESHOT_MS: 0,
   getModelIcon: () => '/fixture.svg',
 }));
 vi.mock('../../pages/ModelNexus/context', () => {

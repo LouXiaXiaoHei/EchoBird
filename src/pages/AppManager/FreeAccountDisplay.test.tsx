@@ -33,7 +33,7 @@ vi.mock('../../hooks/useI18n', () => ({
     locale: 'en',
   }),
 }));
-vi.mock('../../components', () => ({ EffortPulse: () => null, getModelIcon: () => null }));
+vi.mock('../../components', () => ({ getModelIcon: () => null }));
 
 const sections = {
   codex: () => <CodexAccountSection />,

@@ -7,7 +7,6 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { AppManagerContext, type AppManagerContextType } from './context';
 
 vi.mock('../../components', () => ({
-  EffortPulse: () => null,
   getModelIcon: () => null,
 }));
 vi.mock('../../utils/platform', () => ({ IS_WINDOWS: false, IS_LINUX: true, IS_MACOS: false }));

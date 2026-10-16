@@ -16,7 +16,6 @@ import { AppManagerContext, type AppManagerContextType } from './context';
 import { AccountSectionRow } from './AccountSectionPrimitives';
 
 vi.mock('../../components', () => ({
-  EffortPulse: () => null,
   getModelIcon: () => null,
 }));
 

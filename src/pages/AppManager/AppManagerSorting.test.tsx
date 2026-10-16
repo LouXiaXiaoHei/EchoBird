@@ -7,7 +7,7 @@ import { AppManagerMain } from './AppManagerComponents';
 import { DndContext } from '@dnd-kit/core';
 import { useSortable } from '@dnd-kit/sortable';
 
-vi.mock('../../components', () => ({ EffortPulse: () => null, getModelIcon: () => null }));
+vi.mock('../../components', () => ({ getModelIcon: () => null }));
 vi.mock('@dnd-kit/core', () => ({
   DndContext: ({ children }: React.PropsWithChildren) => <>{children}</>,
   DragOverlay: ({ children }: React.PropsWithChildren) => <>{children}</>,

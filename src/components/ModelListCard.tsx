@@ -16,7 +16,6 @@ interface ModelListCardProps {
   disabled?: boolean;
   subtitle?: string;
   badge?: ReactNode;
-  overlay?: ReactNode;
   usage?: ModelUsageData;
   refreshing?: boolean;
   onRefreshUsage?: (modelId: string) => void;
@@ -35,7 +34,6 @@ export function ModelListCard({
   disabled = false,
   subtitle = model.modelId || '',
   badge,
-  overlay,
   usage,
   refreshing = false,
   onRefreshUsage,
@@ -62,7 +60,6 @@ export function ModelListCard({
         onClick={onSelect}
         className={`absolute inset-0 rounded-card focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-cyber-accent ${disabled ? 'cursor-not-allowed' : 'disabled:cursor-default'}`}
       />
-      {overlay}
       <div className="relative z-10 pointer-events-none flex items-center gap-3 shrink-0">
         {selection}
         {iconSrc ? (
