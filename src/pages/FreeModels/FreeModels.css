@@ -79,7 +79,7 @@
 .free-model-route-path {
   fill: none;
   stroke: rgb(var(--free-model-route-rgb));
-  stroke-width: 2.8;
+  stroke-width: 3.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-dasharray: 5 8;
@@ -97,7 +97,7 @@
   --free-model-route-glow-span: 0.07;
   fill: none;
   stroke: rgb(var(--free-model-route-rgb));
-  stroke-width: 3.8;
+  stroke-width: 4.6;
   stroke-linecap: round;
   stroke-linejoin: round;
   stroke-dasharray: calc(var(--free-model-route-glow-span) * 1px)
