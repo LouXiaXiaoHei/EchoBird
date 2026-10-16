@@ -14,7 +14,8 @@ import {
 } from 'lucide-react';
 import { getVersion } from '@tauri-apps/api/app';
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
-import { MiniSelect } from './MiniSelect';
+import { ViewModeTabs } from './ViewModeTabs';
+import { useBackgroundStore } from '../stores/backgroundStore';
 import { useI18n } from '../hooks/useI18n';
 import * as api from '../api/tauri';
 import { isNewerVersion } from '../utils/version';
@@ -25,13 +26,13 @@ import { useEasterEggStore } from '../stores/easterEggStore';
 
 // All supported locales
 const LOCALE_OPTIONS = [
-  { id: 'en', label: 'English' },
-  { id: 'zh-Hans', label: '简体中文' },
-  { id: 'zh-Hant', label: '繁體中文' },
-  { id: 'ja', label: '日本語' },
+  { id: 'en', glyph: 'A', label: 'English' },
+  { id: 'zh-Hans', glyph: '简', label: '简体中文' },
+  { id: 'zh-Hant', glyph: '繁', label: '繁體中文' },
+  { id: 'ja', glyph: 'あ', label: '日本語' },
 ];
 
-type SettingsTab = 'general' | 'appearance';
+type SettingsTab = 'general' | 'appearance' | 'language';
 
 const UI_SCALE_TICKS = [70, 80, 90, 100, 110, 120, 130, 140, 150];
 
@@ -63,6 +64,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   const [closeToTray, setCloseToTray] = useState<boolean | null>(false);
   const easterEgg = useEasterEggStore((state) => state.enabled);
   const setEasterEgg = useEasterEggStore((state) => state.setEnabled);
+  const background = useBackgroundStore((state) => state.mode);
+  const setBackground = useBackgroundStore((state) => state.setMode);
   // Launch-at-startup toggle. Source of truth is the autostart plugin's OS
   // registration (isEnabled), queried each time the dialog opens, so changes
   // made outside the app (msconfig, Login Items) are reflected. Default off.
@@ -91,7 +94,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     scaleDrag.current = null;
     setDragPercent(null);
   };
-  if (dragPercent !== null && (!isOpen || activeTab !== 'appearance')) {
+  if (dragPercent !== null && (!isOpen || activeTab !== 'general')) {
     setDragPercent(null);
   }
 
@@ -262,6 +265,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
               [
                 ['general', Settings2, t('settings.general')],
                 ['appearance', Palette, t('settings.appearance')],
+                ['language', Globe, t('settings.language')],
               ] as const
             ).map(([id, Icon, label]) => (
               <button
@@ -297,7 +301,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         <section className="flex min-w-0 flex-1 flex-col">
           <header className="flex h-[58px] flex-shrink-0 items-center justify-between border-b border-cyber-border/50 px-5">
             <span className="text-[16px] font-semibold text-cyber-text">
-              {activeTab === 'general' ? t('settings.general') : t('settings.appearance')}
+              {t(`settings.${activeTab}`)}
             </span>
             <button
               type="button"
@@ -311,124 +315,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
           {/* Content */}
           <div className="page-scroll flex-1 overflow-y-auto px-5 py-5">
             {activeTab === 'general' ? (
-              <div className="space-y-5">
-                <div className="space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <X size={14} className="text-cyber-text-secondary" />
-                    <span className="text-[14px] font-medium text-cyber-text-secondary">
-                      {t('settings.closeWindowBehavior')}
-                    </span>
-                  </div>
-                  <div className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
-                    {(
-                      [
-                        [false, t('settings.closeDirectly')],
-                        [true, t('settings.closeToTray')],
-                        [null, t('settings.alwaysAsk')],
-                      ] as const
-                    ).map(([value, label]) => (
-                      <button
-                        key={String(value)}
-                        onClick={() => handleCloseToTrayChange(value)}
-                        aria-pressed={closeToTray === value}
-                        className={`view-mode-tab flex-1 h-11 flex items-center justify-center text-[13px] transition-[color] ${
-                          closeToTray === value
-                            ? 'bg-cyber-elevated text-cyber-text font-semibold'
-                            : 'text-cyber-text-secondary hover:text-cyber-text'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="h-px bg-cyber-border/50" />
-
-                <div className="space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <Globe size={14} className="text-cyber-text-secondary" />
-                    <span className="text-[14px] font-medium text-cyber-text-secondary">
-                      {t('settings.language')}
-                    </span>
-                  </div>
-                  <MiniSelect value={locale} onChange={onLocaleChange} options={LOCALE_OPTIONS} />
-                </div>
-
-                <div className="h-px bg-cyber-border/50" />
-
-                <div className="grid grid-cols-2 gap-8">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Power size={14} className="text-cyber-text-secondary" />
-                      <span className="text-[14px] font-medium text-cyber-text-secondary">
-                        {t('settings.launchAtStartup')}
-                      </span>
-                    </div>
-                    <ToggleSwitch
-                      checked={launchAtStartup}
-                      onChange={handleLaunchAtStartupChange}
-                    />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Sparkles size={14} className="text-cyber-text-secondary" />
-                      <span className="text-[14px] font-medium text-cyber-text-secondary">
-                        {t('settings.easterEgg')}
-                      </span>
-                    </div>
-                    <ToggleSwitch checked={easterEgg} onChange={setEasterEgg} />
-                  </div>
-                </div>
-
-                <div className="h-px bg-cyber-border/50" />
-
-                <div className="space-y-2.5">
-                  <div className="flex items-center gap-2">
-                    <Download size={14} className="text-cyber-text-secondary" />
-                    <span className="text-[14px] font-medium text-cyber-text-secondary">
-                      {t('settings.updates')}
-                    </span>
-                  </div>
-                  <div className="h-10 flex items-center">
-                    {installing ? (
-                      <div className="relative w-full h-10 overflow-hidden border border-cyber-accent/40 bg-cyber-surface rounded-button">
-                        <div
-                          className="absolute inset-y-0 left-0 bg-cyber-accent/20 transition-[width] duration-200"
-                          style={{
-                            width: `${
-                              installPhase === 'launching'
-                                ? 100
-                                : installPhase === 'speed_test'
-                                  ? 8
-                                  : installPct
-                            }%`,
-                          }}
-                        />
-                        <div className="relative flex items-center justify-center h-full text-[13px] font-medium text-cyber-text">
-                          {installPhase === 'launching'
-                            ? t('settings.updateLaunching')
-                            : installPhase === 'speed_test'
-                              ? `${t('settings.updateDownloading')}…`
-                              : `${t('settings.updateDownloading')} ${installPct}%`}
-                        </div>
-                      </div>
-                    ) : updateStatus === 'available' ? (
-                      <button
-                        onClick={handleUpdate}
-                        className="flex items-center justify-center gap-1.5 w-full h-10 text-[14px] font-semibold border border-cyber-accent/50 bg-cyber-surface text-cyber-accent hover:border-cyber-accent transition-colors rounded-button"
-                      >
-                        {t('settings.updateTo')} v{latestVersion} <Download size={13} />
-                      </button>
-                    ) : (
-                      <div className="w-full h-10 flex items-center justify-center gap-1.5 text-[14px] text-cyber-text border border-cyber-border/30 bg-cyber-surface rounded-button">
-                        <span className="text-cyber-accent">✓</span> {t('settings.latestVersion')}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ) : (
               <div className="space-y-5">
                 <div className="space-y-2.5">
                   <div className="flex items-center justify-between gap-4">
@@ -575,6 +461,130 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
 
                 <div className="h-px bg-cyber-border/50" />
 
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <X size={14} className="text-cyber-text-secondary" />
+                    <span className="text-[14px] font-medium text-cyber-text-secondary">
+                      {t('settings.closeWindowBehavior')}
+                    </span>
+                  </div>
+                  <div className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
+                    {(
+                      [
+                        [false, t('settings.closeDirectly')],
+                        [true, t('settings.closeToTray')],
+                        [null, t('settings.alwaysAsk')],
+                      ] as const
+                    ).map(([value, label]) => (
+                      <button
+                        key={String(value)}
+                        onClick={() => handleCloseToTrayChange(value)}
+                        aria-pressed={closeToTray === value}
+                        className={`view-mode-tab flex-1 h-11 flex items-center justify-center text-[13px] transition-[color] ${
+                          closeToTray === value
+                            ? 'bg-cyber-elevated text-cyber-text font-semibold'
+                            : 'text-cyber-text-secondary hover:text-cyber-text'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="h-px bg-cyber-border/50" />
+
+                <div className="grid grid-cols-2 gap-8">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Power size={14} className="text-cyber-text-secondary" />
+                      <span className="text-[14px] font-medium text-cyber-text-secondary">
+                        {t('settings.launchAtStartup')}
+                      </span>
+                    </div>
+                    <ToggleSwitch
+                      checked={launchAtStartup}
+                      onChange={handleLaunchAtStartupChange}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={14} className="text-cyber-text-secondary" />
+                      <span className="text-[14px] font-medium text-cyber-text-secondary">
+                        {t('settings.easterEgg')}
+                      </span>
+                    </div>
+                    <ToggleSwitch checked={easterEgg} onChange={setEasterEgg} />
+                  </div>
+                </div>
+
+                <div className="h-px bg-cyber-border/50" />
+
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <Download size={14} className="text-cyber-text-secondary" />
+                    <span className="text-[14px] font-medium text-cyber-text-secondary">
+                      {t('settings.updates')}
+                    </span>
+                  </div>
+                  <div className="h-10 flex items-center">
+                    {installing ? (
+                      <div className="relative w-full h-10 overflow-hidden border border-cyber-accent/40 bg-cyber-surface rounded-button">
+                        <div
+                          className="absolute inset-y-0 left-0 bg-cyber-accent/20 transition-[width] duration-200"
+                          style={{
+                            width: `${
+                              installPhase === 'launching'
+                                ? 100
+                                : installPhase === 'speed_test'
+                                  ? 8
+                                  : installPct
+                            }%`,
+                          }}
+                        />
+                        <div className="relative flex items-center justify-center h-full text-[13px] font-medium text-cyber-text">
+                          {installPhase === 'launching'
+                            ? t('settings.updateLaunching')
+                            : installPhase === 'speed_test'
+                              ? `${t('settings.updateDownloading')}…`
+                              : `${t('settings.updateDownloading')} ${installPct}%`}
+                        </div>
+                      </div>
+                    ) : updateStatus === 'available' ? (
+                      <button
+                        onClick={handleUpdate}
+                        className="flex items-center justify-center gap-1.5 w-full h-10 text-[14px] font-semibold border border-cyber-accent/50 bg-cyber-surface text-cyber-accent hover:border-cyber-accent transition-colors rounded-button"
+                      >
+                        {t('settings.updateTo')} v{latestVersion} <Download size={13} />
+                      </button>
+                    ) : (
+                      <div className="w-full h-10 flex items-center justify-center gap-1.5 text-[14px] text-cyber-text border border-cyber-border/30 bg-cyber-surface rounded-button">
+                        <span className="text-cyber-accent">✓</span> {t('settings.latestVersion')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ) : activeTab === 'appearance' ? (
+              <div className="space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                    {t('settings.background')}
+                  </span>
+                  <ViewModeTabs
+                    value={background}
+                    onChange={setBackground}
+                    options={[
+                      { value: 'none', label: t('settings.backgroundNone') },
+                      { value: 'characters', label: t('settings.backgroundCharacters') },
+                      { value: 'carbon', label: t('settings.backgroundCarbon') },
+                      { value: 'monogram', label: t('settings.backgroundMonogram') },
+                    ]}
+                  />
+                </div>
+
+                <div className="h-px bg-cyber-border/50" />
+
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-[12px] font-semibold text-cyber-text-secondary">
                     {t('settings.colorTheme')}
@@ -596,6 +606,28 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                   locale={locale}
                   onChange={setColorTheme}
                 />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                {LOCALE_OPTIONS.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    lang={option.id}
+                    aria-pressed={locale === option.id}
+                    onClick={() => onLocaleChange(option.id)}
+                    className={`flex min-h-12 items-center gap-2.5 rounded-lg border px-3 py-2.5 text-[13px] transition-colors ${locale === option.id ? 'border-cyber-border bg-cyber-elevated text-cyber-text' : 'border-transparent text-cyber-text-secondary hover:bg-cyber-elevated/60 hover:text-cyber-text'}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="w-[22px] flex-shrink-0 text-center text-[15px]"
+                    >
+                      {option.glyph}
+                    </span>
+                    <span className="flex-1 text-left">{option.label}</span>
+                    {locale === option.id && <Check aria-hidden="true" size={14} />}
+                  </button>
+                ))}
               </div>
             )}
           </div>

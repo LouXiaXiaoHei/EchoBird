@@ -1,6 +1,7 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DesktopCharacterBackground } from './DesktopCharacterBackground';
+import { AppBackground } from './AppBackground';
+import { useBackgroundStore } from '../stores/backgroundStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useEasterEggStore } from '../stores/easterEggStore';
 
@@ -62,6 +63,7 @@ beforeEach(() => {
   vi.stubGlobal('localStorage', { getItem: vi.fn(), setItem: vi.fn() });
   useNavigationStore.setState({ activePage: 'apps' });
   useEasterEggStore.setState({ enabled: true });
+  useBackgroundStore.setState({ mode: 'characters' });
 });
 
 afterEach(() => {
@@ -73,13 +75,13 @@ afterEach(() => {
 function mount(selected: string | null = null) {
   mocks.selectedTool = selected;
   act(() => {
-    view = create(<DesktopCharacterBackground />, { createNodeMock: () => host });
+    view = create(<AppBackground />, { createNodeMock: () => host });
   });
 }
 function select(id: string | null) {
   act(() => {
     mocks.selectedTool = id;
-    view!.update(<DesktopCharacterBackground />);
+    view!.update(<AppBackground />);
   });
 }
 
@@ -116,7 +118,7 @@ describe('application character background lifecycle', () => {
     ] as const) {
       act(() => {
         useNavigationStore.setState({ activePage });
-        view!.update(<DesktopCharacterBackground />);
+        view!.update(<AppBackground />);
       });
       expect(currentCanvas()).toBe(original);
     }
@@ -129,15 +131,31 @@ describe('application character background lifecycle', () => {
     expect(mocks.dispose).not.toHaveBeenCalled();
   });
 
-  it('uses the existing persistent easter egg setting without changing selection', () => {
+  it('selects backgrounds independently of the Easter Egg and releases character resources', () => {
     mount('claude');
     act(() => useEasterEggStore.getState().setEnabled(false));
+    expect(mocks.dispose).not.toHaveBeenCalled();
+    expect(attached).toHaveLength(1);
+    act(() => useBackgroundStore.getState().setMode('carbon'));
     expect(mocks.dispose).toHaveBeenCalledTimes(1);
     expect(attached).toHaveLength(0);
-    expect(localStorage.setItem).toHaveBeenCalledWith('echobird_easter_egg', 'false');
-    expect(mocks.selectedTool).toBe('claude');
-    act(() => useEasterEggStore.getState().setEnabled(true));
+    expect(view!.root.findByType('div').props['data-app-background']).toBe('carbon');
+    expect(localStorage.setItem).toHaveBeenLastCalledWith('echobird_background', 'carbon');
+    act(() => useBackgroundStore.getState().setMode('none'));
+    expect(view!.toJSON()).toBeNull();
+    act(() => useBackgroundStore.getState().setMode('characters'));
     expect(mocks.create).toHaveBeenCalledTimes(2);
+    expect(useEasterEggStore.getState().enabled).toBe(false);
+    expect(mocks.selectedTool).toBe('claude');
+  });
+
+  it.each(['none', 'carbon', 'monogram'] as const)('does not create graphics for %s', (mode) => {
+    useBackgroundStore.setState({ mode });
+    mount();
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(attached).toHaveLength(0);
+    if (mode === 'none') expect(view!.toJSON()).toBeNull();
+    else expect(view!.root.findByType('div').props['data-app-background']).toBe(mode);
   });
 
   it('stops while the window is hidden and resumes when visible', () => {
@@ -198,7 +216,7 @@ describe('application character background lifecycle', () => {
     mocks.dispose.mockImplementationOnce(() => expect(attached).not.toContain(first));
     act(() => view!.update(<></>));
     expect(attached).toHaveLength(0);
-    act(() => view!.update(<DesktopCharacterBackground />));
+    act(() => view!.update(<AppBackground />));
     expect(attached).toHaveLength(1);
     expect(currentCanvas()).not.toBe(first);
     expect(mocks.create.mock.calls[1][0]).toBe(currentCanvas());

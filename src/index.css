@@ -46,6 +46,66 @@
   --text-muted-rgb: 130 124 114; /* #827C72 — readable warm muted */
 }
 
+/* Coffee-CLI's static material patterns, recolored by the active EchoBird palette. */
+.app-background-material {
+  --material-mask: url('/backgrounds/carbon.svg');
+  --material-size: 13px 22.75px;
+  --material-ink: rgb(var(--view-mode-accent-rgb));
+  --material-opacity: 0.2;
+  background: radial-gradient(
+    130% 100% at 50% 36%,
+    color-mix(in srgb, var(--material-ink) 6%, transparent),
+    transparent 60%
+  );
+}
+
+.app-background-monogram {
+  --material-mask: url('/backgrounds/monogram.svg');
+  --material-size: 356px 356px;
+  --material-opacity: 0.16;
+}
+
+:root[data-theme='light'] .app-background-material {
+  --material-ink: color-mix(
+    in srgb,
+    rgb(var(--view-mode-accent-rgb)) 70%,
+    rgb(var(--text-primary-rgb))
+  );
+  --material-opacity: 0.46;
+}
+
+:root[data-theme='light'] .app-background-monogram {
+  --material-opacity: 0.38;
+}
+
+.app-background-material::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(
+      120% 95% at 50% 36%,
+      color-mix(in srgb, var(--material-ink) 60%, transparent),
+      color-mix(in srgb, var(--material-ink) 20%, transparent) 42%,
+      transparent 70%
+    ),
+    color-mix(in srgb, var(--material-ink) 20%, transparent);
+  -webkit-mask-image: var(--material-mask);
+  mask-image: var(--material-mask);
+  -webkit-mask-size: var(--material-size);
+  mask-size: var(--material-size);
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  mask-mode: alpha;
+  opacity: var(--material-opacity);
+}
+
+@media (forced-colors: active), (prefers-contrast: more) {
+  .app-background-material {
+    display: none;
+  }
+}
+
 .usage-card-action-button {
   position: relative;
   display: inline-flex;

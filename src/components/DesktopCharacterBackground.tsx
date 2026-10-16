@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppManager } from '../pages/AppManager/context';
 import { useDocumentVisible } from '../hooks/useDocumentVisible';
-import { useEasterEggStore } from '../stores/easterEggStore';
 import { createCharacterRenderer, type CharacterRenderer } from './desktopCharacterRenderer';
 
 const motionPreferences = [
@@ -12,7 +11,6 @@ const motionPreferences = [
 
 export function DesktopCharacterBackground() {
   const { selectedTool } = useAppManager();
-  const enabled = useEasterEggStore((state) => state.enabled);
   const visible = useDocumentVisible();
   const [reduced, setReduced] = useState(() =>
     motionPreferences.some((query) => window.matchMedia(query).matches)
@@ -20,7 +18,7 @@ export function DesktopCharacterBackground() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<CharacterRenderer | null>(null);
-  const active = enabled && visible && !reduced;
+  const active = visible && !reduced;
 
   useEffect(() => {
     const preferences = motionPreferences.map((query) => window.matchMedia(query));

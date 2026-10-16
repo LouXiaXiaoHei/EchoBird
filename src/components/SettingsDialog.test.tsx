@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { SettingsDialog } from './SettingsDialog';
 import { useUiScaleStore } from '../stores/uiScaleStore';
 import { useEasterEggStore } from '../stores/easterEggStore';
+import { useBackgroundStore } from '../stores/backgroundStore';
 
 const mocks = vi.hoisted(() => ({ zoom: vi.fn(), save: vi.fn() }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: async () => '' }));
@@ -30,6 +31,7 @@ beforeEach(() => {
   vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   vi.stubGlobal('localStorage', { getItem: vi.fn(), setItem: vi.fn() });
   useEasterEggStore.setState({ enabled: true });
+  useBackgroundStore.setState({ mode: 'characters' });
   useUiScaleStore.setState({
     preference: 'auto',
     requestedPreference: null,
@@ -51,6 +53,79 @@ async function tab(label: string) {
       .props.onClick();
   });
 }
+
+it('places scale in General and offers languages directly on their own page', async () => {
+  await act(async () => {
+    view = create(<SettingsDialog {...props} />);
+  });
+  expect(view.root.findByProps({ id: 'ui-scale' })).toBeDefined();
+  await tab('settings.appearance');
+  expect(view.root.findAllByProps({ id: 'ui-scale' })).toHaveLength(0);
+  await tab('settings.language');
+  const languages = view.root.findAllByType('button').filter((button) => button.props.lang);
+  expect(languages.map((button) => button.props.lang)).toEqual(['en', 'zh-Hans', 'zh-Hant', 'ja']);
+  expect(
+    languages.filter((button) => button.props['aria-pressed']).map((button) => button.props.lang)
+  ).toEqual(['en']);
+  expect(props.onLocaleChange).not.toHaveBeenCalled();
+  await act(async () => {
+    languages[3].props.onClick();
+  });
+  expect(props.onLocaleChange).toHaveBeenCalledExactlyOnceWith('ja');
+  await act(async () => {
+    view.update(<SettingsDialog {...props} locale="ja" />);
+  });
+  expect(view.root.findByProps({ lang: 'ja' }).props['aria-pressed']).toBe(true);
+  expect(mocks.zoom).not.toHaveBeenCalled();
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it('keeps the background and Easter Egg controls independent', async () => {
+  await act(async () => {
+    view = create(<SettingsDialog {...props} />);
+  });
+  await act(async () => {
+    easterEggSwitch().props.onClick();
+  });
+  expect(useEasterEggStore.getState().enabled).toBe(false);
+  expect(useBackgroundStore.getState().mode).toBe('characters');
+  await tab('settings.appearance');
+  const none = view.root
+    .findAllByType('button')
+    .find((button) => button.props.children === 'settings.backgroundNone')!;
+  await act(async () => {
+    none.props.onClick();
+  });
+  expect(useBackgroundStore.getState().mode).toBe('none');
+  expect(localStorage.setItem).toHaveBeenLastCalledWith('echobird_background', 'none');
+  await tab('settings.general');
+  expect(easterEggSwitch().props['aria-checked']).toBe(false);
+  await act(async () => {
+    easterEggSwitch().props.onClick();
+  });
+  expect(useBackgroundStore.getState().mode).toBe('none');
+  expect(mocks.save).not.toHaveBeenCalled();
+});
+
+it('preserves the background through passive navigation and reopening without writes', async () => {
+  useBackgroundStore.setState({ mode: 'monogram' });
+  await act(async () => {
+    view = create(<SettingsDialog {...props} />);
+  });
+  for (const label of ['settings.appearance', 'settings.language', 'settings.general'])
+    await tab(label);
+  await act(async () => {
+    view.update(<SettingsDialog {...props} isOpen={false} />);
+  });
+  await act(async () => {
+    view.update(<SettingsDialog {...props} />);
+  });
+  expect(useBackgroundStore.getState().mode).toBe('monogram');
+  expect(props.onLocaleChange).not.toHaveBeenCalled();
+  expect(localStorage.setItem).not.toHaveBeenCalled();
+  expect(mocks.save).not.toHaveBeenCalled();
+  expect(mocks.zoom).not.toHaveBeenCalled();
+});
 
 function easterEggSwitch() {
   return view.root
@@ -147,8 +222,8 @@ it('only changes scale on explicit selection, not settings entry, tab changes or
     view = create(<SettingsDialog {...props} />);
   });
   await tab('settings.appearance');
+  await tab('settings.language');
   await tab('settings.general');
-  await tab('settings.appearance');
   await act(async () => {
     view.update(<SettingsDialog {...props} isOpen={false} />);
   });
@@ -172,7 +247,7 @@ it('keeps the slider responsive while applying and shows failure without a block
   await act(async () => {
     view = create(<SettingsDialog {...props} />);
   });
-  await tab('settings.appearance');
+  await tab('settings.general');
   await act(async () => {
     useUiScaleStore.setState({ pending: true, requestedPreference: 70 });
   });
@@ -189,7 +264,7 @@ it('keeps the original drag coordinates as the window and UI resize and can retu
   await act(async () => {
     view = create(<SettingsDialog {...props} />);
   });
-  await tab('settings.appearance');
+  await tab('settings.general');
   const target = {
     focus: vi.fn(),
     setPointerCapture: vi.fn(),
@@ -229,7 +304,7 @@ async function startScaleDrag(percent = 100) {
   await act(async () => {
     view = create(<SettingsDialog {...props} />);
   });
-  await tab('settings.appearance');
+  await tab('settings.general');
   await act(async () => {
     view.root.findByProps({ id: 'ui-scale' }).props.onPointerDown({
       button: 0,
@@ -262,8 +337,8 @@ it.each(['close', 'tab'])(
         view.update(<SettingsDialog {...props} />);
       });
     } else {
-      await tab('settings.general');
       await tab('settings.appearance');
+      await tab('settings.general');
     }
     expect(view.root.findByProps({ id: 'ui-scale' }).props.value).toBe(100);
     expect(localStorage.setItem).not.toHaveBeenCalled();
