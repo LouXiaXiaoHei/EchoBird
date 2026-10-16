@@ -4,6 +4,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { describe, expect, it, vi } from 'vitest';
 import { AppManagerContext, type AppManagerContextType } from '../AppManager/context';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 
@@ -58,6 +59,63 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it('hides the identity and action labels while preserving quota, plan and real action targets', () => {
+    const state = context();
+    const provider = {
+      ...providers(state).find((entry) => entry.id === 'codex')!,
+      installed: true,
+    };
+    const account = {
+      id: 'private-account',
+      identity: 'private@example.test',
+      plan: 'Pro 100',
+      refreshing: false,
+      authorizationFailed: false,
+      metrics: [{ label: '7d', value: '69%', percent: 69 }],
+      refresh: vi.fn().mockResolvedValue(undefined),
+      remove: vi.fn(),
+      claim: vi.fn().mockResolvedValue(undefined),
+    };
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      act(() => {
+        renderer = create(
+          <AppManagerContext.Provider value={state}>
+            <AccountCenterTitleActions />
+            <AccountCard provider={provider} account={account} />
+          </AppManagerContext.Provider>
+        );
+      });
+      expect(renderer!.root.findByType('h3').children).toEqual([account.identity]);
+      act(() =>
+        renderer!.root.findByProps({ 'aria-label': 'freeModels.hideAccountNames' }).props.onClick()
+      );
+      const hidden = JSON.stringify(renderer!.toJSON());
+      expect(hidden).not.toContain(account.identity);
+      expect(renderer!.root.findByType('h3').children).toEqual(['******']);
+      expect(hidden).toContain('Pro 100');
+      expect(hidden).toContain('69%');
+      expect(account.identity).toBe('private@example.test');
+      expect(account.refresh).not.toHaveBeenCalled();
+      expect(account.claim).not.toHaveBeenCalled();
+      expect(account.remove).not.toHaveBeenCalled();
+      act(() =>
+        renderer!.root
+          .findByProps({ 'aria-label': 'agent.refreshAccount ******' })
+          .props.onClick({ stopPropagation: vi.fn() })
+      );
+      expect(account.refresh).toHaveBeenCalledOnce();
+      act(() =>
+        renderer!.root.findByProps({ 'aria-label': 'freeModels.showAccountNames' }).props.onClick()
+      );
+      expect(renderer!.root.findByType('h3').children).toEqual([account.identity]);
+      expect(account.refresh).toHaveBeenCalledOnce();
+    } finally {
+      act(() => renderer?.unmount());
+      useAccountPrivacyStore.setState({ hidden: false });
+    }
+  });
+
   it('keeps the identity and plan in the same grid row when two unknown quotas become available', () => {
     const state = context();
     state.claudeCodeAccounts.accounts = [

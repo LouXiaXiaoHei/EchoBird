@@ -33,6 +33,8 @@ import { ZCodeAccountProviderChoice } from '../AppManager/ZCodeAccountSection';
 import { MinimaxAccountRegionChoice } from '../AppManager/MinimaxAccountSection';
 import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
+import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { QuotaCountdown } from '../AppManager/QuotaCountdown';
 import { accountPlanLabel } from '../AppManager/accountPlanLabel';
 import { useI18n } from '../../hooks/useI18n';
@@ -58,6 +60,8 @@ export function AccountCard({
   dragHandle?: ReactNode;
 }) {
   const { t } = useI18n();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
+  const identity = hidden ? ACCOUNT_NAME_MASK : account.identity;
   const now = useUsageClock(
     account.claimStatusExpiresAt != null ||
       account.metrics.some((metric) => Boolean(metric.resetLabel))
@@ -77,7 +81,7 @@ export function AccountCard({
   const compactMetrics = provider.id === 'minimax' && account.metrics.length > 3;
   return (
     <article
-      aria-label={`${name} ${account.identity}`}
+      aria-label={`${name} ${identity}`}
       className="flex h-44 flex-col gap-2 rounded-card border border-transparent bg-cyber-surface p-3 transition-colors hover:bg-cyber-elevated"
     >
       <div className={`flex items-center ${dragHandle ? 'gap-1.5' : 'gap-2.5'}`}>
@@ -89,7 +93,7 @@ export function AccountCard({
         <span className="flex flex-shrink-0 items-center gap-1.5 text-cyber-text-muted">
           {account.claim && (
             <AccountSectionRewardButton
-              email={account.identity}
+              email={identity}
               claimed={claimed}
               disabled={
                 !provider.installed ||
@@ -102,7 +106,7 @@ export function AccountCard({
             />
           )}
           <AccountSectionActions
-            email={account.identity}
+            email={identity}
             refreshing={account.refreshing}
             disabled={!provider.installed || account.pending}
             onRefresh={account.refresh}
@@ -116,7 +120,7 @@ export function AccountCard({
         }
       >
         <div className="flex min-w-0 items-center gap-3">
-          <h3 className="min-w-0 flex-1 truncate text-base font-bold">{account.identity}</h3>
+          <h3 className="min-w-0 flex-1 truncate text-base font-bold">{identity}</h3>
           {(account.plan || account.subscriptionEndAt !== undefined) && (
             <span className="flex max-w-[132px] flex-shrink-0 items-center gap-2 text-xs text-cyber-text-secondary">
               {account.subscriptionEndAt !== undefined && (
@@ -219,7 +223,7 @@ export function AccountCard({
                   {metric.percent != null ? (
                     <div
                       role="progressbar"
-                      aria-label={`${metric.label} ${account.identity}`}
+                      aria-label={`${metric.label} ${identity}`}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={Math.max(0, Math.min(100, metric.percent))}
@@ -248,6 +252,7 @@ export function AccountCard({
 
 export function AccountCenterMain() {
   const context = useAppManager();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
   const { t, locale } = useI18n();
   const activePage = useNavigationStore((state) => state.activePage);
   const toolsReady = useToolsStore((state) => state.hasScanned);
@@ -323,7 +328,7 @@ export function AccountCenterMain() {
             <SortableCard
               key={id}
               id={id}
-              dragLabel={`${t('model.dragSort')} ${account.identity}`}
+              dragLabel={`${t('model.dragSort')} ${hidden ? ACCOUNT_NAME_MASK : account.identity}`}
               disabled={loading || activePage !== 'accounts'}
             >
               {(handle) => (
@@ -473,6 +478,7 @@ export function AccountCenterTitleActions() {
     'flex items-center gap-1.5 text-sm font-mono px-3 py-1.5 border border-cyber-border rounded-button transition-colors text-cyber-text hover:bg-cyber-text/10 disabled:text-cyber-text-muted disabled:opacity-50';
   return (
     <div className="ml-auto flex-shrink-0 flex items-stretch gap-3">
+      <AccountPrivacyButton />
       <button
         type="button"
         aria-label={t('accountCenter.claimAll')}

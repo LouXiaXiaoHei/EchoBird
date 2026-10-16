@@ -260,6 +260,8 @@ export type TKey =
   | 'freeModels.router.title'
   | 'freeModels.view.smart'
   | 'freeModels.view.super'
+  | 'freeModels.hideAccountNames'
+  | 'freeModels.showAccountNames'
   | 'freeModels.super.title'
   | 'freeModels.super.description'
   | 'freeModels.super.unavailable'

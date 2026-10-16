@@ -9,7 +9,13 @@ import type { ModelConfig } from '../../api/types';
 import type { FreeModelDirectory, FreeModelEntry } from '../../api/freeModels';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { FreeModelsMain, FreeModelsProvider, useFreeModels } from './FreeModels';
+import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
+import {
+  FreeModelsMain,
+  FreeModelsProvider,
+  FreeModelsTitleActions,
+  useFreeModels,
+} from './FreeModels';
 
 const { confirm, showToast, nexus, startDrag, keyboardDrag, dragState, measure, getModelIcon } =
   vi.hoisted(() => ({
@@ -178,10 +184,11 @@ describe('Direct route card model selection', () => {
     });
     return activePage === 'freeModels' ? <FreeModelsMain /> : null;
   }
-  async function open() {
+  async function open(showTitleActions = false) {
     await act(async () => {
       renderer = create(
         <FreeModelsProvider>
+          {showTitleActions && <FreeModelsTitleActions />}
           <Harness />
         </FreeModelsProvider>,
         {
@@ -217,6 +224,15 @@ describe('Direct route card model selection', () => {
     return node.children
       .map((child) => (typeof child === 'string' ? child : textOf(child)))
       .join(' ');
+  }
+  function visibilityButton() {
+    return renderer.root
+      .findAllByType('button')
+      .find((node) =>
+        ['freeModels.hideAccountNames', 'freeModels.showAccountNames'].includes(
+          node.props['aria-label']
+        )
+      )!;
   }
   function dragHandle(route: ReactTestInstance) {
     return route.findAllByType('button').find((node) => node.props.onPointerDown === startDrag)!;
@@ -267,6 +283,8 @@ describe('Direct route card model selection', () => {
 
   beforeEach(() => {
     dragState.id = null;
+    useAccountPrivacyStore.setState({ hidden: false });
+    vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null), setItem: vi.fn() });
     vi.mocked(useSensor).mockImplementation((sensor, options) => ({
       sensor,
       options: options ?? {},
@@ -1231,7 +1249,7 @@ describe('Direct route card model selection', () => {
     expectNoPassiveChanges();
   });
 
-  it('shows the saved account identity and plan while preserving API names, credentials and source IDs', async () => {
+  it('toggles account identities in cards, accessible labels and drag previews while preserving plans and saved models', async () => {
     const buddy: ModelConfig = {
       ...account,
       internalId: 'buddy-model',
@@ -1276,7 +1294,7 @@ describe('Direct route card model selection', () => {
           ]
     );
     const original = structuredClone(savedModels);
-    await open();
+    await open(true);
     const titles = renderer.root
       .findAllByType('span')
       .filter((node) => String(node.props.className).includes('font-semibold'))
@@ -1303,7 +1321,98 @@ describe('Direct route card model selection', () => {
         .find((node) => node.children.join('').includes(plan))!;
       expect(tier.children.join('')).toBe(plan);
     }
+    expect(visibilityButton().props['aria-pressed']).toBe(false);
+    await act(async () => visibilityButton().props.onClick());
+    expect(visibilityButton().props['aria-pressed']).toBe(true);
+    const hidden = JSON.stringify(renderer.toJSON());
+    for (const identity of [
+      'codex@example.com',
+      'second@example.com',
+      'Ben.',
+      'Old account nickname',
+    ]) {
+      expect(hidden).not.toContain(identity);
+    }
+    expect(textOf(card('account-old'))).toContain('Pro 100');
+    expect(textOf(card('second-old'))).toContain('Business');
+    expect(textOf(card('buddy-auto'))).toContain('体验版');
+    expect(textOf(card('free-old'))).toContain('Free provider');
+    expect(picker('account-old').props.ariaLabel).not.toContain('codex@example.com');
+    await act(async () =>
+      renderer.root.findByType(DndContext).props.onDragStart({ active: { id: 'account-model' } })
+    );
+    const overlay = renderer.root.find(
+      (node) =>
+        node.type === 'div' &&
+        node.props['aria-hidden'] === true &&
+        String(node.props.className).includes('free-model-route-node')
+    );
+    expect(textOf(overlay)).not.toContain('codex@example.com');
+    expect(textOf(overlay)).toContain('Pro 100');
+    await act(async () => renderer.root.findByType(DndContext).props.onDragCancel());
+    await act(async () => visibilityButton().props.onClick());
+    expect(textOf(card('account-old'))).toContain('codex@example.com');
+    expect(textOf(card('second-old'))).toContain('second@example.com');
+    expect(textOf(card('buddy-auto'))).toContain('Ben.');
+    expect(picker('account-old').props.ariaLabel).toContain('codex@example.com');
+    expect(localStorage.setItem).toHaveBeenNthCalledWith(
+      1,
+      'echobird-router-account-names-hidden',
+      'true'
+    );
+    expect(localStorage.setItem).toHaveBeenLastCalledWith(
+      'echobird-router-account-names-hidden',
+      'false'
+    );
+    expect(accountApi.listProxyAccounts).toHaveBeenCalledTimes(2);
     expect(savedModels).toEqual(original);
+    expectNoPassiveChanges();
+  });
+
+  it('retains hidden names across navigation and remounts, including late account metadata', async () => {
+    const storage = new Map<string, string>();
+    vi.mocked(localStorage.getItem).mockImplementation((key) => storage.get(key) ?? null);
+    vi.mocked(localStorage.setItem).mockImplementation((key, value) => {
+      storage.set(key, value);
+    });
+    const pending = deferred<accountApi.ProxyAccount[]>();
+    vi.mocked(accountApi.listProxyAccounts).mockReturnValue(pending.promise);
+    await open(true);
+    await act(async () => visibilityButton().props.onClick());
+    expect(textOf(card('account-old'))).not.toContain('ChatGPT / Codex');
+    await act(async () =>
+      pending.resolve([
+        { source: account.accountSource!, label: 'late@example.com', plan: 'prolite' },
+      ])
+    );
+    expect(textOf(card('account-old'))).not.toContain('late@example.com');
+    expect(textOf(card('account-old'))).toContain('Pro 100');
+    await act(async () => useNavigationStore.setState({ activePage: 'apps' }));
+    await act(async () => useNavigationStore.setState({ activePage: 'freeModels' }));
+    expect(textOf(card('account-old'))).not.toContain('late@example.com');
+    act(() => renderer.unmount());
+    await open(true);
+    expect(visibilityButton().props['aria-pressed']).toBe(true);
+    expect(textOf(card('account-old'))).not.toContain('late@example.com');
+    expect(textOf(card('free-old'))).toContain('Free provider');
+    expect(localStorage.setItem).toHaveBeenCalledTimes(1);
+    expectNoPassiveChanges();
+  });
+
+  it('keeps the visibility toggle usable when preference storage is unavailable', async () => {
+    vi.mocked(localStorage.getItem).mockImplementation(() => {
+      throw new Error('Storage unavailable');
+    });
+    vi.mocked(localStorage.setItem).mockImplementation(() => {
+      throw new Error('Storage unavailable');
+    });
+    await open(true);
+    expect(textOf(card('account-old'))).toContain('codex@example.com');
+    await act(async () => visibilityButton().props.onClick());
+    expect(textOf(card('account-old'))).not.toContain('codex@example.com');
+    expect(textOf(card('account-old'))).toContain('Pro 100');
+    await act(async () => visibilityButton().props.onClick());
+    expect(textOf(card('account-old'))).toContain('codex@example.com');
     expectNoPassiveChanges();
   });
 

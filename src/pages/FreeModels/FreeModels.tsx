@@ -66,10 +66,12 @@ import { getModelIcon } from '../../components';
 import { ModelListCard } from '../../components/ModelListCard';
 import { ViewModeTabs } from '../../components/ViewModeTabs';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
+import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
 import { copyText } from '../../utils/copyText';
 import { useModelNexus } from '../ModelNexus/context';
@@ -611,6 +613,7 @@ export function FreeModelsTitleActions() {
 
   return (
     <div className="flex shrink-0 items-center gap-3">
+      <AccountPrivacyButton />
       <ViewModeTabs
         value={viewMode}
         onChange={setViewMode}
@@ -798,13 +801,18 @@ function RouteModelCard({
   overlay?: boolean;
 }) {
   const { t } = useI18n();
+  const hideAccountNames = useAccountPrivacyStore((state) => state.hidden);
   const [pickerOpen, setPickerOpen] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
   const dragPointerDown: PointerEventHandler<HTMLElement> | undefined =
     dragHandleProps?.onPointerDown;
   const accountProvider = accountProxyProviders.find((p) => p.id === model.accountSource?.provider);
   const displayName = model.accountSource
-    ? (account && accountProxyIdentityLabel(account, t)) || accountProvider?.name || model.provider
+    ? hideAccountNames
+      ? ACCOUNT_NAME_MASK
+      : (account && accountProxyIdentityLabel(account, t)) ||
+        accountProvider?.name ||
+        model.provider
     : model.provider;
   const displayPlan = account ? accountProxyPlanLabel(account, t).trim() : '';
   const iconSrc = accountProvider

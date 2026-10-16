@@ -142,6 +142,8 @@ const zhHant: Partial<Translations> = {
   'freeModels.router.title': '免切換智能接入',
   'freeModels.view.smart': '智能',
   'freeModels.view.super': '編排',
+  'freeModels.hideAccountNames': '隱藏帳號名稱',
+  'freeModels.showAccountNames': '顯示帳號名稱',
   'freeModels.super.title': '多模型編排接入',
   'freeModels.super.description':
     '由一個主模型對接 AI 應用，並將任務分配給其他模型。例如，在 Claude Code 或 Codex 中提交任務後，各模型將獨立完成任務。待所有模型完成後，主模型會彙總所有結果，交叉評估並整合各方優勢，形成並執行最終方案。多模型協作有望在複雜任務中突破單一頂尖模型的能力邊界，但多模型並行也會成倍放大 Token 消耗與使用成本。',

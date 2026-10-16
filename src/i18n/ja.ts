@@ -150,6 +150,8 @@ const ja: Partial<Translations> = {
   'freeModels.router.title': '切替不要ルーター',
   'freeModels.view.smart': 'スマート',
   'freeModels.view.super': '編成',
+  'freeModels.hideAccountNames': 'アカウント名を非表示',
+  'freeModels.showAccountNames': 'アカウント名を表示',
   'freeModels.super.title': 'モデル編成ルーター',
   'freeModels.super.description':
     '主モデルが AI アプリに接続し、ルーティング時に他のモデルへタスクを割り当てます。例えば Claude Code や Codex でタスクを送信すると、各モデルが独立してタスクに取り組みます。すべてのモデルの処理が完了すると、主モデルが結果を集約し、相互に検証して各モデルの長所を組み合わせ、最終的な計画をまとめて実行します。複雑なタスクでは、こうした協働によって単一の最先端モデルの能力を超える可能性がありますが、複数モデルの並列実行は Token の消費量と利用コストも何倍にも押し上げます。',
