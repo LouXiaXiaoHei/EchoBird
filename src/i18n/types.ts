@@ -348,6 +348,7 @@ export type TKey =
   | 'toolCat.cloudAgent'
   | 'toolCat.utility'
   | 'toolCat.science'
+  | 'toolCat.creative'
   // ToolCard labels
   | 'tool.models'
   | 'tool.app'

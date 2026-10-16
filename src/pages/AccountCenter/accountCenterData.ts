@@ -671,5 +671,22 @@ export function accountCenterProviders(
         ],
       })
     ),
+    provider(
+      'opendesign',
+      'Open Design',
+      '/icons/tools/opendesign.png',
+      ['opendesign'],
+      context.openDesignAccounts,
+      (account) => ({
+        identity: account.email,
+        plan: account.plan,
+        subscriptionEndAt: account.subscriptionEndAt,
+        metrics: account.quotaWindows.length
+          ? account.quotaWindows.map((window) =>
+              quota(window.remainingPercent, window.resetAt, window.label)
+            )
+          : [credits(t('model.balance'), account.balanceUsd, undefined, undefined, 'USD')],
+      })
+    ),
   ];
 }

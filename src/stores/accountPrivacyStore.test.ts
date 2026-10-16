@@ -26,17 +26,20 @@ describe('Shared account privacy', () => {
     }
   );
 
-  it('notifies both views and restores the shared choice after a fresh module load', async () => {
+  it('notifies all three views and restores the shared choice after a fresh module load', async () => {
     const { useAccountPrivacyStore } = await import('./accountPrivacyStore');
     const router = vi.fn();
     const accountCenter = vi.fn();
+    const desktop = vi.fn();
     const unsubscribes = [
       useAccountPrivacyStore.subscribe(router),
       useAccountPrivacyStore.subscribe(accountCenter),
+      useAccountPrivacyStore.subscribe(desktop),
     ];
     useAccountPrivacyStore.getState().setHidden(true);
     expect(router).toHaveBeenCalledOnce();
     expect(accountCenter).toHaveBeenCalledOnce();
+    expect(desktop).toHaveBeenCalledOnce();
     expect(storage.setItem).toHaveBeenCalledExactlyOnceWith(key, 'true');
     unsubscribes.forEach((unsubscribe) => unsubscribe());
     storage.setItem.mockClear();

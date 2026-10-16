@@ -9,6 +9,7 @@ import { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
 import { useTraeAccounts } from './useTraeAccounts';
 import { useKiroAccounts } from './useKiroAccounts';
 import { useZCodeAccounts } from './useZCodeAccounts';
+import { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import { useMinimaxAccounts } from './useMinimaxAccounts';
 import { useClineAccounts } from './useClineAccounts';
 import { useQoderAccounts } from './useQoderAccounts';
@@ -519,6 +520,12 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     () => setToolModelConfig((prev) => ({ ...prev, zcode: null })),
     setApplyError
   );
+  const openDesignAccounts = useOpenDesignAccounts(
+    accountGroupEnabled('opendesign'),
+    !!toolModelConfig.opendesign,
+    () => setToolModelConfig((prev) => ({ ...prev, opendesign: null })),
+    setApplyError
+  );
 
   // Set tool model (single selection) - UI state update
   const handleSelectModel = (toolId: string, modelId: string) => {
@@ -529,6 +536,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (toolId === 'minimaxcode' || toolId === 'minimaxdesktop') minimaxAccounts.select(null);
     if (toolId === 'qoder' || toolId === 'qodercn') qoderAccounts.select(null);
     if (toolId === 'zcode') zcodeAccounts.select(null);
+    if (toolId === 'opendesign') openDesignAccounts.select(null);
     if (toolId === 'cursor') cursorAccounts.select(null);
     if (toolId === 'grokbot') grokBotAccounts.select(null);
     if (toolId === 'dsh') deepSeekAccounts.select(null);
@@ -795,6 +803,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   const handleLaunch = async () => {
     if (!selectedTool || isLaunching) return;
     if (selectedTool === 'zcode' && zcodeAccounts.busy) return;
+    if (selectedTool === 'opendesign' && openDesignAccounts.busy) return;
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
     if (['cline', 'clinedesktop'].includes(selectedTool) && clineAccounts.busy) return;
@@ -825,6 +834,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
       !((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
+      !(selectedTool === 'opendesign' && openDesignAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
       !(selectedTool === 'grok' && grokAccounts.selectedId) &&
       !(['cline', 'clinedesktop'].includes(selectedTool) && clineAccounts.selectedId) &&
@@ -1036,6 +1046,20 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         );
         await qoderAccounts.reload();
         await api.startTool(selectedTool, toolData?.startCommand);
+      } catch (error) {
+        setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (selectedTool === 'opendesign' && openDesignAccounts.selectedId) {
+      try {
+        await api.switchOpenDesignAccount(openDesignAccounts.selectedId);
+        setDetectedTools((prev) =>
+          prev.map((tool) => (tool.id === 'opendesign' ? { ...tool, activeModel: '' } : tool))
+        );
+        await openDesignAccounts.reload();
+        if (launchAfterApply) await api.startTool('opendesign');
       } catch (error) {
         setApplyError(accountError(error, t));
       } finally {
@@ -1286,6 +1310,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         zcodeAccounts: {
           ...zcodeAccounts,
           accounts: orderedAccounts('zcode', zcodeAccounts.accounts),
+        },
+        openDesignAccounts: {
+          ...openDesignAccounts,
+          accounts: orderedAccounts('opendesign', openDesignAccounts.accounts),
         },
         minimaxAccounts: {
           ...minimaxAccounts,

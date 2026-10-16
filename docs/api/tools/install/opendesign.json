@@ -1,0 +1,27 @@
+{
+    "id": "opendesign",
+    "displayName": "Open Design",
+    "homepage": "https://open-design.ai/",
+    "docs": "https://github.com/nexu-io/open-design/blob/main/QUICKSTART.md",
+    "kind": "desktop_app",
+    "platforms": ["windows", "macos", "linux"],
+    "install": {
+        "windows_download": "Resolve the current Windows x64 installer from https://open-design.ai/download/ or the official nexu-io/open-design GitHub release; download to Downloads and open it.",
+        "macos_download": "Resolve the current official DMG for the machine architecture (Apple Silicon or Intel) from https://open-design.ai/download/ and install Open Design.app in Applications.",
+        "linux_download": "The vendor currently provides no prebuilt Linux desktop package. Follow the official QUICKSTART.md source setup with Node 24 and the repository-pinned pnpm through Corepack. Install dependencies, then run pnpm tools-dev for the desktop shell. Create ~/.local/bin/open-design as a launcher for pnpm tools-dev in that checkout and a desktop entry named Open Design only after verifying the source launch succeeds.",
+        "note": "Open Design is the nexu-io/open-design desktop design workspace. Preserve existing ~/.amr credentials and Open Design projects. Recheck current official release assets before deciding platform availability."
+    },
+    "install_flow": {
+        "summary": "Use the current official installer on Windows/macOS; use the official source workflow on Linux.",
+        "agent_steps": [
+            "Detect OS and CPU architecture; check whether Open Design is already installed before installing anything.",
+            "On Windows/macOS download the current matching official installer to Downloads, tell the user the exact path, and open it. Let the user complete any installer wizard.",
+            "On Linux explain that the vendor has no prebuilt desktop release, then follow the official source quickstart without substituting an unrelated npm package or a web-only launch.",
+            "Refresh EchoBird tool detection and report success only when Open Design is detected. Do not access or change account credentials during installation."
+        ]
+    },
+    "network_requirements": {
+        "test_urls": ["https://open-design.ai/download/", "https://github.com/nexu-io/open-design/releases", "https://releases.open-design.ai"],
+        "mirrors": {}
+    }
+}

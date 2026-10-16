@@ -45,6 +45,7 @@ pub enum AccountProvider {
     Cline,
     Kiro,
     Zcode,
+    OpenDesign,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -6,6 +6,7 @@ import type { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
 import type { useTraeAccounts } from './useTraeAccounts';
 import type { useKiroAccounts } from './useKiroAccounts';
 import type { useZCodeAccounts } from './useZCodeAccounts';
+import type { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import type { useMinimaxAccounts } from './useMinimaxAccounts';
 import type { useClineAccounts } from './useClineAccounts';
 import type { useQoderAccounts } from './useQoderAccounts';
@@ -46,6 +47,7 @@ export interface AppManagerContextType {
     ReturnType<typeof useWorkBuddyAccounts>
   >;
   zcodeAccounts: ReturnType<typeof useZCodeAccounts>;
+  openDesignAccounts: ReturnType<typeof useOpenDesignAccounts>;
   minimaxAccounts: ReturnType<typeof useMinimaxAccounts>;
   clineAccounts: ReturnType<typeof useClineAccounts>;
   qoderAccounts: ReturnType<typeof useQoderAccounts>;

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppManagerContext, type AppManagerContextType } from '../AppManager/context';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
+import { AccountSectionRow } from '../AppManager/AccountSectionPrimitives';
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 
@@ -43,6 +44,7 @@ function context() {
     antigravityAccounts: group(),
     cursorAccounts: group(),
     zcodeAccounts: group(),
+    openDesignAccounts: group(),
     minimaxAccounts: group(),
     qoderAccountGroups: { qoder: group(), qodercn: group() },
     grokAccounts: group(),
@@ -59,6 +61,35 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it('shows Open Design vendor windows separately and keeps a missing balance unknown', () => {
+    const state = context();
+    const account = {
+      id: 'design',
+      email: 'designer@example.test',
+      active: false,
+      plan: 'go',
+      quotaWindows: [
+        { label: '5h', remainingPercent: 75, resetAt: 2_000_000_000 },
+        { label: '7d', remainingPercent: 60, resetAt: 2_000_100_000 },
+      ],
+      balanceUsd: null,
+    };
+    state.openDesignAccounts.accounts = [account];
+    const find = () =>
+      providers(state).find((provider) => provider.id === 'opendesign')!.accounts[0];
+    expect(find().metrics).toMatchObject([
+      { label: '5h', value: '75%', percent: 75 },
+      { label: '7d', value: '60%', percent: 60 },
+    ]);
+    expect(find().identity).toBe(account.email);
+    expect(find().plan).toBe('go');
+    state.openDesignAccounts.accounts = [{ ...account, quotaWindows: [] }];
+    expect(find().metrics).toEqual([
+      { label: 'model.balance', value: '—', resetAt: undefined, percent: undefined },
+    ]);
+    state.openDesignAccounts.accounts = [{ ...account, quotaWindows: [], balanceUsd: 0 }];
+    expect(find().metrics[0].value).toBe('$0');
+  });
   it('hides the identity and action labels while preserving quota, plan and real action targets', () => {
     const state = context();
     const provider = {
@@ -83,6 +114,13 @@ describe('Account Center display data', () => {
           <AppManagerContext.Provider value={state}>
             <AccountCenterTitleActions />
             <AccountCard provider={provider} account={account} />
+            <AccountSectionRow
+              email={account.identity}
+              selected={false}
+              plan={account.plan}
+              onSelect={vi.fn()}
+              onDelete={account.remove}
+            />
           </AppManagerContext.Provider>
         );
       });

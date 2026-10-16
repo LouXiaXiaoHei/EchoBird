@@ -28,6 +28,13 @@ vi.mock('./useClaudeCodeAccounts', () => ({ useClaudeCodeAccounts: () => ({ acco
 vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
 vi.mock('./useDeepSeekAccounts', () => ({ useDeepSeekAccounts: () => ({ accounts: [] }) }));
 vi.mock('../../api/tauri', () => ({
+  listOpenDesignAccounts: vi.fn().mockResolvedValue([]),
+  startOpenDesignLogin: vi.fn(),
+  pollOpenDesignLogin: vi.fn(),
+  cancelOpenDesignLogin: vi.fn(),
+  switchOpenDesignAccount: vi.fn(),
+  refreshOpenDesignAccount: vi.fn(),
+  deleteOpenDesignAccount: vi.fn(),
   listClineAccounts: vi.fn().mockResolvedValue([]),
   startClineLogin: vi.fn(),
   pollClineLogin: vi.fn(),

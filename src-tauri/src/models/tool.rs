@@ -230,6 +230,7 @@ pub enum ToolCategory {
     CloudAgent,
     Utility,
     Science,
+    Creative,
     Custom,
 }
 

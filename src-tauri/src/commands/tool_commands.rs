@@ -689,6 +689,39 @@ use crate::services::workbuddy_accounts::{
 
 use crate::services::zcode_accounts::{self, Account as ZCodeAccount, LoginStart as ZCodeLogin};
 
+use crate::services::opendesign_accounts::{
+    self, Account as OpenDesignAccount, LoginStart as OpenDesignLogin,
+};
+
+#[tauri::command]
+pub async fn list_opendesign_accounts() -> Result<Vec<OpenDesignAccount>, String> {
+    opendesign_accounts::list().await
+}
+#[tauri::command]
+pub async fn start_opendesign_login() -> Result<OpenDesignLogin, String> {
+    opendesign_accounts::start_login().await
+}
+#[tauri::command]
+pub async fn poll_opendesign_login(login_id: String) -> Result<Option<OpenDesignAccount>, String> {
+    opendesign_accounts::poll_login(&login_id).await
+}
+#[tauri::command]
+pub fn cancel_opendesign_login(login_id: String) -> Result<(), String> {
+    opendesign_accounts::cancel_login(&login_id)
+}
+#[tauri::command]
+pub async fn switch_opendesign_account(account_id: String) -> Result<OpenDesignAccount, String> {
+    opendesign_accounts::switch(&account_id).await
+}
+#[tauri::command]
+pub async fn refresh_opendesign_account(account_id: String) -> Result<OpenDesignAccount, String> {
+    opendesign_accounts::refresh(&account_id).await
+}
+#[tauri::command]
+pub async fn delete_opendesign_account(account_id: String) -> Result<(), String> {
+    opendesign_accounts::delete(&account_id).await
+}
+
 #[tauri::command]
 pub async fn list_zcode_accounts() -> Result<Vec<ZCodeAccount>, String> {
     zcode_accounts::list().await

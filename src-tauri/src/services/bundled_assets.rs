@@ -178,6 +178,7 @@ pub const INSTALLABLE_TOOL_IDS: &[&str] = &[
     "workbuddy",
     "workbuddyai",
     "zcode",
+    "opendesign",
     "dsh",
 ];
 

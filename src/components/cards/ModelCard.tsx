@@ -18,6 +18,9 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
   // Provider/directory rows do not pass a real modelId. In that case the
   // vendor name must win over model-family words embedded in the title.
   if (!modelIdText) {
+    if (['open design', 'opendesign'].some((kw) => nameText.includes(kw))) {
+      return './icons/tools/opendesign.png';
+    }
     if (['ccvibe', 'cc vibe', 'cc-vibe'].some((kw) => nameText.includes(kw))) {
       return './icons/models/ccvibe.png';
     }

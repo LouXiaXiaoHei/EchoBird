@@ -49,7 +49,8 @@ export type AccountProvider =
   | 'qoderCn'
   | 'grok'
   | 'cline'
-  | 'zcode';
+  | 'zcode'
+  | 'openDesign';
 
 export interface AccountSource {
   provider: AccountProvider;

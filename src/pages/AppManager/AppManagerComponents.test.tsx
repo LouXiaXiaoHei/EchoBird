@@ -10,6 +10,7 @@ import vscodeDefinition from '../../../tools/vscode/paths.json';
 import qoderDefinition from '../../../tools/qoder/paths.json';
 import qoderCnDefinition from '../../../tools/qodercn/paths.json';
 import claudeScienceDefinition from '../../../tools/claudescience/paths.json';
+import openDesignDefinition from '../../../tools/opendesign/paths.json';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { AppManagerContext, type AppManagerContextType } from './context';
 import { AccountSectionRow } from './AccountSectionPrimitives';
@@ -56,6 +57,39 @@ const labels: Partial<Record<TKey, string>> = {
   'agent.badge.smart': '智能',
   'agent.badge.local': '本地',
 };
+
+it('Open Design offers both API protocols and its native official mode in the shared model list', async () => {
+  vi.stubGlobal('__APP_EDITION__', 'full');
+  const { ModelListSection } = await import('./AppManagerComponents');
+  expect(openDesignDefinition.noModelConfig).toBe(false);
+  const markup = renderToStaticMarkup(
+    <ModelListSection
+      selectedToolData={{
+        ...tool,
+        ...openDesignDefinition,
+        id: 'opendesign',
+        category: 'Creative',
+      }}
+      userModels={[
+        models[0],
+        {
+          ...models[0],
+          internalId: 'anthropic-model',
+          name: 'Anthropic API',
+          baseUrl: '',
+          anthropicUrl: 'https://fixture.test/anthropic',
+        },
+      ]}
+      toolModelConfig={{}}
+      selectedTool="opendesign"
+      handleSelectModel={vi.fn()}
+      t={(key) => key}
+    />
+  );
+  expect(markup).toContain('Cloud Model');
+  expect(markup).toContain('Anthropic API');
+  expect(markup).toContain('Open Design Official');
+});
 
 describe('ModelListSection', () => {
   it.each([

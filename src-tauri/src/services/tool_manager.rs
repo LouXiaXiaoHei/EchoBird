@@ -1758,6 +1758,7 @@ fn parse_category(s: &str) -> ToolCategory {
         "Cloud Agent" => ToolCategory::CloudAgent,
         "Utility" => ToolCategory::Utility,
         "Science" => ToolCategory::Science,
+        "Creative" => ToolCategory::Creative,
         _ => ToolCategory::Custom,
     }
 }
@@ -3749,6 +3750,51 @@ mod tests {
         assert!(super::is_windows_exe(&path));
         assert!(path.to_lowercase().ends_with(r"\openscience.exe"), "{path}");
         println!("Detected OpenScience Desktop: {path}");
+    }
+
+    #[test]
+    fn opendesign_catalog_separates_native_installers_from_linux_source_setup() {
+        let definitions = super::load_tool_definitions_with_overrides(false);
+        assert!(definitions.iter().any(|tool| tool.id == "codex"));
+        let tool = definitions
+            .iter()
+            .find(|tool| tool.id == "opendesign")
+            .expect("Open Design must be included by the bundled tool loader");
+        assert!(!tool.paths_config.no_model_config);
+        let definition: crate::models::tool::PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/opendesign/paths.json")).unwrap();
+        assert_eq!(
+            super::parse_category(&definition.category),
+            crate::models::tool::ToolCategory::Creative
+        );
+        assert!(!definition.no_model_config);
+        assert!(definition.paths.win32.unwrap()[0].ends_with("Open Design\\Open Design.exe"));
+        assert!(definition.paths.darwin.unwrap()[0]
+            .ends_with("Open Design.app/Contents/MacOS/Open Design"));
+        assert_eq!(
+            definition.paths.linux.unwrap(),
+            ["~/.local/bin/open-design"]
+        );
+        let install: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/api/tools/install/opendesign.json"
+        ))
+        .unwrap();
+        assert!(install["install"]["linux_download"]
+            .as_str()
+            .unwrap()
+            .contains("no prebuilt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "machine-specific: requires Open Design to be installed"]
+    fn real_registry_finds_opendesign_desktop() {
+        let definition: crate::models::tool::PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/opendesign/paths.json")).unwrap();
+        let path = super::scan_windows_registry(&definition.install_hints.unwrap())
+            .expect("Open Design registry entry should resolve to its executable");
+        assert!(super::is_windows_exe(&path));
+        assert!(path.to_lowercase().ends_with(r"\open design.exe"), "{path}");
     }
 
     // ── tool-paths.json self-heal: a file seeded before a tool shipped (e.g.

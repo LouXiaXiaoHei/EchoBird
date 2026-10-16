@@ -318,6 +318,42 @@ export function deleteClaudeDesktopAccount(accountId: string): Promise<void> {
 }
 
 export type ZCodeProvider = 'bigmodel' | 'zai';
+export interface OpenDesignAccount {
+  id: string;
+  email: string;
+  active: boolean;
+  plan?: string | null;
+  quotaWindows: { label: string; remainingPercent: number; resetAt?: number | null }[];
+  balanceUsd?: number | null;
+  subscriptionEndAt?: number | null;
+}
+export interface OpenDesignLogin {
+  loginId: string;
+  verificationUri: string;
+  expiresAt: number;
+  pollIntervalSeconds: number;
+}
+export function listOpenDesignAccounts(): Promise<OpenDesignAccount[]> {
+  return invoke('list_opendesign_accounts');
+}
+export function startOpenDesignLogin(): Promise<OpenDesignLogin> {
+  return invoke('start_opendesign_login');
+}
+export function pollOpenDesignLogin(loginId: string): Promise<OpenDesignAccount | null> {
+  return invoke('poll_opendesign_login', { loginId });
+}
+export function cancelOpenDesignLogin(loginId: string): Promise<void> {
+  return invoke('cancel_opendesign_login', { loginId });
+}
+export function switchOpenDesignAccount(accountId: string): Promise<OpenDesignAccount> {
+  return invoke('switch_opendesign_account', { accountId });
+}
+export function refreshOpenDesignAccount(accountId: string): Promise<OpenDesignAccount> {
+  return invoke('refresh_opendesign_account', { accountId });
+}
+export function deleteOpenDesignAccount(accountId: string): Promise<void> {
+  return invoke('delete_opendesign_account', { accountId });
+}
 export interface ZCodeAccount {
   id: string;
   email: string;

@@ -24,6 +24,7 @@ pub(crate) mod musecode;
 mod omp;
 mod openclaw;
 mod opencode;
+mod opendesign;
 mod openscience;
 mod pi;
 mod proxy_ports;
@@ -67,6 +68,7 @@ pub use mimocode::mimocode_echobird_model;
 use mimocode::{apply_mimocode, read_mimocode, restore_mimocode_to_official};
 use openclaw::{apply_openclaw, read_openclaw};
 use opencode::{apply_opencode, read_opencode, restore_opencode_to_official};
+pub(crate) use opendesign::restore_for_account as restore_opendesign_account_mode;
 use openscience::{apply_openscience, read_openscience, restore_openscience_to_official};
 use pi::{apply_pi, read_pi, restore_pi_to_official};
 pub(crate) use proxy_ports::migrate_local_proxy_port;
@@ -344,6 +346,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 
         // ZCode keeps model configuration in its selected data directory.
         "zcode" => return apply_zcode(&model_info),
+        "opendesign" => return opendesign::apply(&model_info).await,
 
         // Codex CLI and ChatGPT desktop share ~/.codex/config.toml.
         "codex" | "chatgptdesktop" => return apply_codex(tool_id, &model_info),
@@ -400,6 +403,9 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 /// the tool itself regenerates a fresh, vendor-default config on next launch.
 /// Used by the App Desktop "restore to official" flow.
 pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
+    if tool_id == "opendesign" {
+        return opendesign::restore().await;
+    }
     if tool_id == "claudescience" {
         return claudescience::restore();
     }
@@ -546,6 +552,7 @@ pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
         "openscience" => return read_openscience(),
         "dsh" => return read_dsh(),
         "zcode" => return read_zcode(),
+        "opendesign" => return opendesign::read(),
         "codex" | "chatgptdesktop" => return read_codex(),
         "claudedesktop" => return read_claudedesktop(),
         "claudescience" => return claudescience::read(),

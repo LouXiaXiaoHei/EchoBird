@@ -31,6 +31,9 @@ const METADATA_CACHE_LIMIT: usize = 64;
 const PROJECT_LIFETIME: Duration = Duration::from_secs(30);
 const COPILOT_CATALOG_LIFETIME: Duration = Duration::from_secs(300);
 
+#[cfg(test)]
+mod opendesign_tests;
+
 #[derive(Clone)]
 enum PreparedMetadata {
     Project((String, Option<String>)),
@@ -321,6 +324,7 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             AccountProvider::Antigravity => CODE_ASSIST_BASE,
             AccountProvider::Copilot => "https://api.githubcopilot.com",
             AccountProvider::Kilo => "https://api.kilo.ai/api/openrouter",
+            AccountProvider::OpenDesign => super::super::opendesign_accounts::LINK,
             AccountProvider::ClaudeCode => unreachable!("Claude uses its CLI"),
             AccountProvider::Trae | AccountProvider::Traecn => {
                 unreachable!("Trae uses its own gateway")
@@ -413,6 +417,7 @@ fn signed(
                 .header("HTTP-Referer", "https://kilo.ai")
                 .header("X-Title", "EchoBird");
         }
+        AccountProvider::OpenDesign => {}
         AccountProvider::Cline => {
             request = request
                 .header("HTTP-Referer", "https://cline.bot")
@@ -881,7 +886,7 @@ async fn fetch_models(
             )?)
             .await?
         }
-        AccountProvider::Kilo => {
+        AccountProvider::Kilo | AccountProvider::OpenDesign => {
             json_upstream(signed(
                 client.get(format!("{api}/models")),
                 provider,
@@ -1016,6 +1021,13 @@ async fn wire(
     model: &str,
     client: &reqwest::Client,
 ) -> Result<(WireProtocol, &'static str), ProxyError> {
+    if provider == AccountProvider::OpenDesign {
+        return Ok(match model {
+            "claude-haiku-5.5" | "deepseek-v4-pro" => (WireProtocol::Responses, "/responses"),
+            "glm-5.3-flash" => (WireProtocol::Anthropic, "/messages"),
+            _ => (WireProtocol::Chat, "/chat/completions"),
+        });
+    }
     if provider == AccountProvider::Codex {
         return Ok((WireProtocol::Responses, "/responses"));
     }
@@ -1237,6 +1249,12 @@ pub(super) async fn route(
     } else {
         request
     };
+    let request = if provider == AccountProvider::OpenDesign && protocol == WireProtocol::Anthropic
+    {
+        request.header("x-api-key", access_token(&credentials)?)
+    } else {
+        request
+    };
     let response = request.send().await.map_err(ProxyError::upstream)?;
     let status = response.status();
     if !status.is_success() {
@@ -1281,6 +1299,10 @@ pub(super) async fn route_responses(
                 })
         };
         if !supported {
+            return Ok(None);
+        }
+    } else if provider == AccountProvider::OpenDesign {
+        if wire(provider, &credentials, model, client).await?.0 != WireProtocol::Responses {
             return Ok(None);
         }
     } else if provider != AccountProvider::Codex {

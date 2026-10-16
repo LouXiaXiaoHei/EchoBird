@@ -47,6 +47,7 @@ import * as api from '../../api/tauri';
 import type { ModelConfig, LocalTool } from '../../api/types';
 import type { TKey } from '../../i18n';
 import { useAppManager } from './context';
+import { OpenDesignAccountSection } from './OpenDesignAccountSection';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useModelNexus } from '../ModelNexus/context';
 import {
@@ -111,6 +112,7 @@ const CATEGORY_ORDER = [
   'IDE',
   'CLI Code',
   'Science',
+  'Creative',
   'AutoTrading',
   'Game',
   'Utility',
@@ -157,6 +159,7 @@ const catLabelKey = (cat: string): TKey => {
     'Cloud Agent': 'toolCat.cloudAgent',
     Utility: 'toolCat.utility',
     Science: 'toolCat.science',
+    Creative: 'toolCat.creative',
   };
   return map[cat] || (cat as TKey);
 };
@@ -1098,6 +1101,7 @@ export const AppManagerPanel: React.FC = () => {
             </div>
           ) : (
             <div className="flex h-full flex-col gap-2">
+              {selectedTool === 'opendesign' && <OpenDesignAccountSection showDivider />}
               {showCodexAccounts && (
                 <CodexAccountSection showDivider={hasVisibleModels || showWebSearchToggle} />
               )}
@@ -1195,6 +1199,7 @@ export const AppManagerBottom: React.FC = () => {
     traeAccounts,
     kiroAccounts,
     zcodeAccounts,
+    openDesignAccounts,
     minimaxAccounts,
     qoderAccounts,
     deepSeekAccounts,
@@ -1230,6 +1235,7 @@ export const AppManagerBottom: React.FC = () => {
       !!minimaxAccounts.selectedId) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
+    (selectedTool === 'opendesign' && !!openDesignAccounts.selectedId) ||
     ((selectedTool === 'codex' || selectedTool === 'chatgptdesktop') && !!selectedCodexAccountId) ||
     (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
     (selectedTool === 'claudedesktop' && !!claudeDesktopAccounts.selectedId) ||
@@ -1264,6 +1270,7 @@ export const AppManagerBottom: React.FC = () => {
     !selectedToolData ||
     isLaunching ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
+    (selectedTool === 'opendesign' && openDesignAccounts.busy) ||
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||

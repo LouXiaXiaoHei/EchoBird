@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 export const ACCOUNT_NAME_MASK = '******';
-// Keep the existing Smart Access preference when sharing it with Account Center.
+// Keep the original Smart Access preference across all account views.
 const STORAGE_KEY = 'echobird-router-account-names-hidden';
 
 function readHidden(): boolean {

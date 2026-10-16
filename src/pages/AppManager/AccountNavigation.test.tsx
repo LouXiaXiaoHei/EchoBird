@@ -5,6 +5,7 @@ import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AppManagerProvider } from '../../pages/AppManager/AppManagerProvider';
 import { useAppManager } from '../../pages/AppManager/context';
 import { AppManagerErrorModal, AppManagerPanel, CodexAccountSection } from './AppManagerComponents';
@@ -48,6 +49,13 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 vi.mock('../../api/tauri', () => {
   const names = [
+    'listOpenDesignAccounts',
+    'startOpenDesignLogin',
+    'pollOpenDesignLogin',
+    'cancelOpenDesignLogin',
+    'switchOpenDesignAccount',
+    'refreshOpenDesignAccount',
+    'deleteOpenDesignAccount',
     'listClineAccounts',
     'startClineLogin',
     'pollClineLogin',
@@ -214,6 +222,7 @@ function Harness({
   ) : null;
 }
 const listNames = [
+  'listOpenDesignAccounts',
   'listZCodeAccounts',
   'listCodexAccounts',
   'listClaudeCodeAccounts',
@@ -230,6 +239,7 @@ const listNames = [
   'listAntigravityAccounts',
 ] as const;
 const listFor = {
+  opendesign: 'listOpenDesignAccounts',
   zcode: 'listZCodeAccounts',
   codex: 'listCodexAccounts',
   chatgptdesktop: 'listCodexAccounts',
@@ -250,6 +260,175 @@ const listFor = {
   antigravity: 'listAntigravityAccounts',
   antigravitydesktop: 'listAntigravityAccounts',
 } as const;
+
+const openDesignFixture: api.OpenDesignAccount = {
+  id: 'design-account',
+  email: 'designer@example.test',
+  active: false,
+  plan: 'go',
+  quotaWindows: [
+    { label: '5h', remainingPercent: 75, resetAt: 2_000_000_000 },
+    { label: '7d', remainingPercent: 60, resetAt: 2_000_100_000 },
+  ],
+  balanceUsd: 2.5,
+};
+
+it('Open Design: the actual panel keeps accounts and the official model section together without API models', async () => {
+  await mount('opendesign');
+  await act(async () => {
+    renderer.update(
+      <AppManagerProvider>
+        <Harness panel />
+      </AppManagerProvider>
+    );
+  });
+  const markup = JSON.stringify(renderer.toJSON());
+  expect(markup).toContain('/icons/tools/opendesign.png');
+  expect(markup).toContain('agent.modelSwitch');
+  expect(markup).toContain('Open Design Official');
+  expect(api.applyModelToTool).not.toHaveBeenCalled();
+  expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+});
+
+it('Open Design: account and API selection are exclusive and only explicit apply writes the model', async () => {
+  vi.mocked(api.listOpenDesignAccounts).mockResolvedValue([openDesignFixture]);
+  vi.mocked(api.getModels).mockResolvedValue([
+    {
+      internalId: 'design-model',
+      name: 'Fixture',
+      modelId: 'fixture-model',
+      baseUrl: 'https://fixture.test/v1',
+      apiKey: 'fixture-key',
+    },
+  ]);
+  vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: '' });
+  await mount('opendesign');
+  act(() => state.handleSelectModel('opendesign', 'design-model'));
+  await tick();
+  act(() => state.openDesignAccounts.select(openDesignFixture.id));
+  expect(state.toolModelConfig.opendesign).toBeNull();
+  act(() => state.handleSelectModel('opendesign', 'design-model'));
+  expect(state.openDesignAccounts.selectedId).toBeNull();
+  expect(api.applyModelToTool).not.toHaveBeenCalled();
+  expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+  expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+  act(() => state.setLaunchAfterApply(false));
+  await act(async () => {
+    await state.handleLaunch();
+  });
+  expect(api.applyModelToTool).toHaveBeenCalledWith(
+    'opendesign',
+    expect.objectContaining({ model: 'fixture-model', protocol: 'openai' })
+  );
+  expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+  expect(api.startTool).not.toHaveBeenCalled();
+  expect(folderPicker).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'Open Design: restoring official is explicit and failed restore prevents launch (%s)',
+  async (success) => {
+    await mount('opendesign');
+    act(() => state.handleSelectModel('opendesign', '__official__opendesign'));
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    vi.mocked(api.restoreToolToOfficial).mockResolvedValue({
+      success,
+      message: 'native-settings-error',
+    });
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(api.restoreToolToOfficial).toHaveBeenCalledExactlyOnceWith('opendesign');
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+    if (success) expect(api.startTool).toHaveBeenCalledWith('opendesign', undefined, undefined);
+    else {
+      expect(api.startTool).not.toHaveBeenCalled();
+      expect(state.applyError).toBe('native-settings-error');
+    }
+    expect(folderPicker).not.toHaveBeenCalled();
+  }
+);
+
+it('Open Design: adding only saves the account; explicit apply switches and launches the desktop client', async () => {
+  vi.mocked(api.startOpenDesignLogin).mockResolvedValue({
+    loginId: 'design-login',
+    verificationUri: 'https://open-design.ai/cloud/cli/activate?code=fixture',
+    expiresAt: Date.now() / 1000 + 60,
+    pollIntervalSeconds: 1,
+  });
+  vi.mocked(api.pollOpenDesignLogin).mockResolvedValue(openDesignFixture);
+  await mount('opendesign');
+  vi.mocked(api.listOpenDesignAccounts).mockResolvedValue([openDesignFixture]);
+  await act(async () => {
+    await state.openDesignAccounts.add();
+  });
+  await tick();
+  expect(state.openDesignAccounts.accounts).toEqual([openDesignFixture]);
+  expect(api.openExternal).toHaveBeenCalledWith(
+    'https://open-design.ai/cloud/cli/activate?code=fixture'
+  );
+  expect(api.refreshOpenDesignAccount).not.toHaveBeenCalled();
+  expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+  expect(api.startTool).not.toHaveBeenCalled();
+  act(() => state.openDesignAccounts.select(openDesignFixture.id));
+  await act(async () => {
+    await state.handleLaunch();
+  });
+  expect(api.switchOpenDesignAccount).toHaveBeenCalledExactlyOnceWith(openDesignFixture.id);
+  expect(api.startTool).toHaveBeenCalledExactlyOnceWith('opendesign');
+  expect(api.applyModelToTool).not.toHaveBeenCalled();
+  expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+  expect(folderPicker).not.toHaveBeenCalled();
+});
+
+it('Open Design: passive read failure keeps the cached identity without actions or dialogs', async () => {
+  vi.mocked(api.listOpenDesignAccounts).mockResolvedValueOnce([openDesignFixture]);
+  await mount('opendesign');
+  expect(state.openDesignAccounts.accounts).toEqual([openDesignFixture]);
+  act(() => useNavigationStore.getState().setActivePage('models'));
+  await tick();
+  vi.mocked(api.listOpenDesignAccounts).mockRejectedValueOnce(new Error('accountError.read'));
+  act(() => useNavigationStore.getState().setActivePage('apps'));
+  await tick();
+  expect(state.openDesignAccounts.accounts).toEqual([openDesignFixture]);
+  expect(state.applyError).toBeNull();
+  expect(api.refreshOpenDesignAccount).not.toHaveBeenCalled();
+  expect(api.startOpenDesignLogin).not.toHaveBeenCalled();
+  expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+});
+
+it('Open Design: refresh and delete controls preserve account selection and unknown quota stays unknown', async () => {
+  vi.mocked(api.listOpenDesignAccounts).mockResolvedValue([openDesignFixture]);
+  await mount('opendesign');
+  act(() =>
+    renderer.update(
+      <AppManagerProvider>
+        <Harness panel />
+      </AppManagerProvider>
+    )
+  );
+  act(() => state.openDesignAccounts.select(openDesignFixture.id));
+  vi.mocked(api.refreshOpenDesignAccount).mockResolvedValue({
+    ...openDesignFixture,
+    quotaWindows: [],
+    balanceUsd: null,
+  });
+  const row = () => renderer.root.findByType(AccountSectionRow);
+  expect(renderToStaticMarkup(<>{row().props.secondary}</>)).toContain('75%');
+  await act(async () => {
+    await row().props.onRefresh();
+  });
+  expect(state.openDesignAccounts.selectedId).toBe(openDesignFixture.id);
+  expect(renderToStaticMarkup(<>{row().props.secondary}</>)).toContain('—');
+  expect(api.switchOpenDesignAccount).not.toHaveBeenCalled();
+  vi.mocked(api.deleteOpenDesignAccount).mockResolvedValue(undefined);
+  await act(async () => {
+    await row().props.onDelete();
+  });
+  expect(api.deleteOpenDesignAccount).toHaveBeenCalledWith(openDesignFixture.id);
+  expect(api.startTool).not.toHaveBeenCalled();
+});
 type Tool = keyof typeof listFor;
 async function tick() {
   await act(async () => {
@@ -298,6 +477,7 @@ beforeEach(() => {
   vi.mocked(api.listClineAccounts).mockResolvedValue([]);
   vi.mocked(api.listKiloAccounts).mockResolvedValue([]);
   vi.mocked(api.listCopilotAccounts).mockResolvedValue([]);
+  vi.mocked(api.getModels).mockResolvedValue([]);
   for (const [name, action] of Object.entries(api))
     if (name.startsWith('cancel') && vi.isMockFunction(action)) action.mockResolvedValue(undefined);
   vi.mocked(api.startCodexLogin).mockResolvedValue('fixture-login');
@@ -1232,6 +1412,7 @@ const rewardAccount: api.WorkBuddyAccount = {
 };
 
 const refreshFor = {
+  opendesign: 'refreshOpenDesignAccount',
   codex: 'refreshCodexAccountQuota',
   chatgptdesktop: 'refreshCodexAccountQuota',
   claudecode: 'refreshClaudeCodeAccountQuota',
@@ -2270,6 +2451,7 @@ it.each(Object.keys(listFor) as Tool[])(
 );
 
 const cancelCases = [
+  ['opendesign', 'startOpenDesignLogin', 'pollOpenDesignLogin', 'cancelOpenDesignLogin'],
   ['codex', 'startCodexLogin', 'addCodexAccountViaOAuth', 'cancelCodexLogin'],
   ['chatgptdesktop', 'startCodexLogin', 'addCodexAccountViaOAuth', 'cancelCodexLogin'],
   ['claudecode', 'startClaudeCodeLogin', 'completeClaudeCodeLogin', 'cancelClaudeCodeLogin'],
@@ -2387,6 +2569,10 @@ it.each(Object.keys(listFor) as Tool[])(
     await mount(tool);
     expect(api[listFor[tool]]).toHaveBeenCalledTimes(1);
     const actions = [
+      api.startOpenDesignLogin,
+      api.refreshOpenDesignAccount,
+      api.switchOpenDesignAccount,
+      api.deleteOpenDesignAccount,
       api.startZCodeLogin,
       api.refreshZCodeAccountQuota,
       api.switchZCodeAccount,
@@ -2418,6 +2604,15 @@ it.each(Object.keys(listFor) as Tool[])(
       api.startTool,
     ];
     for (const action of actions) expect(action).not.toHaveBeenCalled();
+    const requests = Object.values(api).flatMap((request) =>
+      vi.isMockFunction(request) ? [[request, request.mock.calls.length] as const] : []
+    );
+    for (const hidden of [true, false]) {
+      act(() => useAccountPrivacyStore.getState().setHidden(hidden));
+      await tick();
+      for (const [request, count] of requests) expect(request).toHaveBeenCalledTimes(count);
+      expect(state.applyError).toBeNull();
+    }
     act(() => state.setViewMode('install'));
     await tick();
     expect(api[listFor[tool]]).toHaveBeenCalledTimes(1);

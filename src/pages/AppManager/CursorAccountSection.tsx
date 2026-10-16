@@ -2,9 +2,11 @@ import React from 'react';
 import { useAppManager } from './context';
 import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimitives';
 import { QuotaCountdown } from './QuotaCountdown';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 
 export const CursorAccountSection: React.FC<{ tool: 'cursor' | 'grokbot' }> = ({ tool }) => {
   const { cursorAccounts, grokBotAccounts, isLaunching } = useAppManager();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
   const {
     accounts,
     selectedId,
@@ -48,7 +50,7 @@ export const CursorAccountSection: React.FC<{ tool: 'cursor' | 'grokbot' }> = ({
                 <span className="flex h-[16px] items-center justify-between">
                   <span
                     role="progressbar"
-                    aria-label={account.email}
+                    aria-label={hidden ? ACCOUNT_NAME_MASK : account.email}
                     aria-valuemin={0}
                     aria-valuemax={100}
                     aria-valuenow={account.usage?.remainingPercent ?? undefined}

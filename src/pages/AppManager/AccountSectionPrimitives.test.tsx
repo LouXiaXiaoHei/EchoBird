@@ -1,7 +1,13 @@
 import React from 'react';
 import { act, create } from 'react-test-renderer';
-import { describe, expect, it, vi } from 'vitest';
-import { AccountSectionButton } from './AccountSectionPrimitives';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  AccountSectionButton,
+  AccountSectionRewardButton,
+  AccountSectionRow,
+} from './AccountSectionPrimitives';
+import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
+import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 
 vi.mock('../../hooks/useI18n', () => ({
   useI18n: () => ({
@@ -69,6 +75,112 @@ describe('account login cancellation button', () => {
         true
       );
       expect(renderer.root.findAllByType('button')).toHaveLength(2);
+    } finally {
+      act(() => renderer.unmount());
+    }
+  });
+});
+
+describe('desktop account privacy', () => {
+  afterEach(() => {
+    useAccountPrivacyStore.setState({ hidden: false });
+  });
+
+  it.each([false, true])(
+    'follows the shared button without changing layout, selection or real actions (single line: %s)',
+    (singleLine) => {
+      const account = { id: 'saved-account', email: 'private@example.test' };
+      const select = vi.fn();
+      const refresh = vi.fn();
+      const remove = vi.fn();
+      const claim = vi.fn();
+      let renderer!: ReturnType<typeof create>;
+      act(() => {
+        renderer = create(
+          <>
+            <AccountPrivacyButton />
+            <AccountSectionRow
+              email={account.email}
+              selected
+              singleLine={singleLine}
+              plan="Pro 100"
+              secondary={<span>69%</span>}
+              onSelect={() => select(account.id)}
+              onRefresh={() => refresh(account)}
+              onDelete={() => remove(account)}
+              leadingAction={
+                <AccountSectionRewardButton
+                  email={account.email}
+                  claimed={false}
+                  onClaim={() => claim(account)}
+                />
+              }
+            />
+          </>
+        );
+      });
+      try {
+        const initial = JSON.stringify(renderer.toJSON());
+        act(() =>
+          renderer.root.findByProps({ 'aria-label': 'freeModels.hideAccountNames' }).props.onClick()
+        );
+        const hidden = JSON.stringify(renderer.toJSON());
+        expect(hidden).not.toContain(account.email);
+        expect(hidden).toContain('******');
+        expect(hidden).toContain('69%');
+        if (!singleLine) expect(hidden).toContain('Pro 100');
+        expect(renderer.root.findByProps({ role: 'radio' }).props['aria-checked']).toBe(true);
+        for (const action of [select, refresh, remove, claim])
+          expect(action).not.toHaveBeenCalled();
+        for (const [label, action] of [
+          ['agent.refreshAccount', refresh],
+          ['btn.delete', remove],
+          ['agent.claimDailyCredits', claim],
+        ] as const) {
+          const stopPropagation = vi.fn();
+          act(() =>
+            renderer.root
+              .findByProps({ 'aria-label': `${label} ******` })
+              .props.onClick({ stopPropagation })
+          );
+          expect(stopPropagation).toHaveBeenCalledOnce();
+          expect(action).toHaveBeenCalledExactlyOnceWith(account);
+          expect(select).not.toHaveBeenCalled();
+        }
+        act(() => renderer.root.findByProps({ role: 'radio' }).props.onClick());
+        expect(select).toHaveBeenCalledExactlyOnceWith(account.id);
+        act(() =>
+          renderer.root.findByProps({ 'aria-label': 'freeModels.showAccountNames' }).props.onClick()
+        );
+        expect(JSON.stringify(renderer.toJSON())).toBe(initial);
+        expect(account).toEqual({ id: 'saved-account', email: 'private@example.test' });
+      } finally {
+        act(() => renderer.unmount());
+      }
+    }
+  );
+
+  it('keeps hidden names on remount while refresh is pending or authorization has failed', () => {
+    useAccountPrivacyStore.setState({ hidden: true });
+    const renderer = create(
+      <AccountSectionRow
+        email="private@example.test"
+        selected={false}
+        refreshing
+        authorizationFailed
+        onSelect={vi.fn()}
+        onRefresh={vi.fn()}
+        onDelete={vi.fn()}
+      />
+    );
+    try {
+      const hidden = JSON.stringify(renderer.toJSON());
+      expect(hidden).not.toContain('private@example.test');
+      expect(hidden).toContain('accountCenter.authFailed');
+      expect(
+        renderer.root.findByProps({ 'aria-label': 'agent.refreshAccount ******' }).props.disabled
+      ).toBe(true);
+      expect(renderer.root.findAllByType(AccountPrivacyButton)).toHaveLength(0);
     } finally {
       act(() => renderer.unmount());
     }

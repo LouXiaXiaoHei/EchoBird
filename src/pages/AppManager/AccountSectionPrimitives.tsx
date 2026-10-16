@@ -2,6 +2,7 @@ import React from 'react';
 import { Check, Gift, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
 import { accountPlanLabel } from './accountPlanLabel';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 
 export const AccountSectionButton: React.FC<{
   iconSrc: string;
@@ -106,10 +107,11 @@ export const AccountSectionRewardButton: React.FC<{
   onClaim: () => void;
 }> = ({ email, claimed, disabled, onClaim }) => {
   const { t } = useI18n();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
   return (
     <button
       type="button"
-      aria-label={`${t(claimed ? 'agent.dailyCreditsClaimed' : 'agent.claimDailyCredits')} ${email}`}
+      aria-label={`${t(claimed ? 'agent.dailyCreditsClaimed' : 'agent.claimDailyCredits')} ${hidden ? ACCOUNT_NAME_MASK : email}`}
       disabled={disabled || claimed}
       onClick={(event) => {
         event.stopPropagation();
@@ -198,6 +200,8 @@ export const AccountSectionRow: React.FC<{
   colorClassName = '',
 }) => {
   const { t } = useI18n();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
+  const identity = hidden ? ACCOUNT_NAME_MASK : email;
   return (
     <div
       role="radio"
@@ -219,7 +223,7 @@ export const AccountSectionRow: React.FC<{
       <span
         className={`grid min-w-0 ${singleLine ? 'grid-cols-[minmax(0,1fr)_auto] gap-2' : 'grid-cols-[minmax(0,1fr)] auto-rows-[16px]'} items-center`}
       >
-        <span className="block truncate text-[13px] font-semibold text-cyber-text">{email}</span>
+        <span className="block truncate text-[13px] font-semibold text-cyber-text">{identity}</span>
         <span className="flex h-[16px] items-center gap-2 text-[12px] leading-[16px] text-cyber-text">
           {authorizationFailed ? (
             <span role="status" className="truncate font-semibold">
@@ -244,7 +248,7 @@ export const AccountSectionRow: React.FC<{
         >
           {leadingAction}
           <AccountSectionActions
-            email={email}
+            email={identity}
             refreshing={refreshing}
             onRefresh={onRefresh}
             onDelete={onDelete}

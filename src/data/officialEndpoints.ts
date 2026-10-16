@@ -28,6 +28,11 @@ export const isOfficialModelSentinel = (id: string | null | undefined) =>
   typeof id === 'string' && id.startsWith('__official__');
 
 export const OFFICIAL_ENDPOINTS: Record<string, OfficialEndpoint> = {
+  opendesign: {
+    name: 'Open Design Official',
+    baseUrl: 'https://amr-link.open-design.ai/v1',
+    protocol: 'openai',
+  },
   claudecode: {
     name: 'Anthropic Official',
     baseUrl: 'https://api.anthropic.com',

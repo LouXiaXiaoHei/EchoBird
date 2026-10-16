@@ -4,11 +4,13 @@ import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimiti
 import { QuotaCountdown } from './QuotaCountdown';
 import { isFreePlan } from './accountPlanLabel';
 import { useI18n } from '../../hooks/useI18n';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 
 export const ManusAccountSection: React.FC<{ tool?: 'manus' | 'cue' }> = ({ tool = 'manus' }) => {
   const { manusAccounts, cueAccounts, isLaunching } = useAppManager();
   const accounts = tool === 'cue' ? cueAccounts : manusAccounts;
   const { t } = useI18n();
+  const hidden = useAccountPrivacyStore((state) => state.hidden);
   return (
     <section>
       <AccountSectionButton
@@ -59,7 +61,7 @@ export const ManusAccountSection: React.FC<{ tool?: 'manus' | 'cue' }> = ({ tool
                     >
                       <span
                         role="progressbar"
-                        aria-label={`7d ${account.email}`}
+                        aria-label={`7d ${hidden ? ACCOUNT_NAME_MASK : account.email}`}
                         aria-valuemin={0}
                         aria-valuemax={100}
                         aria-valuenow={weekly.remainingPercent ?? undefined}

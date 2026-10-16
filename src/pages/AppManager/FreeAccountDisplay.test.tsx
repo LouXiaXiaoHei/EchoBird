@@ -1,4 +1,5 @@
 import { renderToStaticMarkup } from 'react-dom/server';
+import { act, create } from 'react-test-renderer';
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { AppManagerContextType } from './context';
 import { AccountCard } from '../AccountCenter/AccountCenter';
@@ -16,6 +17,10 @@ import { ClientAccountSection } from './ClientAccountSection';
 import { DeepSeekAccountSection } from './DeepSeekAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
+import { OpenDesignAccountSection } from './OpenDesignAccountSection';
+import { KiroAccountSection } from './KiroAccountSection';
+import { TraeAccountSection } from './TraeAccountSection';
+import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { en } from '../../i18n/en';
 import zhHans from '../../i18n/zh-Hans';
 
@@ -71,6 +76,7 @@ const row = () => ({
   credits: null,
 });
 beforeEach(() => {
+  useAccountPrivacyStore.setState({ hidden: false });
   missingLabel = 'model.noUsageData';
   const account = row();
   const group = {
@@ -118,6 +124,7 @@ beforeEach(() => {
     traeAccountGroups: { trae: { ...group, accounts: [] }, traecn: { ...group, accounts: [] } },
     kiroAccounts: { ...group, accounts: [] },
     zcodeAccounts: { ...group, provider: 'bigmodel', setProvider: vi.fn() },
+    openDesignAccounts: { ...group },
     minimaxAccounts: { ...group, region: 'cn', setRegion: vi.fn() },
     qoderAccounts: group,
     qoderAccountGroups: { qoder: group, qodercn: emptyGroup },
@@ -131,6 +138,57 @@ function markup(tool: Tool) {
     renderToStaticMarkup(<AccountCard provider={provider} account={provider.accounts[0]} />),
   ];
 }
+const privacySections = {
+  ...sections,
+  opendesign: () => <OpenDesignAccountSection />,
+  kiro: () => <KiroAccountSection />,
+  trae: () => <TraeAccountSection />,
+};
+it.each(Object.keys(privacySections) as (keyof typeof privacySections)[])(
+  '%s: follows global privacy without an extra desktop button or passive account actions',
+  (tool) => {
+    Object.assign(state.codexAccounts[0], {
+      quotaPercent: 69,
+      usage: { plan: 'FREE', remainingPercent: 69, resetAt: null },
+      weekly: { remainingPercent: 69, resetAt: null },
+    });
+    Object.assign(state.kiroAccounts, { accounts: [{ ...state.codexAccounts[0], quota: [] }] });
+    Object.assign(state, { traeAccounts: state.workBuddyAccounts });
+    let renderer!: ReturnType<typeof create>;
+    act(() => {
+      renderer = create(privacySections[tool]());
+    });
+    try {
+      const visible = JSON.stringify(renderer.toJSON());
+      expect(visible).toMatch(/free@example.test|Free user/);
+      act(() => useAccountPrivacyStore.getState().setHidden(true));
+      const hidden = JSON.stringify(renderer.toJSON());
+      expect(hidden).not.toContain('free@example.test');
+      expect(hidden).not.toContain('Free user');
+      expect(hidden).toContain('******');
+      expect(hidden).not.toContain('freeModels.showAccountNames');
+      expect(hidden).not.toContain('freeModels.hideAccountNames');
+      for (const action of [
+        state.addCodexAccount,
+        state.setSelectedCodexAccountId,
+        state.refreshCodexAccountQuota,
+        state.deleteCodexAccount,
+        state.workBuddyAccounts.add,
+        state.workBuddyAccounts.select,
+        state.workBuddyAccounts.refresh,
+        state.workBuddyAccounts.remove,
+        state.workBuddyAccounts.claimDaily,
+      ])
+        expect(action).not.toHaveBeenCalled();
+      act(() => useAccountPrivacyStore.getState().setHidden(false));
+      expect(JSON.stringify(renderer.toJSON())).toBe(visible);
+      expect(state.codexAccounts[0].email).toBe('free@example.test');
+    } finally {
+      act(() => renderer.unmount());
+      useAccountPrivacyStore.setState({ hidden: false });
+    }
+  }
+);
 it.each(Object.keys(sections) as Tool[])(
   '%s: shows Free and the shared missing-usage message in both account views',
   (tool) => {

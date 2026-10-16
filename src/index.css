@@ -709,7 +709,8 @@ img[src*='/icons/tools/openscience.svg'] {
 img[src$='/icons/tools/cue.png'],
 img[src$='/icons/tools/muse.png'],
 img[src$='/icons/tools/antigravity.png'],
-img[src$='/icons/tools/antigravitydesktop.png'] {
+img[src$='/icons/tools/antigravitydesktop.png'],
+img[src$='/icons/tools/opendesign.png'] {
   transform: scale(1.24);
 }
 
