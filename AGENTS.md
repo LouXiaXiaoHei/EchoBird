@@ -25,6 +25,9 @@ runtime. Prettier governs the frontend JSON/TS; rustfmt governs `src-tauri/`.
 - For integration work, read `internal-docs/integration-memory.md` when present
   (local-only feedback). Recheck current code; older notes may describe retired
   layouts or an earlier, incomplete implementation.
+- Before adding or extending a tool integration, also read
+  `docs/tool-integration-playbook.md` and record the platform capability table
+  before changing code.
 - Before adding a feature similar to one already in the app, identify the
   reference files and trace the full interaction through handlers, effects,
   and backend calls. Compare loading, selection, refresh, errors, and saved
