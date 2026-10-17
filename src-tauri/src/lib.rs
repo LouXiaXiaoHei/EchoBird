@@ -10,6 +10,7 @@ pub mod commands;
 pub mod models;
 pub mod services;
 pub mod utils;
+mod window_visibility;
 
 use commands::account_proxy_commands;
 use commands::cline_account_commands;
@@ -447,7 +448,7 @@ pub fn rebuild_tray_menu(app: &tauri::AppHandle) {
 /// (paired with `show_main_window` which restores Regular policy).
 pub(crate) fn hide_main_window(app_handle: &tauri::AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.hide();
+        let _ = window_visibility::hide_main_window(window);
     }
     #[cfg(target_os = "macos")]
     {
@@ -467,6 +468,7 @@ fn show_main_window(app_handle: &tauri::AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        window_visibility::publish(&window);
     }
 }
 
@@ -1023,6 +1025,12 @@ pub fn run() {
                 win.on_window_event(move |event| {
                     if matches!(
                         event,
+                        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Focused(_)
+                    ) {
+                        window_visibility::publish(&win_handle);
+                    }
+                    if matches!(
+                        event,
                         tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
                     ) {
                         if !win_handle.is_visible().unwrap_or(true) {
@@ -1055,6 +1063,7 @@ pub fn run() {
                                 let _ = win.center();
                                 let _ = win.show();
                                 let _ = win.set_focus();
+                                window_visibility::publish(&win);
                             }
                         }
                     });
@@ -1065,6 +1074,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             mod_stub::app_ready,
+            window_visibility::get_main_window_visibility,
+            window_visibility::hide_main_window,
             mod_stub::read_log_tail,
             tool_commands::scan_tools,
             tool_commands::list_antigravity_accounts,

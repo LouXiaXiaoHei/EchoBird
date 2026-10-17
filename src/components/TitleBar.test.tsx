@@ -8,19 +8,26 @@ const windowApi = vi.hoisted(() => ({
   startDragging: vi.fn(async () => {}),
   minimize: vi.fn(async () => {}),
   maximize: vi.fn(async () => {}),
-  hide: vi.fn(async () => {}),
   destroy: vi.fn(async () => {}),
 }));
-vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowApi }));
-vi.mock('../api/tauri', () => ({
-  getSettings: async () => ({ closeWindowBehaviorSet: true, closeToTray: false }),
+const lifecycleApi = vi.hoisted(() => ({
+  hideMainWindow: vi.fn(async () => {}),
+  getSettings: vi.fn(),
 }));
+vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => windowApi }));
+vi.mock('../api/tauri', () => lifecycleApi);
 vi.mock('../utils/platform', () => ({ IS_MACOS: false }));
 vi.mock('../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('./CloseWindowDialog', () => ({ CloseWindowDialog: () => null }));
 
 let view: ReactTestRenderer;
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  lifecycleApi.getSettings.mockResolvedValue({
+    closeWindowBehaviorSet: true,
+    closeToTray: false,
+  });
+});
 afterEach(() => act(() => view?.unmount()));
 
 it('keeps left-button dragging on the blank title area and excludes nested controls', async () => {
@@ -60,12 +67,29 @@ it('keeps header actions and native window controls independent of dragging', as
     changelog,
     feedback,
     settings,
-    windowApi.hide,
+    lifecycleApi.hideMainWindow,
     windowApi.minimize,
     windowApi.maximize,
     windowApi.destroy,
   ]) {
     expect(action).toHaveBeenCalledTimes(1);
   }
+  expect(windowApi.startDragging).not.toHaveBeenCalled();
+});
+
+it('uses the native visibility bridge when closing to the tray', async () => {
+  lifecycleApi.getSettings.mockResolvedValue({
+    closeWindowBehaviorSet: true,
+    closeToTray: true,
+  });
+  await act(async () => {
+    view = create(<TitleBar />);
+  });
+  const buttons = view.root.findAllByType('button');
+  await act(async () => {
+    await buttons[buttons.length - 1].props.onClick();
+  });
+  expect(lifecycleApi.hideMainWindow).toHaveBeenCalledTimes(1);
+  expect(windowApi.destroy).not.toHaveBeenCalled();
   expect(windowApi.startDragging).not.toHaveBeenCalled();
 });

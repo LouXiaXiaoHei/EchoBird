@@ -11,6 +11,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { IS_MACOS } from './utils/platform';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ERROR_MESSAGES, pickErrorLang } from './components/errorMessages';
+import { initializeWindowVisibility } from './utils/windowVisibility';
 
 // ── Object.hasOwn polyfill ───────────────────────────────────────────────────
 // ES2022 runtime API; native in Safari 15.4+ (macOS 12.3+), absent in Safari
@@ -160,6 +161,8 @@ function renderBootError(err: unknown): void {
 }
 
 async function bootAndRender(): Promise<void> {
+  const disposeWindowVisibility = initializeWindowVisibility();
+  import.meta.hot?.dispose(disposeWindowVisibility);
   const [locale, , , disposeUiScale] = await Promise.all([
     bootI18n(),
     bootFonts(),
@@ -184,7 +187,7 @@ async function bootAndRender(): Promise<void> {
         if (closeToTray) {
           // Prevent default close and hide window instead
           event.preventDefault();
-          await win.hide();
+          await api.hideMainWindow();
         }
         // Otherwise let the window close normally
       } catch (err) {

@@ -76,6 +76,7 @@ import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
+import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
@@ -1256,6 +1257,7 @@ function routeCatalogBinding(model: RouteModelNode) {
 
 export function FreeModelsMain() {
   const { t } = useI18n();
+  const docVisible = useDocumentVisible();
   const { showToast } = useToast();
   const confirm = useConfirm();
   const { updateUserModel, handleCardEdit } = useModelNexus();
@@ -1589,7 +1591,7 @@ export function FreeModelsMain() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!routerEnabled) return;
+    if (!routerEnabled || !docVisible) return;
     let errorReported = false;
     const pollActivity = async () => {
       try {
@@ -1611,7 +1613,7 @@ export function FreeModelsMain() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [routerEnabled]);
+  }, [routerEnabled, docVisible]);
 
   const setNodeRef = useCallback((id: string, node: HTMLDivElement | null) => {
     if (node) nodeRefs.current.set(id, node);

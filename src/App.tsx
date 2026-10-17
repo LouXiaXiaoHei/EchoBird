@@ -16,7 +16,7 @@ import { TitleBar } from './components/TitleBar';
 import { AppBackground } from './components/AppBackground';
 import { SettingsDialog } from './components/SettingsDialog';
 import { ChangelogDialog } from './components/ChangelogDialog';
-import { getSettings } from './api/tauri';
+import { getSettings, hideMainWindow } from './api/tauri';
 
 import { useI18n } from './hooks/useI18n';
 
@@ -208,7 +208,7 @@ function AppContent() {
         if (closeToTray) {
           // Prevent default close and hide window instead
           event.preventDefault();
-          await win.hide();
+          await hideMainWindow();
         }
         // Otherwise let the window close normally
       });

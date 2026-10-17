@@ -151,7 +151,10 @@ describe('Remove router candidates by dragging', () => {
     savedOrder = savedModels.map((model) => model.internalId);
     dropState.isOver = false;
     vi.stubGlobal('window', { setInterval, clearInterval, setTimeout });
-    vi.stubGlobal('document', { body: {} });
+    vi.stubGlobal(
+      'document',
+      Object.assign(new EventTarget(), { body: {}, visibilityState: 'visible' })
+    );
     vi.stubGlobal('requestAnimationFrame', () => 1);
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
     vi.spyOn(console, 'error').mockImplementation(() => undefined);

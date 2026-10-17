@@ -308,6 +308,7 @@ describe('Direct route card model selection', () => {
     });
     vi.stubGlobal('document', {
       body: {},
+      visibilityState: 'visible',
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     });

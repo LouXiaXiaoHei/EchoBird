@@ -189,7 +189,10 @@ describe('Smart Router list layout and candidate pause', () => {
       setItem: (key: string, value: string) => storage.set(key, value),
     });
     vi.stubGlobal('window', { setInterval, clearInterval, setTimeout });
-    vi.stubGlobal('document', { body: {} });
+    vi.stubGlobal(
+      'document',
+      Object.assign(new EventTarget(), { body: {}, visibilityState: 'visible' })
+    );
     vi.stubGlobal('requestAnimationFrame', () => 1);
     vi.stubGlobal('cancelAnimationFrame', vi.fn());
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -296,6 +299,33 @@ describe('Smart Router list layout and candidate pause', () => {
     expect(confirm).not.toHaveBeenCalled();
     expect(storage.get('echobird-router-layout')).toBe('list');
     noModelWrites();
+  });
+
+  it('pauses activity polling while hidden and resumes without changing routing', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('window', { setInterval, clearInterval, setTimeout });
+    await open();
+    expect(api.getSmartRouterActivity).toHaveBeenCalledOnce();
+    await act(async () => {
+      Object.assign(document, { visibilityState: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(api.getSmartRouterActivity).toHaveBeenCalledOnce();
+    await act(async () => {
+      Object.assign(document, { visibilityState: 'visible' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(api.getSmartRouterActivity).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      vi.advanceTimersByTime(750);
+    });
+    expect(api.getSmartRouterActivity).toHaveBeenCalledTimes(3);
+    expect(api.setSmartRouterEnabled).not.toHaveBeenCalled();
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
   });
 
   it('keeps activity polling across layouts and stops it on leaving the page', async () => {

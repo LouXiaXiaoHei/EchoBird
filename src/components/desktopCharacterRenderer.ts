@@ -1,3 +1,5 @@
+import { getNativeWindowFocused, subscribeWindowVisibility } from '../utils/windowVisibility';
+
 // A fixed glyph grid lit by drifting, curled ribbons. One instanced draw keeps
 // the ambient effect off the React render path and avoids a full-size simulation.
 const VERTEX = `#version 300 es
@@ -99,6 +101,7 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
       antialias: false,
       depth: false,
       powerPreference: 'low-power',
+      failIfMajorPerformanceCaveat: true,
     });
   } catch {
     return null;
@@ -109,6 +112,9 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
   let program: WebGLProgram | null = null;
   let atlas: WebGLTexture | null = null;
   let frame = 0;
+  let timer: number | undefined;
+  let fence: WebGLSync | null = null;
+  let removeActivityListeners: (() => void) | undefined;
   let disposed = false;
   let observer: ResizeObserver | null = null;
   let theme: MutationObserver | null = null;
@@ -121,16 +127,29 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
     if (disposed) return;
     disposed = true;
     cancelAnimationFrame(frame);
+    window.clearTimeout(timer);
+    removeActivityListeners?.();
     observer?.disconnect();
     theme?.disconnect();
     canvas.removeEventListener('webglcontextlost', onContextLost);
     shaders.forEach((shader) => context.deleteShader(shader));
     context.deleteTexture(atlas);
     context.deleteProgram(program);
+    if (fence) context.deleteSync(fence);
     if (!context.isContextLost()) context.getExtension('WEBGL_lose_context')?.loseContext();
   };
 
   try {
+    const rendererInfo = context.getExtension('WEBGL_debug_renderer_info');
+    if (
+      rendererInfo &&
+      /swiftshader|llvmpipe|softpipe|software|warp|basic render/i.test(
+        String(context.getParameter(rendererInfo.UNMASKED_RENDERER_WEBGL))
+      )
+    ) {
+      release();
+      return null;
+    }
     for (const [type, source] of [
       [context.VERTEX_SHADER, VERTEX],
       [context.FRAGMENT_SHADER, FRAGMENT],
@@ -194,9 +213,75 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
     let seed = 1;
     let targetSeed = 1;
     let origin = { x: 0.5, y: 0.5 };
-    const start = performance.now();
-    let selectedAt = start;
-    let lastFrame = -Infinity;
+    let time = 0;
+    let selectedAt = 0;
+    let lastTick = performance.now();
+    let idleDeadline = lastTick + 180_000;
+    let calm = false;
+    let faults = 0;
+    let slowFrames = 0;
+    let gpuLate = 0;
+    let draws = 0;
+    let lateFrames: boolean[] = [];
+    let retryAt = 0;
+    let retryDelay = 60_000;
+    const foreground = () =>
+      document.visibilityState === 'visible' && (getNativeWindowFocused() ?? document.hasFocus());
+    const cancel = () => {
+      window.clearTimeout(timer);
+      timer = undefined;
+      cancelAnimationFrame(frame);
+      frame = 0;
+    };
+    const schedule = () => {
+      if (disposed || calm || !foreground() || frame || timer !== undefined) return;
+      timer = window.setTimeout(
+        () => {
+          timer = undefined;
+          if (disposed || !foreground()) return;
+          if (retryAt) {
+            retryAt = 0;
+            faults = slowFrames = gpuLate = 0;
+            lateFrames = [];
+            lastTick = performance.now();
+            idleDeadline = lastTick + 180_000;
+          }
+          frame = requestAnimationFrame(draw);
+        },
+        retryAt ? Math.max(0, retryAt - performance.now()) : faults ? 83 : 40
+      );
+    };
+    const backoff = () => {
+      if (retryAt) return;
+      retryAt = performance.now() + retryDelay;
+      retryDelay = Math.min(480_000, retryDelay * 2);
+      cancel();
+    };
+    const noteLag = () => {
+      if (++faults >= 2) backoff();
+    };
+    const wake = () => {
+      if (disposed || !foreground()) return;
+      idleDeadline = performance.now() + 180_000;
+      if (calm) {
+        calm = false;
+        lastTick = performance.now();
+      }
+      schedule();
+    };
+    const onVisibility = () => {
+      if (!foreground()) cancel();
+      else {
+        lastTick = performance.now();
+        wake();
+      }
+    };
+    const redraw = () => {
+      if (disposed || !foreground() || retryAt || frame) return;
+      window.clearTimeout(timer);
+      timer = undefined;
+      frame = requestAnimationFrame(draw);
+    };
     let color: [number, number, number, number];
     const refreshTheme = () => {
       const style = getComputedStyle(document.documentElement);
@@ -209,7 +294,10 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
       );
     };
     refreshTheme();
-    theme = new MutationObserver(refreshTheme);
+    theme = new MutationObserver(() => {
+      refreshTheme();
+      redraw();
+    });
     theme.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['data-theme', 'style'],
@@ -223,43 +311,95 @@ export function createCharacterRenderer(canvas: HTMLCanvasElement): CharacterRen
         1.5,
         Math.sqrt(4_000_000 / (width * height))
       );
-      canvas.width = Math.round(width * dpr);
-      canvas.height = Math.round(height * dpr);
+      const pixelWidth = Math.round(width * dpr);
+      const pixelHeight = Math.round(height * dpr);
+      if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+      if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
       // Keep the glyph count bounded on large displays, independently of DPR.
       const cell = Math.max(8, Math.sqrt((width * height) / 32000));
       columns = Math.max(1, Math.floor(width / cell));
       rows = Math.max(1, Math.floor(height / (cell * 2)));
       context.viewport(0, 0, canvas.width, canvas.height);
     };
-    observer = new ResizeObserver(resize);
+    observer = new ResizeObserver(() => {
+      resize();
+      redraw();
+    });
     observer.observe(canvas);
     resize();
     const draw = (now: number) => {
-      if (disposed) return;
-      frame = requestAnimationFrame(draw);
-      if (now - lastFrame < 40) return;
-      const delta = Math.min(100, now - (Number.isFinite(lastFrame) ? lastFrame : now));
-      lastFrame = now;
+      frame = 0;
+      if (disposed || !foreground()) return;
+      const started = performance.now();
+      const delta = Math.min(100, Math.max(0, started - lastTick));
+      lastTick = started;
+      const settling = Math.min(1, Math.max(0, (started - idleDeadline) / 8000));
+      time += (delta / 1000) * (1 - settling * settling * (3 - 2 * settling));
       seed += (targetSeed - seed) * (1 - Math.exp(-delta / 1800));
       context.uniform2f(uniforms.size, width, height);
       context.uniform2f(uniforms.grid, columns, rows);
       context.uniform2f(uniforms.origin, origin.x, origin.y);
-      context.uniform1f(uniforms.time, (now - start) / 1000);
-      context.uniform1f(uniforms.age, (now - selectedAt) / 1000);
+      context.uniform1f(uniforms.time, time);
+      context.uniform1f(uniforms.age, time - selectedAt);
       context.uniform1f(uniforms.seed, seed);
       context.uniform1f(uniforms.glyphSeed, targetSeed);
       context.uniform4f(uniforms.ink, ...color);
       context.drawArraysInstanced(context.TRIANGLE_STRIP, 0, 4, columns * rows);
+      if (fence) {
+        gpuLate =
+          context.getSyncParameter(fence, context.SYNC_STATUS) === context.SIGNALED
+            ? 0
+            : gpuLate + 1;
+        context.deleteSync(fence);
+        fence = null;
+        if (gpuLate >= 2) {
+          gpuLate = 0;
+          noteLag();
+        }
+      }
+      if (++draws % 4 === 0) {
+        fence = context.fenceSync(context.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        context.flush();
+      }
+      lateFrames = [...lateFrames.slice(-9), started - now > 17];
+      if (lateFrames.filter(Boolean).length >= 5) {
+        lateFrames = [];
+        noteLag();
+      }
+      slowFrames = performance.now() - started > 50 ? slowFrames + 1 : 0;
+      if (slowFrames >= 3) backoff();
+      if (settling === 1) {
+        calm = true;
+        retryDelay = 60_000;
+      }
+      schedule();
     };
     canvas.addEventListener('webglcontextlost', onContextLost);
-    frame = requestAnimationFrame(draw);
+    window.addEventListener('focus', onVisibility);
+    window.addEventListener('blur', onVisibility);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pointermove', wake, { passive: true });
+    window.addEventListener('pointerdown', wake, { passive: true });
+    window.addEventListener('keydown', wake);
+    const unsubscribeNative = subscribeWindowVisibility(onVisibility);
+    removeActivityListeners = () => {
+      unsubscribeNative();
+      window.removeEventListener('focus', onVisibility);
+      window.removeEventListener('blur', onVisibility);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pointermove', wake);
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+    schedule();
     return {
       select(id, position) {
         let hash = 0;
         for (const character of id) hash = (Math.imul(hash, 31) + character.charCodeAt(0)) | 0;
         targetSeed = ((hash >>> 0) % 9700) / 2425;
         origin = position;
-        selectedAt = performance.now();
+        selectedAt = time;
+        wake();
       },
       dispose: release,
     };

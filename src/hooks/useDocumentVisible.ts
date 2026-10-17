@@ -1,17 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
+import { getNativeWindowVisible, subscribeWindowVisibility } from '../utils/windowVisibility';
 
 /**
- * True while the document is visible — false when the window is hidden
- * (minimized, occluded, or the user switched to another app/desktop).
- *
- * Browsers throttle background-tab timers, but Tauri's webview keeps
- * `setInterval` / `requestAnimationFrame` running at full cadence when the
- * window is merely occluded, so explicit visibility gating is required to
- * actually pause background work. Pairs with page-active gating to cover the
- * CSS-hidden-page case within the app; this hook covers the window-hidden
- * case (the bigger waste — polls that run for hours while the user is away).
+ * Combines document visibility with native hide/minimize state. WebView2
+ * can report a visible document even when its parent window is hidden.
+ * Focus alone does not determine whether UI polling should continue.
  */
 export function useDocumentVisible(): boolean {
+  const nativeVisible = useSyncExternalStore(
+    subscribeWindowVisibility,
+    getNativeWindowVisible,
+    getNativeWindowVisible
+  );
   const [visible, setVisible] = useState(
     () => typeof document !== 'undefined' && document.visibilityState === 'visible'
   );
@@ -20,5 +20,5 @@ export function useDocumentVisible(): boolean {
     document.addEventListener('visibilitychange', onChange);
     return () => document.removeEventListener('visibilitychange', onChange);
   }, []);
-  return visible;
+  return visible && nativeVisible;
 }

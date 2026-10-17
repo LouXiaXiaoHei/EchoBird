@@ -185,6 +185,10 @@ export async function appReady(): Promise<void> {
   return invoke('app_ready');
 }
 
+export async function hideMainWindow(): Promise<void> {
+  return invoke('hide_main_window');
+}
+
 /// Read the last `lines` lines from EchoBird's backend log file — used
 /// by the "问题反馈 / Feedback" page's copy-to-clipboard button so users
 /// can paste recent logs into a GitHub issue.

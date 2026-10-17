@@ -22,6 +22,7 @@ pub async fn app_ready(app: tauri::AppHandle) {
             let _ = main.center();
             let _ = main.show();
             let _ = main.set_focus();
+            crate::window_visibility::publish(&main);
         }
     }
     #[cfg(target_os = "android")]

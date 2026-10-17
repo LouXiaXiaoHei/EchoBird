@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Settings, Minus, Maximize2, Minimize2, X } from 'lucide-react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { getSettings, saveSettings } from '../api/tauri';
+import { getSettings, hideMainWindow, saveSettings } from '../api/tauri';
 import { CloseWindowDialog } from './CloseWindowDialog';
 import { useI18n } from '../hooks/useI18n';
 import { IS_MACOS } from '../utils/platform';
@@ -20,9 +20,9 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 }) => {
   const { t } = useI18n();
   const handleMinimize = () => getCurrentWindow().minimize();
-  // One-click hide to tray. Reuses the same getCurrentWindow().hide() call as
+  // One-click hide to tray. Reuses the same native hide command as
   // the X-button's "tray" choice in handleClose, so tray-restore is identical.
-  const handleMinimizeToTray = () => getCurrentWindow().hide();
+  const handleMinimizeToTray = () => hideMainWindow();
   const [isMaximized, setIsMaximized] = useState(false);
   const [showCloseDialog, setShowCloseDialog] = useState(false);
 
@@ -69,7 +69,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 
     if (closeToTray) {
       // Hide window to tray instead of closing
-      await win.hide();
+      await hideMainWindow();
     } else {
       // Close the window normally
       win.destroy();
@@ -103,7 +103,7 @@ export const TitleBar: React.FC<TitleBarProps> = ({
 
     // Execute the chosen action (one-time when in "always ask" mode)
     if (choice === 'tray') {
-      await win.hide();
+      await hideMainWindow();
     } else {
       win.destroy();
     }
