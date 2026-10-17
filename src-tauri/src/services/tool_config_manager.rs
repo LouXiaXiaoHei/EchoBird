@@ -16,7 +16,7 @@ pub(crate) mod dsh;
 mod generic;
 mod grok;
 mod kilo;
-mod kimicode;
+pub(crate) mod kimicode;
 mod mimocode;
 mod mimodesktop;
 pub(crate) mod minimaxcode;

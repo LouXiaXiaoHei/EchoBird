@@ -13,6 +13,7 @@ import { WorkBuddyAccountSection } from './WorkBuddyAccountSection';
 import { TraeAccountSection } from './TraeAccountSection';
 import { KiroAccountSection } from './KiroAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
+import { KimiAccountSection } from './KimiAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
@@ -1076,6 +1077,9 @@ export const AppManagerPanel: React.FC = () => {
                 <ClientAccountSection provider="copilot" showDivider={hasVisibleModels} />
               )}
               {selectedTool === 'zcode' && <ZCodeAccountSection showDivider={hasVisibleModels} />}
+              {['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && (
+                <KimiAccountSection showDivider={hasVisibleModels} />
+              )}
               {(selectedTool === 'minimaxcode' || selectedTool === 'minimaxdesktop') && (
                 <MinimaxAccountSection showDivider={hasVisibleModels} />
               )}
@@ -1157,6 +1161,7 @@ export const AppManagerBottom: React.FC = () => {
     traeAccounts,
     kiroAccounts,
     zcodeAccounts,
+    kimiAccounts,
     openDesignAccounts,
     minimaxAccounts,
     qoderAccounts,
@@ -1193,6 +1198,7 @@ export const AppManagerBottom: React.FC = () => {
       !!minimaxAccounts.selectedId) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
+    (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && !!kimiAccounts.selectedId) ||
     (selectedTool === 'opendesign' && !!openDesignAccounts.selectedId) ||
     ((selectedTool === 'codex' || selectedTool === 'chatgptdesktop') && !!selectedCodexAccountId) ||
     (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
@@ -1228,6 +1234,7 @@ export const AppManagerBottom: React.FC = () => {
     !selectedToolData ||
     isLaunching ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
+    (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && kimiAccounts.busy) ||
     (selectedTool === 'opendesign' && openDesignAccounts.busy) ||
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||

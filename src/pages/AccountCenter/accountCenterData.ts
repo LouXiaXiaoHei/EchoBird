@@ -17,6 +17,7 @@ import {
 } from '../AppManager/qoderAccountDisplay';
 import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
 import { clineBalanceLabel } from '../AppManager/clineAccountDisplay';
+import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
 
 export interface AccountMetric {
   label: string;
@@ -552,6 +553,40 @@ export function accountCenterProviders(
         context.zcodeAccounts.provider === 'bigmodel'
           ? 'https://bigmodel.cn/glm-coding'
           : 'https://z.ai/subscribe',
+    },
+    {
+      ...provider(
+        'kimi',
+        'Kimi',
+        '/icons/tools/kimidesktop.png',
+        ['kimicode', 'kimidesktop'],
+        context.kimiAccounts,
+        (account) => {
+          const metrics = account.quotaWindows.map((window) =>
+            quota(window.remainingPercent, window.resetAt, kimiQuotaLabel(window.name, t))
+          );
+          if (account.wallet)
+            metrics.push({
+              ...credits(t('model.balance'), account.wallet.remaining, account.wallet.total),
+              value: account.wallet.currency
+                ? new Intl.NumberFormat(locale, {
+                    style: 'currency',
+                    currency: account.wallet.currency,
+                  }).format(account.wallet.remaining)
+                : number(account.wallet.remaining),
+            });
+          return {
+            identity: account.email,
+            detail: account.region === 'cn' ? 'kimi.com' : 'kimi.ai',
+            plan: account.plan,
+            metrics: metrics.length ? metrics : [quota()],
+          };
+        }
+      ),
+      website:
+        context.kimiAccounts.region === 'cn'
+          ? 'https://www.kimi.com/code/'
+          : 'https://www.kimi.ai/code/',
     },
     provider(
       'grok',

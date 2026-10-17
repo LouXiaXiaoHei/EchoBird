@@ -30,6 +30,7 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useAccountCardCache } from './useAccountCardCache';
 import { ZCodeAccountProviderChoice } from '../AppManager/ZCodeAccountSection';
+import { KimiAccountRegionChoice } from '../AppManager/KimiAccountSection';
 import { MinimaxAccountRegionChoice } from '../AppManager/MinimaxAccountSection';
 import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
@@ -592,12 +593,14 @@ export function AccountCenterPanel() {
                       )
                     ) : !provider.installed ? (
                       `${hostname} · ${t('status.notInstalled')}`
-                    ) : provider.id === 'zcode' || provider.id === 'minimax' ? (
+                    ) : ['zcode', 'minimax', 'kimi'].includes(provider.id) ? (
                       <span className="flex items-center gap-2">
                         <span className="min-w-0 truncate">{hostname}</span>
                         <span className="pointer-events-auto relative flex-shrink-0">
                           {provider.id === 'minimax' ? (
                             <MinimaxAccountRegionChoice disabled={disabled} />
+                          ) : provider.id === 'kimi' ? (
+                            <KimiAccountRegionChoice disabled={disabled} />
                           ) : (
                             <ZCodeAccountProviderChoice disabled={disabled} />
                           )}

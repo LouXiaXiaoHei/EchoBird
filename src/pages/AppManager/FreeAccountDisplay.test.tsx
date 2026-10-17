@@ -124,6 +124,7 @@ beforeEach(() => {
     traeAccountGroups: { trae: { ...group, accounts: [] }, traecn: { ...group, accounts: [] } },
     kiroAccounts: { ...group, accounts: [] },
     zcodeAccounts: { ...group, provider: 'bigmodel', setProvider: vi.fn() },
+    kimiAccounts: { ...group, region: 'cn', setRegion: vi.fn() },
     openDesignAccounts: { ...group },
     minimaxAccounts: { ...group, region: 'cn', setRegion: vi.fn() },
     qoderAccounts: group,

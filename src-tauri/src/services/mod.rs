@@ -69,6 +69,7 @@ pub mod usage_providers;
 #[cfg(windows)]
 pub mod windows_path;
 
+pub mod kimi_accounts;
 pub mod opendesign_accounts;
 pub mod workbuddy_accounts;
 pub mod zcode_accounts;

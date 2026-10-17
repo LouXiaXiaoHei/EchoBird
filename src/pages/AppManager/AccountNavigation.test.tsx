@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { beforeEach, afterEach, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
+import * as kimiApi from '../../api/kimiAccounts';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
@@ -22,6 +23,15 @@ import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { TraeAccountSection } from './TraeAccountSection';
 
 vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
+vi.mock('../../api/kimiAccounts', () => ({
+  listKimiAccounts: vi.fn(),
+  startKimiLogin: vi.fn(),
+  pollKimiLogin: vi.fn(),
+  cancelKimiLogin: vi.fn(),
+  switchKimiAccount: vi.fn(),
+  refreshKimiAccount: vi.fn(),
+  deleteKimiAccount: vi.fn(),
+}));
 vi.mock('../../hooks/useI18n', () => {
   const summaries: Record<string, string> = {
     'accountCenter.batchAuthFailed': 'Authorization failed: {n}',
@@ -272,6 +282,302 @@ const openDesignFixture: api.OpenDesignAccount = {
   balanceUsd: 2.5,
 };
 
+const kimiFixture: kimiApi.KimiAccount = {
+  id: 'cn:kimi-fixture',
+  email: 'kimi@example.test',
+  region: 'cn',
+  plan: 'Plus',
+  active: false,
+  quotaWindows: [{ name: 'limit_5h', remainingPercent: 75 }],
+};
+
+it.each(['kimicode', 'kimidesktop'] as const)(
+  'Kimi: %s only loads saved accounts when installed and performs no passive account actions',
+  async (tool) => {
+    await mount(tool, false);
+    expect(kimiApi.listKimiAccounts).not.toHaveBeenCalled();
+    act(() => renderer.unmount());
+    await mount(tool);
+    expect(kimiApi.listKimiAccounts).toHaveBeenCalledOnce();
+    for (const [name, action] of Object.entries(kimiApi))
+      if (name !== 'listKimiAccounts' && vi.isMockFunction(action))
+        expect(action).not.toHaveBeenCalled();
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(state.applyError).toBeNull();
+  }
+);
+
+it.each(['cn', 'global'] as const)(
+  'Kimi: %s login saves only; account selection is exclusive with API models and explicit apply switches',
+  async (region) => {
+    vi.mocked(kimiApi.startKimiLogin).mockResolvedValue({
+      loginId: 'kimi-login',
+      verificationUri: `https://auth.kimi.${region === 'cn' ? 'com' : 'ai'}/activate`,
+      expiresAt: Date.now() / 1000 + 60,
+      pollIntervalSeconds: 1,
+    });
+    const account = { ...kimiFixture, region };
+    vi.mocked(kimiApi.pollKimiLogin).mockResolvedValue(account);
+    vi.mocked(kimiApi.switchKimiAccount).mockResolvedValue({ ...account, active: true });
+    await mount('kimidesktop');
+    act(() => state.kimiAccounts.setRegion(region));
+    await tick();
+    vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([account]);
+    await act(async () => {
+      await state.kimiAccounts.add();
+    });
+    expect(kimiApi.startKimiLogin).toHaveBeenCalledExactlyOnceWith(region);
+    expect(kimiApi.refreshKimiAccount).not.toHaveBeenCalled();
+    expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    act(() => state.handleSelectModel('kimidesktop', 'fixture-api-model'));
+    expect(state.kimiAccounts.selectedId).toBeNull();
+    act(() => state.kimiAccounts.select(account.id));
+    expect(state.toolModelConfig.kimidesktop).toBeNull();
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(kimiApi.switchKimiAccount).toHaveBeenCalledExactlyOnceWith(account.id);
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith('kimidesktop', undefined, undefined);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(folderPicker).not.toHaveBeenCalled();
+  }
+);
+
+it('Kimi: the actual account panel exposes the shared region choice without starting login', async () => {
+  await mount('kimidesktop');
+  await act(async () => {
+    renderer.update(
+      <AppManagerProvider>
+        <Harness panel />
+      </AppManagerProvider>
+    );
+  });
+  const button = renderer.root
+    .findAllByType('button')
+    .find((item) => item.props['aria-label'] === 'agent.kimiSwitchRegion');
+  expect(button).toBeDefined();
+  expect(button!.props.disabled).toBeFalsy();
+  act(() => button!.props.onClick());
+  await tick();
+  expect(state.kimiAccounts.region).toBe('global');
+  expect(JSON.stringify(renderer.toJSON())).toContain('kimi.ai');
+  expect(kimiApi.startKimiLogin).not.toHaveBeenCalled();
+  expect(kimiApi.refreshKimiAccount).not.toHaveBeenCalled();
+});
+
+it.each([true, false])(
+  'Kimi CLI: workspace selection happens before account writes (cancelled=%s)',
+  async (cancelled) => {
+    vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([kimiFixture]);
+    vi.mocked(kimiApi.switchKimiAccount).mockResolvedValue(kimiFixture);
+    vi.mocked(folderPicker).mockResolvedValue(cancelled ? null : 'E:/fixture-project');
+    await mount('kimicode');
+    useToolsStore
+      .getState()
+      .setDetectedTools([
+        { id: 'kimicode', name: 'Kimi CLI', category: 'CLI Code', installed: true },
+      ]);
+    await tick();
+    act(() => state.kimiAccounts.select(kimiFixture.id));
+    await act(async () => {
+      await state.handleLaunch();
+    });
+    expect(folderPicker).toHaveBeenCalledOnce();
+    if (cancelled) {
+      expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+      expect(api.startTool).not.toHaveBeenCalled();
+    } else {
+      expect(kimiApi.switchKimiAccount).toHaveBeenCalledExactlyOnceWith(kimiFixture.id);
+      expect(api.startTool).toHaveBeenCalledExactlyOnceWith(
+        'kimicode',
+        undefined,
+        'E:/fixture-project'
+      );
+    }
+    expect(state.isLaunching).toBe(false);
+  }
+);
+
+it.each(['account', 'model', 'return'] as const)(
+  'Kimi: a pending folder choice cannot apply an old selection after %s changes',
+  async (change) => {
+    const other = { ...kimiFixture, id: 'kimi-other' };
+    vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([kimiFixture, other]);
+    let finishPicker!: (path: string) => void;
+    vi.mocked(folderPicker).mockReturnValue(
+      new Promise((resolve) => {
+        finishPicker = resolve;
+      })
+    );
+    await mount('kimicode');
+    useToolsStore
+      .getState()
+      .setDetectedTools([
+        { id: 'kimicode', name: 'Kimi CLI', category: 'CLI Code', installed: true },
+      ]);
+    await tick();
+    act(() => state.kimiAccounts.select(kimiFixture.id));
+    let launch!: Promise<void>;
+    await act(async () => {
+      launch = state.handleLaunch();
+    });
+    expect(folderPicker).toHaveBeenCalledOnce();
+    if (change === 'account') act(() => state.kimiAccounts.select(other.id));
+    if (change === 'model') act(() => state.handleSelectModel('kimicode', 'new-api-model'));
+    if (change === 'return') {
+      act(() => useNavigationStore.getState().setActivePage('models'));
+      await tick();
+      act(() => useNavigationStore.getState().setActivePage('apps'));
+      await tick();
+    }
+    await act(async () => {
+      finishPicker('E:/fixture-project');
+      await launch;
+    });
+    expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    if (change === 'account') expect(state.kimiAccounts.selectedId).toBe(other.id);
+    if (change === 'model') expect(state.toolModelConfig.kimicode).toBe('new-api-model');
+    expect(state.applyError).toBeNull();
+  }
+);
+
+it('Kimi: a late native switch does not erase a newer API selection or launch the client', async () => {
+  vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([kimiFixture]);
+  let finishSwitch!: (account: kimiApi.KimiAccount) => void;
+  vi.mocked(kimiApi.switchKimiAccount).mockReturnValue(
+    new Promise((resolve) => {
+      finishSwitch = resolve;
+    })
+  );
+  await mount('kimidesktop');
+  act(() => state.kimiAccounts.select(kimiFixture.id));
+  let launch!: Promise<void>;
+  await act(async () => {
+    launch = state.handleLaunch();
+  });
+  expect(kimiApi.switchKimiAccount).toHaveBeenCalledOnce();
+  act(() => state.handleSelectModel('kimidesktop', 'new-api-model'));
+  await act(async () => {
+    finishSwitch(kimiFixture);
+    await launch;
+  });
+  expect(state.toolModelConfig.kimidesktop).toBe('new-api-model');
+  expect(api.startTool).not.toHaveBeenCalled();
+  expect(state.applyError).toBeNull();
+});
+
+it('Kimi: changing tools cancels the pending login, locks its region and ignores a late account', async () => {
+  let finishPoll!: (account: kimiApi.KimiAccount | null) => void;
+  const poll = new Promise<kimiApi.KimiAccount | null>((resolve) => {
+    finishPoll = resolve;
+  });
+  vi.mocked(kimiApi.startKimiLogin).mockResolvedValue({
+    loginId: 'kimi-pending',
+    verificationUri: 'https://auth.kimi.com/activate',
+    expiresAt: Date.now() / 1000 + 60,
+    pollIntervalSeconds: 1,
+  });
+  vi.mocked(kimiApi.pollKimiLogin).mockReturnValue(poll);
+  await mount('kimidesktop');
+  let login!: Promise<void>;
+  await act(async () => {
+    login = state.kimiAccounts.add();
+  });
+  expect(state.kimiAccounts.busy).toBe(true);
+  act(() => state.kimiAccounts.setRegion('global'));
+  expect(state.kimiAccounts.region).toBe('cn');
+  act(() => state.setSelectedTool('kimicode'));
+  await tick();
+  expect(kimiApi.cancelKimiLogin).toHaveBeenCalledWith('kimi-pending');
+  await act(async () => {
+    finishPoll(kimiFixture);
+    await login;
+  });
+  expect(state.kimiAccounts.accounts).toEqual([]);
+  expect(state.kimiAccounts.busy).toBe(false);
+  expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+  expect(kimiApi.refreshKimiAccount).not.toHaveBeenCalled();
+  expect(state.applyError).toBeNull();
+});
+
+it('Kimi: timeout cancels at 60 seconds without applying or refreshing an account', async () => {
+  vi.mocked(kimiApi.startKimiLogin).mockResolvedValue({
+    loginId: 'kimi-timeout',
+    verificationUri: 'https://auth.kimi.com/activate',
+    expiresAt: Date.now() / 1000 + 300,
+    pollIntervalSeconds: 1,
+  });
+  vi.mocked(kimiApi.pollKimiLogin).mockResolvedValue(null);
+  await mount('kimicode');
+  await act(async () => {
+    void state.kimiAccounts.add();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60_100);
+  });
+  expect(state.kimiAccounts.busy).toBe(false);
+  expect(kimiApi.cancelKimiLogin).toHaveBeenCalledWith('kimi-timeout');
+  expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+  expect(kimiApi.refreshKimiAccount).not.toHaveBeenCalled();
+});
+
+it.each(['kimicode', 'kimidesktop'] as const)(
+  'Kimi: %s explicit refresh accepts an account without quota and opens no error',
+  async (tool) => {
+    vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([kimiFixture]);
+    await mount(tool);
+    const empty = { ...kimiFixture, plan: 'Free', quotaWindows: [], wallet: null };
+    vi.mocked(kimiApi.refreshKimiAccount).mockResolvedValue(empty);
+    await act(async () => {
+      await state.kimiAccounts.refresh(kimiFixture);
+    });
+    expect(kimiApi.refreshKimiAccount).toHaveBeenCalledExactlyOnceWith(kimiFixture.id);
+    expect(state.kimiAccounts.accounts).toEqual([empty]);
+    expect(state.kimiAccounts.selectedId).toBeNull();
+    expect(state.kimiAccounts.refreshing.size).toBe(0);
+    expect(state.applyError).toBeNull();
+    expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+  }
+);
+
+it('Kimi: passive failure keeps cached rows; failed explicit refresh keeps quota and retry updates it', async () => {
+  vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([kimiFixture]);
+  await mount('kimidesktop');
+  act(() => useNavigationStore.getState().setActivePage('models'));
+  await tick();
+  vi.mocked(kimiApi.listKimiAccounts).mockRejectedValueOnce(new Error('accountError.read'));
+  act(() => useNavigationStore.getState().setActivePage('apps'));
+  await tick();
+  expect(state.kimiAccounts.accounts).toEqual([kimiFixture]);
+  expect(state.applyError).toBeNull();
+  expect(kimiApi.refreshKimiAccount).not.toHaveBeenCalled();
+  vi.mocked(kimiApi.refreshKimiAccount).mockRejectedValueOnce(new Error('accountError.quota'));
+  await act(async () => {
+    await state.kimiAccounts.refresh(kimiFixture);
+  });
+  expect(state.kimiAccounts.accounts).toEqual([kimiFixture]);
+  expect(state.kimiAccounts.selectedId).toBeNull();
+  expect(state.applyError).toBe('accountError.quota');
+  const updated = {
+    ...kimiFixture,
+    plan: 'Ultra',
+    quotaWindows: [{ name: 'limit_7d', remainingPercent: 35 }],
+  };
+  vi.mocked(kimiApi.refreshKimiAccount).mockResolvedValue(updated);
+  await act(async () => {
+    await state.kimiAccounts.refresh(kimiFixture);
+  });
+  expect(state.kimiAccounts.accounts).toEqual([updated]);
+  expect(kimiApi.switchKimiAccount).not.toHaveBeenCalled();
+});
+
 it('Open Design: the actual panel keeps accounts and the official model section together without API models', async () => {
   await mount('opendesign');
   await act(async () => {
@@ -434,7 +740,10 @@ async function tick() {
     await vi.advanceTimersByTimeAsync(1);
   });
 }
-async function mount(tool: Tool | api.KiloTool | api.CopilotTool, installed = true) {
+async function mount(
+  tool: Tool | api.KiloTool | api.CopilotTool | 'kimicode' | 'kimidesktop',
+  installed = true
+) {
   useToolsStore.getState().setDetectedTools([
     {
       id: tool,
@@ -476,6 +785,8 @@ beforeEach(() => {
   vi.mocked(api.listClineAccounts).mockResolvedValue([]);
   vi.mocked(api.listKiloAccounts).mockResolvedValue([]);
   vi.mocked(api.listCopilotAccounts).mockResolvedValue([]);
+  vi.mocked(kimiApi.listKimiAccounts).mockResolvedValue([]);
+  vi.mocked(kimiApi.cancelKimiLogin).mockResolvedValue(undefined);
   vi.mocked(api.getModels).mockResolvedValue([]);
   for (const [name, action] of Object.entries(api))
     if (name.startsWith('cancel') && vi.isMockFunction(action)) action.mockResolvedValue(undefined);

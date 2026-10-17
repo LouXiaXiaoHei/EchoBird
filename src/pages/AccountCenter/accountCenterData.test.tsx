@@ -44,6 +44,7 @@ function context() {
     antigravityAccounts: group(),
     cursorAccounts: group(),
     zcodeAccounts: group(),
+    kimiAccounts: { ...group(), region: 'cn', setRegion: vi.fn() },
     openDesignAccounts: group(),
     minimaxAccounts: group(),
     qoderAccountGroups: { qoder: group(), qodercn: group() },
@@ -61,6 +62,63 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it('shows a Kimi Free account without returned quota as no usage data', () => {
+    const state = context();
+    state.kimiAccounts.accounts = [
+      {
+        id: 'kimi-free',
+        email: 'free@example.test',
+        region: 'cn',
+        active: false,
+        plan: 'Free',
+        quotaWindows: [],
+        wallet: null,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'kimi')!;
+    const account = provider.accounts[0];
+    expect(account.plan).toBe('Free');
+    const markup = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
+    expect(markup).toContain('model.noUsageData');
+    expect(markup).not.toContain('role="progressbar"');
+    expect(markup).not.toContain('>0%<');
+  });
+
+  it.each(['Free', 'Plus', 'Pro', 'Max', 'Ultra'])(
+    'keeps Kimi %s and real windows separate from the booster wallet',
+    (plan) => {
+      const state = context();
+      state.kimiAccounts.accounts = [
+        {
+          id: 'kimi',
+          email: 'kimi@example.test',
+          region: 'global',
+          active: false,
+          plan,
+          quotaWindows: [
+            { name: 'limit_5h', remainingPercent: 80, resetAt: 2_000_000_000 },
+            { name: 'limit_month_code', remainingPercent: 45 },
+          ],
+          wallet: { remaining: 13.5, total: 20, currency: 'CNY' },
+        },
+      ];
+      const account = providers(state).find((p) => p.id === 'kimi')!.accounts[0];
+      expect(account.detail).toBe('kimi.ai');
+      expect(account.plan).toBe(plan);
+      expect(account.metrics).toMatchObject([
+        { label: 'agent.kimi5h', value: '80%', resetAt: 2_000_000_000 },
+        { label: 'agent.kimiMonthCode', value: '45%' },
+        { label: 'model.balance', percent: 67.5 },
+      ]);
+      expect(account.metrics[2].value).toContain('13.50');
+      state.kimiAccounts.accounts = [
+        { ...state.kimiAccounts.accounts[0], plan: null, quotaWindows: [], wallet: null },
+      ];
+      const unknown = providers(state).find((p) => p.id === 'kimi')!.accounts[0];
+      expect(unknown.plan).toBeNull();
+      expect(unknown.metrics).toMatchObject([{ value: '—' }]);
+    }
+  );
   it('shows Open Design vendor windows separately and keeps a missing balance unknown', () => {
     const state = context();
     const account = {

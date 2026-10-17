@@ -32,6 +32,8 @@ const PROJECT_LIFETIME: Duration = Duration::from_secs(30);
 const COPILOT_CATALOG_LIFETIME: Duration = Duration::from_secs(300);
 
 #[cfg(test)]
+mod kimi_tests;
+#[cfg(test)]
 mod opendesign_tests;
 
 #[derive(Clone)]
@@ -319,6 +321,7 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
         .as_str()
         .unwrap_or(match provider {
             AccountProvider::Codex => CODEX_BASE,
+            AccountProvider::Kimi => "https://api.kimi.com/coding/v1",
             AccountProvider::WorkBuddy => "https://copilot.tencent.com",
             AccountProvider::WorkBuddyAi => "https://www.workbuddy.ai",
             AccountProvider::Antigravity => CODE_ASSIST_BASE,
@@ -417,7 +420,7 @@ fn signed(
                 .header("HTTP-Referer", "https://kilo.ai")
                 .header("X-Title", "EchoBird");
         }
-        AccountProvider::OpenDesign => {}
+        AccountProvider::OpenDesign | AccountProvider::Kimi => {}
         AccountProvider::Cline => {
             request = request
                 .header("HTTP-Referer", "https://cline.bot")
@@ -753,6 +756,36 @@ async fn fetch_project(
     Ok((id.into(), tier))
 }
 
+async fn kimi_catalog(
+    credentials: &Value,
+    client: &reqwest::Client,
+    refresh: bool,
+) -> Result<Value, ProxyError> {
+    let value = prepare_metadata(AccountProvider::Kimi, credentials, refresh, || async {
+        let value = json_upstream(signed(
+            client.get(format!(
+                "{}/models",
+                base(AccountProvider::Kimi, credentials)
+            )),
+            AccountProvider::Kimi,
+            credentials,
+        )?)
+        .await?;
+        if !value["data"].is_array() {
+            return Err(ProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "Kimi returned an invalid model directory",
+            ));
+        }
+        Ok(PreparedMetadata::Catalog(value))
+    })
+    .await?;
+    let PreparedMetadata::Catalog(value) = value else {
+        unreachable!()
+    };
+    Ok(value)
+}
+
 async fn copilot_catalog(
     credentials: &Value,
     client: &reqwest::Client,
@@ -878,6 +911,7 @@ async fn fetch_models(
             return Ok(models);
         }
         AccountProvider::Copilot => prepared_copilot_catalog(credentials, client, true).await?,
+        AccountProvider::Kimi => kimi_catalog(credentials, client, true).await?,
         AccountProvider::Codex => {
             json_upstream(signed(
                 client.get(format!("{api}/models?client_version=0.159.0")),
@@ -1021,6 +1055,28 @@ async fn wire(
     model: &str,
     client: &reqwest::Client,
 ) -> Result<(WireProtocol, &'static str), ProxyError> {
+    if provider == AccountProvider::Kimi {
+        let catalog = kimi_catalog(credentials, client, false).await?;
+        let row = catalog["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|m| m["id"] == model)
+            .ok_or_else(|| {
+                ProxyError::new(
+                    StatusCode::BAD_REQUEST,
+                    "Kimi model is not available for this account",
+                )
+            })?;
+        return match row["protocol"].as_str() {
+            Some("anthropic") => Ok((WireProtocol::Anthropic, "/messages?beta=true")),
+            None | Some("openai") => Ok((WireProtocol::Chat, "/chat/completions")),
+            _ => Err(ProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "Kimi returned an unsupported model protocol",
+            )),
+        };
+    }
     if provider == AccountProvider::OpenDesign {
         return Ok(match model {
             "claude-haiku-5.5" | "deepseek-v4-pro" => (WireProtocol::Responses, "/responses"),
@@ -1206,7 +1262,20 @@ pub(super) async fn route(
             let (project, _) = project(&credentials, client).await?;
             protocol::chat_to_code_assist(&body, model, &project)
         }
-        WireProtocol::Anthropic => anthropic_request(&body, model),
+        WireProtocol::Anthropic => {
+            let mut request = anthropic_request(&body, model);
+            if provider == AccountProvider::Kimi {
+                if let Some(effort) = body["reasoning_effort"].as_str() {
+                    if effort == "none" {
+                        request["thinking"] = json!({"type":"disabled"});
+                    } else {
+                        request["thinking"] = json!({"type":"adaptive"});
+                        request["output_config"] = json!({"effort":effort});
+                    }
+                }
+            }
+            request
+        }
         WireProtocol::Chat => {
             super::strip_response_metadata(&mut body);
             body["model"] = json!(model);

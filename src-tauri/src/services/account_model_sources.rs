@@ -130,6 +130,25 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
                 saved
             })
             .collect(),
+        Kimi => super::kimi_accounts::list_saved_accounts()?
+            .into_iter()
+            .map(|a| {
+                option(
+                    provider,
+                    a.id,
+                    format!(
+                        "{} · {}",
+                        if a.region == super::kimi_accounts::Region::Cn {
+                            "kimi.com"
+                        } else {
+                            "kimi.ai"
+                        },
+                        a.email
+                    ),
+                    a.plan,
+                )
+            })
+            .collect(),
         Zcode => zcode_accounts::list_saved_accounts()?
             .into_iter()
             .map(|a| {
@@ -240,6 +259,7 @@ pub(crate) async fn credentials(
         Grok => super::grok_accounts::proxy::credentials(&source.account_id, force_refresh).await,
         Cline => super::cline_accounts::proxy_credentials(&source.account_id, force_refresh).await,
         Kiro => super::kiro_accounts::proxy_credentials(&source.account_id, force_refresh).await,
+        Kimi => super::kimi_accounts::proxy_credentials(&source.account_id, force_refresh).await,
         Zcode => zcode_accounts::proxy_credentials(&source.account_id, force_refresh).await,
     }
     .map(|credentials| preparation_credentials(credentials, source))
@@ -288,6 +308,13 @@ pub(crate) async fn credentials_after_rejection(
             .await
         }
         Kilo | Copilot => credentials(source, true).await,
+        Kimi => {
+            super::kimi_accounts::credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
         Grok => {
             super::grok_accounts::proxy::after_rejection(&source.account_id, rejected_credentials)
                 .await
@@ -400,7 +427,7 @@ fn model_directory_credentials(mut credentials: Value, source: &AccountSource) -
 fn preparation_credentials(credentials: Value, source: &AccountSource) -> Value {
     if matches!(
         source.provider,
-        AccountProvider::Antigravity | AccountProvider::Copilot
+        AccountProvider::Antigravity | AccountProvider::Copilot | AccountProvider::Kimi
     ) {
         model_directory_credentials(credentials, source)
     } else {
@@ -429,6 +456,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
                     | AccountProvider::Cline
                     | AccountProvider::Kiro
                     | AccountProvider::Zcode
+                    | AccountProvider::Kimi
             ) && error.status == axum::http::StatusCode::UNAUTHORIZED =>
         {
             let refreshed = model_directory_credentials(

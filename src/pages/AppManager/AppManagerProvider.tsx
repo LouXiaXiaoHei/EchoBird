@@ -9,6 +9,8 @@ import { useWorkBuddyAccounts } from './useWorkBuddyAccounts';
 import { useTraeAccounts } from './useTraeAccounts';
 import { useKiroAccounts } from './useKiroAccounts';
 import { useZCodeAccounts } from './useZCodeAccounts';
+import { useKimiAccounts } from './useKimiAccounts';
+import { switchKimiAccount } from '../../api/kimiAccounts';
 import { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import { useMinimaxAccounts } from './useMinimaxAccounts';
 import { useClineAccounts } from './useClineAccounts';
@@ -138,10 +140,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   // Internalized state
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
   const clineSelectionRevision = useRef(0);
-  const clineNavigation = useRef({ tool: selectedTool, page: activePage });
+  const accountNavigation = useRef({ tool: selectedTool, page: activePage });
   useEffect(() => {
     clineSelectionRevision.current += 1;
-    clineNavigation.current = { tool: selectedTool, page: activePage };
+    accountNavigation.current = { tool: selectedTool, page: activePage };
   }, [selectedTool, activePage]);
   const accountsEnabled =
     isActive && detectedTools.some((tool) => tool.id === selectedTool && tool.installed);
@@ -472,6 +474,19 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     setApplyError
   );
 
+  const kimiTool = selectedTool === 'kimicode' ? 'kimicode' : 'kimidesktop';
+  const kimiModel = toolModelConfig[kimiTool];
+  const kimiSelectionRevision = useRef(0);
+  const kimiAccounts = useKimiAccounts(
+    accountGroupEnabled('kimicode', 'kimidesktop'),
+    !!kimiModel,
+    () => setToolModelConfig((prev) => ({ ...prev, [kimiTool]: null })),
+    setApplyError,
+    activePage === 'accounts' ? 'kimi' : kimiTool
+  );
+  useEffect(() => {
+    kimiSelectionRevision.current += 1;
+  }, [selectedTool, activePage, kimiAccounts.selectedId, kimiModel]);
   const zcodeAccounts = useZCodeAccounts(
     accountGroupEnabled('zcode'),
     !!toolModelConfig.zcode,
@@ -494,6 +509,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (toolId === 'minimaxcode' || toolId === 'minimaxdesktop') minimaxAccounts.select(null);
     if (toolId === 'qoder' || toolId === 'qodercn') qoderAccounts.select(null);
     if (toolId === 'zcode') zcodeAccounts.select(null);
+    if (toolId === 'kimicode' || toolId === 'kimidesktop') kimiAccounts.select(null);
     if (toolId === 'opendesign') openDesignAccounts.select(null);
     if (toolId === 'cursor') cursorAccounts.select(null);
     if (toolId === 'grokbot') grokBotAccounts.select(null);
@@ -761,6 +777,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   const handleLaunch = async () => {
     if (!selectedTool || isLaunching) return;
     if (selectedTool === 'zcode' && zcodeAccounts.busy) return;
+    if (['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.busy) return;
     if (selectedTool === 'opendesign' && openDesignAccounts.busy) return;
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
@@ -792,6 +809,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
       !((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
+      !(['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.selectedId) &&
       !(selectedTool === 'opendesign' && openDesignAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
       !(selectedTool === 'grok' && grokAccounts.selectedId) &&
@@ -950,8 +968,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       const selectionRevision = clineSelectionRevision.current;
       const current = () =>
         selectionRevision === clineSelectionRevision.current &&
-        clineNavigation.current.tool === selectedTool &&
-        clineNavigation.current.page === activePage;
+        accountNavigation.current.tool === selectedTool &&
+        accountNavigation.current.page === activePage;
       try {
         const cwd = launchAfterApply ? await pickWorkingDirectory() : undefined;
         if (cwd === null || !current()) return;
@@ -1020,6 +1038,33 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         if (launchAfterApply) await api.startTool('opendesign');
       } catch (error) {
         setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.selectedId) {
+      const selectionRevision = kimiSelectionRevision.current;
+      const current = () =>
+        selectionRevision === kimiSelectionRevision.current &&
+        accountNavigation.current.tool === selectedTool &&
+        accountNavigation.current.page === activePage;
+      try {
+        const cwd = launchAfterApply ? await pickWorkingDirectory() : undefined;
+        if (cwd === null || !current()) return;
+        await switchKimiAccount(kimiAccounts.selectedId);
+        setDetectedTools((prev) =>
+          prev.map((tool) =>
+            ['kimicode', 'kimidesktop'].includes(tool.id) ? { ...tool, activeModel: '' } : tool
+          )
+        );
+        if (current()) {
+          setToolModelConfig((prev) => ({ ...prev, kimicode: null, kimidesktop: null }));
+          await kimiAccounts.reload();
+        }
+        if (launchAfterApply && current())
+          await api.startTool(selectedTool, toolData?.startCommand, cwd);
+      } catch (error) {
+        if (current()) setApplyError(accountError(error, t));
       } finally {
         finishLaunch();
       }
@@ -1262,6 +1307,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         zcodeAccounts: {
           ...zcodeAccounts,
           accounts: orderedAccounts('zcode', zcodeAccounts.accounts),
+        },
+        kimiAccounts: {
+          ...kimiAccounts,
+          accounts: orderedAccounts('kimi', kimiAccounts.accounts),
         },
         openDesignAccounts: {
           ...openDesignAccounts,

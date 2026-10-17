@@ -50,6 +50,7 @@ export type AccountProvider =
   | 'grok'
   | 'cline'
   | 'zcode'
+  | 'kimi'
   | 'openDesign';
 
 export interface AccountSource {

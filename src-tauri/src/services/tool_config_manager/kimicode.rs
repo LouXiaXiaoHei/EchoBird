@@ -26,7 +26,7 @@ use std::path::PathBuf;
 
 const DEFAULT_CONTEXT_SIZE: &str = "1000000";
 
-fn kimicode_dir() -> PathBuf {
+pub(crate) fn kimicode_dir() -> PathBuf {
     // KIMI_CODE_HOME overrides the whole data dir; the file is always
     // config.toml regardless (per the docs).
     if let Ok(home) = std::env::var("KIMI_CODE_HOME") {

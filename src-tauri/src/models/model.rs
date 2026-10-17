@@ -45,6 +45,7 @@ pub enum AccountProvider {
     Cline,
     Kiro,
     Zcode,
+    Kimi,
     OpenDesign,
 }
 
