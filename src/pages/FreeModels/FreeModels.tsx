@@ -1481,12 +1481,7 @@ export function FreeModelsMain() {
   const keylessFor = (model: RouteModelNode) =>
     !model.accountSource &&
     model.id !== 'local-server' &&
-    freeModels.some(
-      (entry) =>
-        entry.baseUrl === model.baseUrl &&
-        entry.modelId === model.modelId &&
-        isKeylessFreeModel(entry)
-    );
+    freeModels.some((entry) => entry.baseUrl === model.baseUrl && isKeylessFreeModel(entry));
   const providerIconFor = (model: RouteModelNode) => {
     if (model.accountSource || model.id === 'local-server' || model.scope !== 'smartRouter')
       return undefined;

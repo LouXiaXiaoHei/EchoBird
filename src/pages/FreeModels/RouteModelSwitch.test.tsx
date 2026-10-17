@@ -368,6 +368,75 @@ describe('Direct route card model selection', () => {
     vi.unstubAllGlobals();
   });
 
+  it.each(['cards', 'list'] as const)(
+    'keeps the keyless access label through new model choices and remounting in %s',
+    async (layout) => {
+      savedModels = savedModels.map((model) =>
+        model.internalId === free.internalId ? { ...model, apiKey: '' } : model
+      );
+      vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue({
+        ...cached,
+        models: [{ ...freeEntry('free-old'), notes: 'Leave the API key empty. Public access.' }],
+      });
+      vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
+        models: [{ id: 'free-old' }, { id: 'new-release' }, { id: 'future/another' }],
+        requiresApiKey: false,
+      });
+      const route = (id: string) =>
+        renderer.root
+          .findAll(
+            (node) =>
+              node.type === 'div' &&
+              String(node.props.className).startsWith(
+                context.layout === 'cards' ? 'free-model-route-node ' : 'free-model-route-row '
+              )
+          )
+          .find((node) =>
+            node.findAllByType(ModelIdCombobox).some((combo) => combo.props.value === id)
+          )!;
+      await open();
+      act(() => context.setLayout(layout));
+      expect(textOf(route('free-old'))).toContain('freeModels.noApiKey');
+      expect(textOf(route('account-old'))).not.toContain('freeModels.noApiKey');
+      expectNoPassiveChanges();
+      await select('free-old', 'new-release');
+      expect(textOf(route('new-release'))).toContain('freeModels.noApiKey');
+      act(() => context.setLayout(layout === 'cards' ? 'list' : 'cards'));
+      expect(textOf(route('new-release'))).toContain('freeModels.noApiKey');
+      await select('new-release', 'future/another');
+      expect(textOf(route('future/another'))).toContain('freeModels.noApiKey');
+      act(() => renderer.unmount());
+      await open();
+      act(() => context.setLayout(layout));
+      expect(textOf(route('future/another'))).toContain('freeModels.noApiKey');
+      expect(api.updateModel).toHaveBeenCalledTimes(2);
+      expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
+      expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+      expect(api.removeSmartRouterCandidate).not.toHaveBeenCalled();
+      expect(showToast).not.toHaveBeenCalled();
+    }
+  );
+
+  it('does not infer the keyless access label from free pricing or another endpoint', async () => {
+    vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue({
+      ...cached,
+      models: [
+        freeEntry('free-old'),
+        {
+          ...freeEntry('free-old', `${free.baseUrl}/other`),
+          notes: 'Leave the API key empty. Public access.',
+        },
+      ],
+    });
+    vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
+      models: [{ id: 'free-old', free: true, multiplier: 0 }],
+      requiresApiKey: false,
+    });
+    await open();
+    expect(textOf(card('free-old'))).not.toContain('freeModels.noApiKey');
+    expectNoPassiveChanges();
+  });
+
   it('API catalog retains every cached upstream ID and the selected ID without passive remote requests', async () => {
     vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue({
       models: [
