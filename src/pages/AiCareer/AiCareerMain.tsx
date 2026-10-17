@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { PageActionButton } from '../../components/PageActionButton';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { useI18n } from '../../hooks/useI18n';
 import { useAiCareerStore } from '../../stores/aiCareerStore';
@@ -285,19 +286,13 @@ export function AiCareerTitleActions() {
   const refresh = useAiCareerStore((s) => s.refresh);
   const refreshing = useAiCareerStore((s) => s.refreshing);
   return (
-    <button
-      type="button"
+    <PageActionButton
+      icon={RefreshCw}
+      spinning={refreshing}
       onClick={refresh}
       disabled={refreshing}
-      className={
-        'text-sm px-3 py-1.5 border rounded-md transition-colors flex items-center gap-2 ' +
-        (!refreshing
-          ? 'border-cyber-border/50 text-cyber-text hover:bg-cyber-text/10'
-          : 'border-cyber-border text-cyber-text-muted')
-      }
     >
-      <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
       {t('btn.refresh')}
-    </button>
+    </PageActionButton>
   );
 }

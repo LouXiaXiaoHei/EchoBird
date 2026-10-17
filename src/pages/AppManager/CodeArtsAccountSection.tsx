@@ -13,7 +13,7 @@ import { QuotaCountdown } from './QuotaCountdown';
 
 export function CodeArtsAccountSection({ showDivider = true }: { showDivider?: boolean }) {
   const { codeArtsAccounts: managed, isLaunching } = useAppManager();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const claimedToday = useWorkBuddyClaimedToday(managed.accounts.length > 0);
   return (
     <section>
@@ -28,6 +28,10 @@ export function CodeArtsAccountSection({ showDivider = true }: { showDivider?: b
       <div className="space-y-2">
         {managed.accounts.map((account) => {
           const percent = codeArtsRemainingPercent(account);
+          const credits =
+            account.balance == null
+              ? undefined
+              : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(account.balance);
           return (
             <AccountSectionRow
               key={account.id}
@@ -62,7 +66,7 @@ export function CodeArtsAccountSection({ showDivider = true }: { showDivider?: b
                   <span className="flex h-[16px] min-w-0 items-center justify-between">
                     <span
                       role="progressbar"
-                      aria-label={t('agent.credits')}
+                      aria-label={t('agent.availableCredits')}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={percent}
@@ -74,13 +78,11 @@ export function CodeArtsAccountSection({ showDivider = true }: { showDivider?: b
                       />
                     </span>
                     <span className="ml-[6px] flex-shrink-0 text-right text-[12px] font-semibold leading-[16px] text-cyber-text">
-                      {percent}%
+                      {credits}
                     </span>
                   </span>
                 ) : account.balance == null ? undefined : (
-                  `${t('agent.credits')} ${new Intl.NumberFormat(undefined, {
-                    maximumFractionDigits: 2,
-                  }).format(account.balance)}`
+                  `${t('agent.availableCredits')} ${credits}`
                 )
               }
             />

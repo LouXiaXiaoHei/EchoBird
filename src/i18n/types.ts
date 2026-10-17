@@ -343,6 +343,7 @@ export type TKey =
   | 'accountError.claim'
   | 'accountError.claimUnavailable'
   | 'agent.credits'
+  | 'agent.availableCredits'
   | 'agent.refreshAccountFailed'
   | 'agent.deleteAccountTitle'
   | 'agent.deleteAccountConfirm'

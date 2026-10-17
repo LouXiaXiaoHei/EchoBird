@@ -376,7 +376,7 @@ function AppContent() {
                             <main className="flex-1 flex flex-col overflow-hidden">
                               <section className="flex-1 flex flex-col overflow-hidden pr-2">
                                 {/* Shared page title bar — fixed-height row so the title sits at the same baseline whether the page has tall action buttons or none */}
-                                <div className="mb-5 flex-shrink-0 flex items-center gap-3 h-10">
+                                <div className="page-title-bar mb-5 flex-shrink-0 flex items-center gap-3 h-10">
                                   <div className="flex items-baseline gap-3 flex-1 min-w-0">
                                     <h2 className="cjk-title flex-shrink-0">
                                       {is('models') && t('page.modelNexus')}

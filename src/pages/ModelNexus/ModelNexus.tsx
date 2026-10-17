@@ -25,6 +25,7 @@ import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
 import { ModelCard, ModelCardSkeleton, getModelIcon } from '../../components';
 import { ViewModeTabs } from '../../components/ViewModeTabs';
+import { PageActionButton } from '../../components/PageActionButton';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
@@ -76,31 +77,25 @@ export function ModelNexusTitleActions() {
 
       {/* Action button - same height and style as tabs */}
       {viewMode === 'config' ? (
-        <button
+        <PageActionButton
+          icon={RefreshCw}
+          spinning={isTesting}
           onClick={pingAllModels}
           disabled={isTesting}
-          className={`flex items-center gap-1.5 text-sm font-mono px-3 py-1.5 border rounded-button transition-colors ${
-            !isTesting
-              ? 'border-cyber-border text-cyber-text hover:bg-cyber-text/10'
-              : 'border-cyber-border text-cyber-text-muted cursor-not-allowed'
-          }`}
+          className="font-mono"
         >
-          <RefreshCw size={13} className={isTesting ? 'animate-spin' : ''} />
           {t('btn.pingAll')}
-        </button>
+        </PageActionButton>
       ) : (
-        <button
+        <PageActionButton
+          icon={RefreshCw}
+          spinning={isRefreshingUsage}
           onClick={refreshAllUsage}
           disabled={isRefreshingUsage}
-          className={`flex items-center gap-1.5 text-sm font-mono px-3 py-1.5 border rounded-button transition-colors ${
-            !isRefreshingUsage
-              ? 'border-cyber-border text-cyber-text hover:bg-cyber-text/10'
-              : 'border-cyber-border text-cyber-text-muted cursor-not-allowed'
-          }`}
+          className="font-mono"
         >
-          <RefreshCw size={13} className={isRefreshingUsage ? 'animate-spin' : ''} />
           {t('btn.refreshUsage')}
-        </button>
+        </PageActionButton>
       )}
     </div>
   );

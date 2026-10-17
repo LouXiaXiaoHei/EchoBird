@@ -4,6 +4,7 @@ import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { ChevronDown, ChevronRight, ExternalLink, RefreshCw } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
 import { ViewModeTabs } from '../../components/ViewModeTabs';
+import { PageActionButton } from '../../components/PageActionButton';
 import { type NewsItem } from './feed';
 import type { TKey } from '../../i18n';
 import { useAiPulse } from './provider';
@@ -96,7 +97,7 @@ export function AiPulseTitleActions() {
   // Toggle only meaningful for the zh-Hans CN feed; other locales pinned to EN.
   const isZhLocale = locale === 'zh-Hans';
   return (
-    <div className="ml-auto flex-shrink-0 flex items-center gap-2">
+    <div className="ml-auto flex-shrink-0 flex items-center gap-3">
       {/* 国内/全球 toggle — only rendered for zh users. Labels are
           hardcoded Chinese because en users never see this control
           (they're pinned to the en feed by the Provider). Avoids
@@ -111,18 +112,9 @@ export function AiPulseTitleActions() {
           ]}
         />
       )}
-      <button
-        onClick={retry}
-        disabled={syncing}
-        className={`text-sm px-3 py-1.5 border rounded-md transition-colors flex items-center gap-2 ${
-          !syncing
-            ? 'border-cyber-border/50 text-cyber-text hover:bg-cyber-text/10'
-            : 'border-cyber-border text-cyber-text-muted'
-        }`}
-      >
-        <RefreshCw size={13} className={syncing ? 'animate-spin' : ''} />
+      <PageActionButton icon={RefreshCw} spinning={syncing} onClick={retry} disabled={syncing}>
         {t('btn.refresh')}
-      </button>
+      </PageActionButton>
     </div>
   );
 }

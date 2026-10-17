@@ -530,6 +530,14 @@
   line-height: 1;
 }
 
+.page-title-bar .view-mode-tabs {
+  height: 2.25rem;
+}
+
+.page-title-bar .view-mode-tab {
+  padding-block: 0;
+}
+
 .cjk-btn {
   font-family: 'Noto Sans', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   font-weight: 700;

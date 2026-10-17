@@ -99,15 +99,15 @@ describe('WorkBuddy account card', () => {
     expect(markup).not.toContain('500/500');
     expect(markup).toContain('>500</span>');
     expect(markup).toContain('>1000</span>');
-    expect(markup).toContain('平台奖励积分');
-    expect(renderAccount({ rewardRemaining: 0 }, 'zh-Hans')).toContain('平台奖励积分');
+    expect(markup).toContain('奖励积分');
+    expect(renderAccount({ rewardRemaining: 0 }, 'zh-Hans')).toContain('奖励积分');
     expect(renderAccount({ rewardRemaining: 0 }, 'zh-Hans')).toContain('>0</span>');
   });
   it('uses unclaimed in place of the reward balance until today’s claim', async () => {
     await loadLocale('zh-Hans');
     const markup = renderAccount({ dailyClaimedAt: null, addonRemaining: 1000 }, 'zh-Hans');
     expect(markup).toContain('>未领取</span>');
-    expect(markup).not.toContain('平台奖励积分');
+    expect(markup).not.toContain('奖励积分');
     expect(markup).toContain('>1000</span>');
   });
   it('preserves unknown base and hides unknown reward details', () => {

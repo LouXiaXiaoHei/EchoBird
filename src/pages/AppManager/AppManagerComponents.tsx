@@ -22,6 +22,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { RoutingToggle } from '../../components/RoutingToggle';
 import { ModelListCard } from '../../components/ModelListCard';
 import { ViewModeTabs } from '../../components/ViewModeTabs';
+import { PageActionButton } from '../../components/PageActionButton';
 import {
   DndContext,
   PointerSensor,
@@ -66,19 +67,17 @@ export const AppManagerTitleActions: React.FC = () => {
   const { scanTools, isScanning, viewMode, setViewMode } = useAppManager();
 
   return (
-    <div className="ml-auto flex-shrink-0 flex items-center gap-2">
+    <div className="ml-auto flex-shrink-0 flex items-center gap-3">
       {/* Custom scan paths — opens ~/.echobird/tool-paths.json so users can
           register install locations EchoBird's bundled defaults missed.
           Icon buttons share the refresh button's chrome and height. */}
-      <button
+      <PageActionButton
+        icon={Settings}
         onClick={() => {
           void api.openToolPathsConfig().catch(() => {});
         }}
         aria-label={t('btn.editPaths')}
-        className="flex items-center justify-center w-9 h-9 border border-cyber-border/50 rounded-md text-cyber-text hover:bg-cyber-text/10 transition-colors outline-none"
-      >
-        <Settings size={16} />
-      </button>
+      />
       <ViewModeTabs
         value={viewMode}
         onChange={setViewMode}
@@ -87,18 +86,14 @@ export const AppManagerTitleActions: React.FC = () => {
           { value: 'install', label: t('aiDesktop.installView') },
         ]}
       />
-      <button
+      <PageActionButton
+        icon={RefreshCw}
+        spinning={isScanning}
         onClick={scanTools}
         disabled={isScanning}
-        className={`text-sm px-3 py-1.5 border rounded-md transition-colors flex items-center gap-2 outline-none ${
-          !isScanning
-            ? 'border-cyber-border/50 text-cyber-text hover:bg-cyber-text/10'
-            : 'border-cyber-border text-cyber-text-muted cursor-not-allowed'
-        }`}
       >
-        <RefreshCw size={13} className={isScanning ? 'animate-spin' : ''} />
         {t('btn.refresh')}
-      </button>
+      </PageActionButton>
     </div>
   );
 };

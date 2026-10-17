@@ -70,6 +70,7 @@ import { ModelListCard } from '../../components/ModelListCard';
 import { RoutingToggle } from '../../components/RoutingToggle';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
+import { PageActionButton } from '../../components/PageActionButton';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
@@ -197,14 +198,9 @@ export function FreeModelsTitleActions() {
           );
         })}
       </div>
-      <button
-        type="button"
-        onClick={() => setShowHelp(true)}
-        className="flex items-center gap-1.5 text-sm font-mono px-3 py-1.5 border border-cyber-border rounded-button text-cyber-text hover:bg-cyber-text/10 transition-colors"
-      >
-        <CircleHelp size={13} />
+      <PageActionButton icon={CircleHelp} onClick={() => setShowHelp(true)} className="font-mono">
         {t('freeModels.help')}
-      </button>
+      </PageActionButton>
 
       {showHelp && (
         <div className="fixed inset-0 z-[9998] flex items-center justify-center">
@@ -551,7 +547,7 @@ function RouteModelCard({
                       onReauthorize();
                     }}
                     onPointerDown={(event) => event.stopPropagation()}
-                    className="pointer-events-auto relative flex h-5 w-5 shrink-0 items-center justify-center rounded border border-cyber-accent/40 text-cyber-accent transition-colors hover:bg-cyber-accent/10 disabled:opacity-40"
+                    className="pointer-events-auto relative flex h-5 w-5 shrink-0 items-center justify-center rounded-button border border-cyber-border text-cyber-text transition-colors enabled:hover:bg-cyber-text/10 disabled:text-cyber-text-muted disabled:opacity-50"
                   >
                     <RefreshCw
                       size={11}

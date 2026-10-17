@@ -743,8 +743,8 @@ export function accountCenterProviders(
                 dailyClaimedAt: account.dailyClaimedAt,
                 metrics: [
                   {
-                    label: t('agent.credits'),
-                    value: percent == null ? number(account.balance) : `${percent}%`,
+                    label: t('agent.availableCredits'),
+                    value: number(account.balance),
                     percent,
                     showProgress: true,
                   },

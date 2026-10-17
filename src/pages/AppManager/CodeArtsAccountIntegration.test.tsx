@@ -70,6 +70,11 @@ async function tick(ms = 1) {
 }
 const calls = (name: string) => invoke.mock.calls.filter(([command]) => command === name);
 const group = () => state.codeArtsAccounts;
+const renderedText = () =>
+  renderer.root
+    .findAllByType('span')
+    .flatMap((node) => node.children.filter((child) => typeof child === 'string'))
+    .join(' ');
 async function mount(installed = true) {
   useToolsStore.getState().setDetectedTools([
     {
@@ -163,7 +168,7 @@ it.each([6498.62, 0])(
     await mount();
     const renderedRow = renderer.root.findByType(AccountSectionRow);
     expect(renderedRow.props.secondary).toBe(
-      `agent.credits ${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(balance)}`
+      `agent.availableCredits ${new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(balance)}`
     );
     expect(JSON.stringify(renderer.toJSON())).not.toContain('model.noUsageData');
   }
@@ -174,8 +179,9 @@ it.each([
   ['Pro', 6498.62, 6500, 99.98],
   ['Free', 0, 6500, 0],
   ['Free', 6500, 6500, 100],
+  ['Free', 7000, 6500, 100],
 ] as const)(
-  'refreshes credit progress independently of plan on the desktop and account card (%s, %s/%s)',
+  'shows actual credits with auxiliary progress independently of plan on the desktop and account card (%s, %s/%s)',
   async (plan, balance, total, percent) => {
     handlers.set('list_codearts_accounts', () => [{ ...row(), plan }]);
     handlers.set('refresh_codearts_account', () => ({ ...row(), plan, balance, total }));
@@ -190,12 +196,18 @@ it.each([
         .findAll((node) => node.props.role === 'progressbar')
         .map((node) => node.props['aria-valuenow'])
     ).toEqual([percent]);
-    expect(JSON.stringify(renderer.toJSON())).toContain(`${percent}%`);
+    const value = new Intl.NumberFormat('en', { maximumFractionDigits: 2 }).format(balance);
+    expect(renderedText()).toContain(value);
+    expect(renderedText()).not.toContain(`${percent}%`);
     const provider = accountCenterProviders(state, (key) => key, 'en').find(
       (item) => item.id === 'codearts'
     )!;
     expect(provider.accounts[0].plan).toBe(plan);
-    expect(provider.accounts[0].metrics[0]).toMatchObject({ value: `${percent}%`, percent });
+    expect(provider.accounts[0].metrics[0]).toMatchObject({
+      label: 'agent.availableCredits',
+      value,
+      percent,
+    });
     await act(async () => {
       renderer.update(
         <AppManagerProvider>
@@ -209,6 +221,16 @@ it.each([
         .findAll((node) => node.props.role === 'progressbar')
         .map((node) => node.props['aria-valuenow'])
     ).toEqual([percent, percent]);
+    expect(renderedText()).toContain('agent.availableCredits');
+    expect(renderedText()).toContain(value);
+    expect(renderedText()).not.toContain(`${percent}%`);
+    expect(calls('refresh_codearts_account')).toHaveLength(1);
+    for (const command of [
+      'start_codearts_login',
+      'claim_codearts_credits',
+      'switch_codearts_account',
+    ])
+      expect(calls(command)).toHaveLength(0);
   }
 );
 
@@ -260,7 +282,8 @@ it('uses the shared subscription countdown in both plan positions and updates it
   expect(
     renderer.root.findAllByProps({ 'aria-label': 'accountCenter.subscription 0m' })
   ).toHaveLength(2);
-  expect(JSON.stringify(renderer.toJSON())).toContain('99.98%');
+  expect(renderedText()).toContain('6,498.62');
+  expect(renderedText()).not.toContain('99.98%');
   expect(calls('refresh_codearts_account')).toHaveLength(2);
   for (const command of [
     'start_codearts_login',
@@ -295,7 +318,8 @@ it.each([
       );
     });
     expect(renderer.root.findAllByType(QuotaCountdown)).toHaveLength(0);
-    expect(JSON.stringify(renderer.toJSON())).toContain('99.98%');
+    expect(renderedText()).toContain('6,498.62');
+    expect(renderedText()).not.toContain('99.98%');
     expect(calls('refresh_codearts_account')).toHaveLength(0);
   }
 );
@@ -311,6 +335,37 @@ it.each([0, null, undefined])(
     )!;
     expect(provider.accounts[0].metrics[0].percent).toBeUndefined();
     expect(provider.accounts[0].metrics[0].value).toBe('12.5');
+    expect(provider.accounts[0].metrics[0].label).toBe('agent.availableCredits');
+    expect(renderedText()).toContain('agent.availableCredits 12.5');
+    expect(calls('refresh_codearts_account')).toHaveLength(0);
+  }
+);
+
+it.each([null, undefined])(
+  'keeps unknown credits unknown despite a known total (%s)',
+  async (balance) => {
+    handlers.set('list_codearts_accounts', () => [{ ...row(), balance, total: 6500 }]);
+    await mount();
+    expect(renderer.root.findByType(AccountSectionRow).props.secondary).toBeUndefined();
+    const provider = accountCenterProviders(state, (key) => key, 'en').find(
+      (item) => item.id === 'codearts'
+    )!;
+    expect(provider.accounts[0].metrics[0]).toMatchObject({
+      label: 'agent.availableCredits',
+      value: '—',
+      percent: undefined,
+    });
+    await act(async () => {
+      renderer.update(
+        <AppManagerProvider>
+          <Harness />
+          <AccountCard provider={provider} account={provider.accounts[0]} />
+        </AppManagerProvider>
+      );
+    });
+    expect(renderer.root.findAllByProps({ role: 'progressbar' })).toHaveLength(0);
+    expect(renderedText()).toContain('model.noUsageData');
+    expect(calls('refresh_codearts_account')).toHaveLength(0);
   }
 );
 

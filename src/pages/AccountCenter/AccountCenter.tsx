@@ -35,6 +35,7 @@ import { MinimaxAccountRegionChoice } from '../AppManager/MinimaxAccountSection'
 import { DirectoryRow } from '../../components/DirectoryRow';
 import { SortableCard } from '../../components/SortableCard';
 import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
+import { PageActionButton } from '../../components/PageActionButton';
 import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { QuotaCountdown } from '../AppManager/QuotaCountdown';
 import { accountPlanLabel } from '../AppManager/accountPlanLabel';
@@ -162,7 +163,7 @@ export function AccountCard({
                 aria-label={`${t('accountCenter.reauthorize')} ${provider.name}`}
                 disabled={!provider.installed || provider.busy || account.pending}
                 onClick={provider.add}
-                className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-button border border-cyber-accent/45 px-3 text-xs font-semibold text-cyber-accent transition-colors hover:bg-cyber-accent/10 disabled:opacity-40"
+                className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-button border border-cyber-border px-3 text-xs font-normal text-cyber-text transition-colors enabled:hover:bg-cyber-text/10 disabled:text-cyber-text-muted disabled:opacity-50"
               >
                 <RefreshCw
                   size={13}
@@ -498,38 +499,26 @@ export function AccountCenterTitleActions() {
       }
     }
   };
-  const buttonClass =
-    'flex items-center gap-1.5 text-sm font-mono px-3 py-1.5 border border-cyber-border rounded-button transition-colors text-cyber-text hover:bg-cyber-text/10 disabled:text-cyber-text-muted disabled:opacity-50';
   return (
-    <div className="ml-auto flex-shrink-0 flex items-stretch gap-3">
+    <div className="ml-auto flex-shrink-0 flex items-center gap-3">
       <AccountPrivacyButton />
-      <button
-        type="button"
+      <PageActionButton
+        icon={running === 'claim' ? LoaderCircle : Gift}
+        spinning={running === 'claim'}
         aria-label={t('accountCenter.claimAll')}
         disabled={blocked || running !== null}
         onClick={() => run('claim')}
-        className={buttonClass}
-      >
-        {running === 'claim' ? (
-          <LoaderCircle size={16} className="animate-spin" aria-hidden="true" />
-        ) : (
-          <Gift size={16} aria-hidden="true" />
-        )}
-      </button>
-      <button
-        type="button"
+      />
+      <PageActionButton
+        icon={RefreshCw}
+        spinning={running === 'refresh'}
         aria-label={t('accountCenter.refreshAll')}
         disabled={blocked || running !== null}
         onClick={() => run('refresh')}
-        className={buttonClass}
+        className="font-mono"
       >
-        <RefreshCw
-          size={13}
-          className={running === 'refresh' ? 'animate-spin' : ''}
-          aria-hidden="true"
-        />
         {t('accountCenter.refreshAll')}
-      </button>
+      </PageActionButton>
     </div>
   );
 }
