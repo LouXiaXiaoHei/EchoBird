@@ -1,8 +1,7 @@
 // Local Server Page — llama-server management UI
 // Layout restored from Electron v1.0.8 LocalModelPlayer.tsx
 // Architecture: Provider + Main + Panel (consistent with other pages)
-
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Play,
   Square,
@@ -25,108 +24,9 @@ import { normalizeStoreModels, type StoreModel } from '../../api/types';
 import bundledStoreModels from '../../data/localModelStore.json';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useDocumentVisible } from '../../hooks/useDocumentVisible';
-import { LocalServerContext, useLocalServer } from './context';
+import { useLocalServer } from './context';
 import type { EngineStatus, GgufFileEntry } from './context';
-
-// ─── Provider ───
-
-export const LocalServerProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [selectedModelPath, setSelectedModelPath] = useState<string | null>(null);
-  const [ggufFiles, setGgufFiles] = useState<GgufFileEntry[]>([]);
-  const [isScanning, setIsScanning] = useState(false);
-  const [modelsDirs, setModelsDirs] = useState<string[]>([]);
-  // Shared runtime state — Panel reads this to filter store models
-  const [runtime, setRuntime] = useState('llama-server');
-  // Server runtime state (shared with bottom bar)
-  const [serverRunning, setServerRunning] = useState(false);
-  const [serverPort, setServerPort] = useState(11434);
-  const [serverModelName, setServerModelName] = useState('');
-  const [serverApiKey, setServerApiKey] = useState('');
-
-  const scanRuntime = useRef(runtime);
-  const scanRequest = useRef(0);
-  const rescanModels = useCallback(async (rt = scanRuntime.current) => {
-    const request = ++scanRequest.current;
-    setIsScanning(true);
-    try {
-      const dirs = await api.getModelsDirs();
-      const allFiles: GgufFileEntry[] = [];
-      const isHfRuntime = rt === 'vllm' || rt === 'sglang';
-      for (const dir of dirs) {
-        if (isHfRuntime) {
-          // Scan HuggingFace model directories
-          const models = await api.scanHfModels(dir);
-          for (const m of models) {
-            allFiles.push({
-              fileName: m.modelName,
-              filePath: m.modelPath,
-              fileSize: m.totalSize,
-            });
-          }
-        } else {
-          // Scan GGUF files (default)
-          const files = await api.scanGgufFiles(dir);
-          for (const f of files) {
-            allFiles.push({
-              fileName: f.fileName,
-              filePath: f.filePath,
-              fileSize: f.fileSize,
-            });
-          }
-        }
-      }
-      if (request === scanRequest.current) {
-        setModelsDirs(dirs);
-        setGgufFiles(Array.from(new Map(allFiles.map((file) => [file.filePath, file])).values()));
-      }
-    } catch (e) {
-      console.error('[LocalServer] Failed to scan models:', e);
-    }
-    if (request === scanRequest.current) setIsScanning(false);
-  }, []);
-
-  // Scan the current format and ignore earlier requests after switching engines.
-  const previousRuntime = useRef(runtime);
-  useEffect(() => {
-    scanRuntime.current = runtime;
-    if (previousRuntime.current !== runtime) {
-      setSelectedModelPath(null);
-      setGgufFiles([]);
-      previousRuntime.current = runtime;
-    }
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    rescanModels();
-    const requests = scanRequest;
-    return () => {
-      requests.current++;
-    };
-  }, [runtime, rescanModels]);
-
-  return (
-    <LocalServerContext.Provider
-      value={{
-        selectedModelPath,
-        setSelectedModelPath,
-        ggufFiles,
-        isScanning,
-        rescanModels,
-        modelsDirs,
-        runtime,
-        setRuntime,
-        serverRunning,
-        setServerRunning,
-        serverPort,
-        setServerPort,
-        serverModelName,
-        setServerModelName,
-        serverApiKey,
-        setServerApiKey,
-      }}
-    >
-      {children}
-    </LocalServerContext.Provider>
-  );
-};
+export { LocalServerProvider } from './provider';
 
 // ─── Helper: Parse model info from file path ───
 
@@ -437,20 +337,15 @@ export const LocalServerMain: React.FC = () => {
 
   const docVisible = useDocumentVisible();
 
-  // Polling: server status + logs — pause when the window is hidden so a
-  // backgrounded app doesn't poll IPC every second for hours. Resumes (with a
-  // fresh immediate poll) the moment the window is shown again.
+  const localPage = useNavigationStore((state) => state.activePage === 'localLlm');
   useEffect(() => {
-    if (!docVisible) return;
+    if (!docVisible || !localPage) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const info = await api.getLlmServerInfo();
-        setIsRunning(info.running);
-        if (lastRunning.current !== info.running) {
-          lastRunning.current = info.running;
-          window.dispatchEvent(new Event('models-changed'));
-        }
         const serverLogs = await api.getLlmServerLogs();
+        if (cancelled) return;
         const joined = serverLogs.join('\n');
         if (serverLogs.length > 0 && joined !== lastServerLogs.current) {
           lastServerLogs.current = joined;
@@ -458,14 +353,16 @@ export const LocalServerMain: React.FC = () => {
         }
       } catch (e) {
         console.error('[LocalServer] Poll error:', e);
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, 1000);
       }
     };
-    poll();
-    const interval = setInterval(poll, 1000);
-    return () => clearInterval(interval);
-    // Setters come from context (stable identity); dep is intentionally just docVisible.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [docVisible]);
+    void poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [docVisible, localPage]);
 
   // Scroll handling
   const handleScroll = () => {

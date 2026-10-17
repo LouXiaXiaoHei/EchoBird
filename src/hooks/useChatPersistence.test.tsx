@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONVERSATIONS_STORAGE_KEY,
+  conversationBodyKey,
   useChatPersistence,
   type ChatConversation,
   type DiskMsg,
@@ -50,7 +51,13 @@ function unmount() {
 }
 
 function saved(): SavedState {
-  return JSON.parse(storage.get(CONVERSATIONS_STORAGE_KEY)!);
+  const index = JSON.parse(storage.get(CONVERSATIONS_STORAGE_KEY)!);
+  if (index.version === 2)
+    index.conversations = index.conversations.map((c: ChatConversation<DiskMsg>) => ({
+      ...c,
+      messages: c.messages ?? JSON.parse(storage.get(conversationBodyKey(c.id)) ?? '[]'),
+    }));
+  return index;
 }
 
 function conversation(id: string, serverId: string, updatedAt: number): ChatConversation<DiskMsg> {
@@ -62,6 +69,7 @@ function conversation(id: string, serverId: string, updatedAt: number): ChatConv
     createdAt: updatedAt - 1000,
     updatedAt,
     messages: [{ role: 'user', content: id }],
+    messageCount: 1,
   };
 }
 
@@ -281,7 +289,7 @@ describe('Mother Agent conversation persistence', () => {
     act(() => {
       vi.advanceTimersByTime(800);
     });
-    expect(setItem).toHaveBeenCalledTimes(2);
+    expect(setItem).toHaveBeenCalledTimes(3);
     expect(saved().conversations[0].messages).toEqual(state.messages);
     unmount();
     mount();
@@ -431,4 +439,210 @@ describe('Mother Agent conversation persistence', () => {
     mount();
     expect(state.activeConversation).toEqual(active);
   });
+});
+
+describe('conversation body loading and migration cost', () => {
+  it('maps only the active history and rewrites only its body after migration', () => {
+    const histories = Array.from({ length: 24 }, (_, index) => ({
+      ...conversation(`history-${index}`, 'local', Date.now() - index),
+      messages: Array.from({ length: 80 }, () => ({
+        role: 'assistant',
+        content: 'x'.repeat(2048),
+      })),
+    }));
+    storage.set(
+      CONVERSATIONS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        activeConversationId: histories[0].id,
+        conversations: histories,
+      })
+    );
+    const restore = vi.fn(fromDisk);
+    function Measured() {
+      const value = useChatPersistence({ toDisk, fromDisk: restore });
+      useLayoutEffect(() => {
+        state = value;
+      });
+      return (
+        <>
+          {value.conversations.map((conversation) => (
+            <span key={conversation.id}>
+              {conversation.messageCount ?? conversation.messages.length}
+            </span>
+          ))}
+        </>
+      );
+    }
+    act(() => {
+      renderer = create(<Measured />);
+    });
+    expect(restore).toHaveBeenCalledTimes(80);
+    act(() =>
+      state.setMessages((messages) => [...messages, { role: 'user', content: 'new answer' }])
+    );
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    expect(JSON.parse(storage.get(CONVERSATIONS_STORAGE_KEY)!).version).toBe(2);
+    expect(saved().conversations).toHaveLength(24);
+    setItem.mockClear();
+    act(() =>
+      state.setMessages((messages) => [...messages, { role: 'assistant', content: 'reply' }])
+    );
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    expect(setItem.mock.calls.map(([key]) => key)).toEqual([
+      conversationBodyKey(histories[0].id),
+      CONVERSATIONS_STORAGE_KEY,
+    ]);
+    expect(setItem.mock.calls.reduce((size, [, value]) => size + value.length, 0)).toBeLessThan(
+      180_000
+    );
+    unmount();
+    restore.mockClear();
+    act(() => {
+      renderer = create(<Measured />);
+    });
+    expect(restore).toHaveBeenCalledTimes(82);
+    act(() => state.selectConversation(histories[1].id));
+    expect(restore).toHaveBeenCalledTimes(162);
+    expect(state.messages).toEqual(histories[1].messages);
+  });
+
+  it('recovers every history when a migration body fails after partial progress', () => {
+    const first = conversation('first', 'local', Date.now());
+    const second = conversation('second', 'local', Date.now());
+    const oldIndex = JSON.stringify({
+      version: 1,
+      activeConversationId: first.id,
+      conversations: [first, second],
+    });
+    storage.set(CONVERSATIONS_STORAGE_KEY, oldIndex);
+    setItem.mockImplementation((key, value) => {
+      if (key === conversationBodyKey('second')) throw new Error('Storage full');
+      storage.set(key, value);
+    });
+    mount();
+    act(() =>
+      state.setMessages((messages) => [...messages, { role: 'assistant', content: 'in memory' }])
+    );
+    act(() => {
+      vi.advanceTimersByTime(800);
+    });
+    expect(saved().conversations.find((c) => c.id === 'first')?.messages).toEqual([
+      ...first.messages,
+      { role: 'assistant', content: 'in memory' },
+    ]);
+    const partial = JSON.parse(storage.get(CONVERSATIONS_STORAGE_KEY)!);
+    expect(
+      partial.conversations.find((c: ChatConversation<DiskMsg>) => c.id === 'second').messages
+    ).toEqual(second.messages);
+    expect(state.messages[state.messages.length - 1]?.content).toBe('in memory');
+    setItem.mockImplementation((key, value) => storage.set(key, value));
+    unmount();
+    mount();
+    expect(state.messages[state.messages.length - 1]?.content).toBe('in memory');
+    act(() => state.selectConversation('second'));
+    expect(state.messages).toEqual(second.messages);
+  });
+});
+
+it('migrates large histories below the storage limit without duplicating the full archive', () => {
+  const histories = Array.from({ length: 24 }, (_, index) => ({
+    ...conversation(`large-${index}`, 'local', Date.now()),
+    messages: Array.from({ length: 80 }, () => ({ role: 'assistant', content: 'x'.repeat(2048) })),
+  }));
+  storage.set(
+    CONVERSATIONS_STORAGE_KEY,
+    JSON.stringify({ version: 1, activeConversationId: histories[0].id, conversations: histories })
+  );
+  let peak = 0;
+  setItem.mockImplementation((key, value) => {
+    const total = [...storage].reduce(
+      (size, [storedKey, storedValue]) => size + (storedKey === key ? 0 : storedValue.length),
+      value.length
+    );
+    peak = Math.max(peak, total);
+    if (total > 5_000_000) throw new Error('Quota exceeded');
+    storage.set(key, value);
+  });
+  mount();
+  act(() =>
+    state.setMessages((messages) => [...messages, { role: 'user', content: 'new answer' }])
+  );
+  act(() => {
+    vi.advanceTimersByTime(800);
+  });
+  expect(peak).toBeLessThan(5_000_000);
+  expect(
+    JSON.parse(storage.get(CONVERSATIONS_STORAGE_KEY)!).conversations.every(
+      (c: ChatConversation<DiskMsg>) => c.messages === undefined
+    )
+  ).toBe(true);
+  expect(saved().conversations[23].messages).toEqual(histories[23].messages);
+  unmount();
+  mount();
+  act(() => state.selectConversation(histories[23].id));
+  expect(state.messages).toEqual(histories[23].messages);
+});
+
+it('does not lose a deletion target if the preceding migration cannot complete', async () => {
+  const first = conversation('first', 'local', Date.now());
+  const second = conversation('second', 'local', Date.now());
+  storage.set(
+    CONVERSATIONS_STORAGE_KEY,
+    JSON.stringify({ version: 1, activeConversationId: first.id, conversations: [first, second] })
+  );
+  mount();
+  setItem.mockImplementation((key, value) => {
+    if (key === conversationBodyKey(second.id)) throw new Error('No space');
+    storage.set(key, value);
+  });
+  const cleanup = vi.fn(async () => {});
+  await act(async () => {
+    await expect(state.deleteConversation(first.id, cleanup)).rejects.toThrow('No space');
+  });
+  expect(cleanup).not.toHaveBeenCalled();
+  expect(saved().conversations.map((c) => c.id)).toEqual([first.id, second.id]);
+  expect(state.activeConversationId).toBe(first.id);
+  unmount();
+  mount();
+  expect(state.messages).toEqual(first.messages);
+});
+
+it('preserves unsaved messages when saving and subsequent deletion cleanup both fail', async () => {
+  mount();
+  const id = state.activeConversationId;
+  const original = [{ role: 'user', content: 'Saved question' }];
+  act(() => state.setMessages(original));
+  act(() => {
+    vi.advanceTimersByTime(800);
+  });
+  let failures = 0;
+  setItem.mockImplementation((key, value) => {
+    if (key === conversationBodyKey(id) && failures++ < 2)
+      throw new Error('Temporary storage failure');
+    storage.set(key, value);
+  });
+  const latest = [...original, { role: 'assistant', content: 'Keep the unsaved reply' }];
+  act(() => state.setMessages(latest));
+  act(() => {
+    vi.advanceTimersByTime(800);
+  });
+  const cleanup = vi.fn(async () => {
+    throw new Error('Context file locked');
+  });
+  await act(async () => {
+    await expect(state.deleteConversation(id, cleanup)).rejects.toThrow('Context file locked');
+  });
+  expect(cleanup).toHaveBeenCalledOnce();
+  expect(state.messages).toEqual(latest);
+  expect(saved().conversations.find((conversation) => conversation.id === id)?.messages).toEqual(
+    latest
+  );
+  unmount();
+  mount();
+  expect(state.messages).toEqual(latest);
 });

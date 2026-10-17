@@ -45,6 +45,7 @@ const MODEL_UNAVAILABLE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 static ROUTE_MEMORY: OnceLock<Arc<Mutex<RouteMemory>>> = OnceLock::new();
+static ROUTE_MEMORY_WRITERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 static ROUTE_ACTIVITY: OnceLock<Mutex<RouteActivity>> = OnceLock::new();
 
 #[derive(Default)]
@@ -353,25 +354,47 @@ fn load_route_memory(path: &Path) -> RouteMemory {
         })
 }
 
-fn save_route_memory(path: &Path, memory: &RouteMemory) {
-    let Some(parent) = path.parent() else {
+// Allocate the sequence while holding route_memory, then release it before
+// serialization or disk access. A later snapshot cannot be overwritten by an
+// earlier caller that was descheduled before reaching the writer.
+fn persist_memory_at(path: &Path, memory: std::sync::MutexGuard<'_, RouteMemory>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let snapshot = memory.clone();
+    drop(memory);
+    write_memory_snapshot(path, sequence, &snapshot);
+}
+
+fn write_memory_snapshot(path: &Path, sequence: u64, memory: &RouteMemory) {
+    let Ok(mut written) = ROUTE_MEMORY_WRITERS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    else {
         return;
     };
-    let result = fs::create_dir_all(parent)
-        .map_err(|e| e.to_string())
-        .and_then(|_| serde_json::to_string_pretty(memory).map_err(|e| e.to_string()))
-        .and_then(|content| fs::write(path, content).map_err(|e| e.to_string()));
-    if let Err(error) = result {
-        log::warn!(
+    if written.get(path).is_some_and(|latest| *latest >= sequence) {
+        return;
+    }
+    let result = serde_json::to_vec_pretty(memory)
+        .map_err(|error| error.to_string())
+        .and_then(|content| {
+            crate::services::native_account_files::write_private_file(path, &content)
+        });
+    match result {
+        Ok(()) => {
+            written.insert(path.to_owned(), sequence);
+        }
+        Err(error) => log::warn!(
             "[SmartRouter] Failed to save route memory {}: {error}",
             path.display()
-        );
+        ),
     }
 }
 
-fn persist_route_memory(state: &AppState, memory: &RouteMemory) {
+fn persist_route_memory(state: &AppState, memory: std::sync::MutexGuard<'_, RouteMemory>) {
     if let Some(path) = &state.route_memory_path {
-        save_route_memory(path, memory);
+        persist_memory_at(path, memory);
     }
 }
 
@@ -386,7 +409,7 @@ pub(crate) fn retain_candidate_memory(candidate_ids: &[String]) {
         .candidates
         .retain(|candidate_id, _| valid.contains(candidate_id.as_str()));
     if memory.candidates.len() != previous_len {
-        save_route_memory(&route_memory_path(), &memory);
+        persist_memory_at(&route_memory_path(), memory);
     }
 }
 
@@ -396,7 +419,7 @@ pub(crate) fn forget_candidate_memory(candidate_id: &str) {
         return;
     };
     if clear_candidate_health(&mut memory, candidate_id) {
-        save_route_memory(&route_memory_path(), &memory);
+        persist_memory_at(&route_memory_path(), memory);
     }
 }
 
@@ -2190,11 +2213,9 @@ fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<C
             .get(candidate_id.as_str())
             .is_some_and(|fingerprint| health.fingerprint == *fingerprint)
     });
-    if memory.candidates.len() != previous_len || memory.accounts.len() != previous_accounts {
-        persist_route_memory(state, &memory);
-    }
-
-    candidates
+    let changed =
+        memory.candidates.len() != previous_len || memory.accounts.len() != previous_accounts;
+    let result = candidates
         .into_iter()
         .filter(|candidate| {
             !account_is_cooling_down(&memory, candidate, now)
@@ -2204,7 +2225,11 @@ fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<C
                     .and_then(|health| health.cooldown_until_ms)
                     .is_some_and(|until| until > now)
         })
-        .collect()
+        .collect();
+    if changed {
+        persist_route_memory(state, memory);
+    }
+    result
 }
 
 fn account_is_cooling_down(memory: &RouteMemory, candidate: &Candidate, now: u64) -> bool {
@@ -2722,7 +2747,7 @@ pub(crate) fn forget_account_authentication(
     memory.credential_versions.remove(&key);
     memory.revision = memory.revision.saturating_add(1);
     if clear_account_authentication(&mut memory, &key, &candidate_ids) {
-        save_route_memory(&route_memory_path(), &memory);
+        persist_memory_at(&route_memory_path(), memory);
     }
 }
 
@@ -2757,7 +2782,7 @@ fn bind_attempt_credentials(state: &AppState, candidate: &Candidate, credentials
             .credential_versions
             .insert(key.clone(), (version, revision));
         if clear_account_authentication(&mut memory, &key, &HashSet::new()) {
-            persist_route_memory(state, &memory);
+            persist_route_memory(state, memory);
         }
     }
 }
@@ -2791,7 +2816,7 @@ fn mark_success(state: &AppState, candidate: &Candidate) {
         memory.accounts.get(&key).is_some_and(may_clear) && memory.accounts.remove(&key).is_some()
     });
     if removed_failure || removed_account {
-        persist_route_memory(state, &memory);
+        persist_route_memory(state, memory);
     }
 }
 
@@ -2871,7 +2896,7 @@ fn mark_failure_scoped(
             }
         }
     }
-    persist_route_memory(state, &memory);
+    persist_route_memory(state, memory);
 }
 
 fn cooldown_for_failure(
@@ -3081,7 +3106,7 @@ fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) 
         {
             binding.ambiguous = true;
             binding.expires_at_ms = now.saturating_add(RESPONSE_BINDING_LIFETIME_MS);
-            persist_route_memory(state, &memory);
+            persist_route_memory(state, memory);
             return;
         }
     }
@@ -3106,7 +3131,7 @@ fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) 
             ambiguous: false,
         },
     );
-    persist_route_memory(state, &memory);
+    persist_route_memory(state, memory);
 }
 
 fn remember_unsupported_responses(state: &AppState, candidate: &Candidate) {
@@ -3939,6 +3964,64 @@ mod tests {
             vec![candidate(addr, "first"), candidate(addr, "second")],
         );
         assert_eq!(available[0].internal_id, "first");
+    }
+
+    #[test]
+    fn slow_writer_does_not_hold_the_routing_memory_mutex() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-performance-{}", uuid::Uuid::new_v4()));
+        let memory = Arc::new(Mutex::new(RouteMemory::default()));
+        let writer = ROUTE_MEMORY_WRITERS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap();
+        let (ready, held) = std::sync::mpsc::channel();
+        let shared = memory.clone();
+        let path = root.join("state.json");
+        let worker = std::thread::spawn(move || {
+            let locked = shared.lock().unwrap();
+            ready.send(()).unwrap();
+            persist_memory_at(&path, locked);
+        });
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while memory.try_lock().is_err() {
+            assert!(
+                Instant::now() < deadline,
+                "disk writer retained the routing lock"
+            );
+            std::thread::yield_now();
+        }
+        assert!(
+            !worker.is_finished(),
+            "positive control: writer should still be blocked"
+        );
+        drop(writer);
+        worker.join().unwrap();
+        assert!(root.join("state.json").is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordered_persistence_rejects_older_snapshots_and_releases_memory_before_io() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-performance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.as_path().join("state.json");
+        let mut current = RouteMemory {
+            revision: 20,
+            ..RouteMemory::default()
+        };
+        write_memory_snapshot(&path, 20, &current);
+        current.revision = 10;
+        write_memory_snapshot(&path, 10, &current);
+        assert_eq!(load_route_memory(&path).revision, 20);
+        // The memory mutex is immediately reusable after the durable write.
+        let memory = Mutex::new(RouteMemory::default());
+        persist_memory_at(&root.as_path().join("other.json"), memory.lock().unwrap());
+        assert!(memory.try_lock().is_ok());
+        assert!(root.join("other.json").is_file());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

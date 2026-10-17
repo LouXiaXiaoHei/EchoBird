@@ -51,6 +51,54 @@ function persistedSnapshots(snapshots: Partial<Record<Scope, CareerSnapshot>>) {
   );
 }
 
+function sameField(
+  field: keyof CareerSnapshot,
+  a: CareerSnapshot[keyof CareerSnapshot],
+  b: CareerSnapshot[keyof CareerSnapshot]
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (field === 'dailyTokens') {
+    const left = a as DailyTokenResponse,
+      right = b as DailyTokenResponse;
+    return (
+      left.entries.length === right.entries.length &&
+      left.unavailable_families.length === right.unavailable_families.length &&
+      left.unavailable_families.every((family, i) => family === right.unavailable_families[i]) &&
+      left.entries.every(
+        (entry, i) =>
+          entry.ts === right.entries[i].ts &&
+          entry.input_tokens === right.entries[i].input_tokens &&
+          entry.output_tokens === right.entries[i].output_tokens
+      )
+    );
+  }
+  if (field === 'dashboard') {
+    const left = a as NonNullable<CareerSnapshot['dashboard']>,
+      right = b as NonNullable<CareerSnapshot['dashboard']>;
+    return (
+      left.tokenBytes === right.tokenBytes &&
+      left.heatmapEntries.length === right.heatmapEntries.length &&
+      left.heatmapEntries.every(
+        (entry, i) =>
+          entry.ts === right.heatmapEntries[i].ts && entry.count === right.heatmapEntries[i].count
+      )
+    );
+  }
+  const left = a as SavedSession[],
+    right = b as SavedSession[];
+  return (
+    left.length === right.length &&
+    left.every((row, i) => {
+      const keys = Object.keys(row) as (keyof SavedSession)[];
+      return (
+        keys.length === Object.keys(right[i]).length &&
+        keys.every((key) => row[key] === right[i][key])
+      );
+    })
+  );
+}
+
 function readSnapshots(): Partial<Record<Scope, CareerSnapshot>> {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
@@ -141,7 +189,8 @@ interface AiCareerState {
 
 export const useAiCareerStore = create<AiCareerState>((set) => {
   const restored = readSnapshots();
-  let savedPayload = JSON.stringify({ version: CACHE_VERSION, data: persistedSnapshots(restored) });
+  let compact = persistedSnapshots(restored);
+  let savedPayload = JSON.stringify({ version: CACHE_VERSION, data: compact });
   const cache = <K extends keyof CareerSnapshot>(
     family: AiCareerFamily | null,
     field: K,
@@ -149,16 +198,17 @@ export const useAiCareerStore = create<AiCareerState>((set) => {
   ) =>
     set((state) => {
       const scope = family ?? 'overview';
-      if (JSON.stringify(state.cachedScopes[scope]?.[field]) === JSON.stringify(value))
-        return state;
+      if (sameField(field, state.cachedScopes[scope]?.[field], value)) return state;
       const cachedScopes = {
         ...state.cachedScopes,
         [scope]: { ...state.cachedScopes[scope], [field]: value },
       };
+      const changed = persistedSnapshots({ [scope]: { [field]: value } });
+      compact = { ...compact, [scope]: { ...compact[scope], ...changed[scope] } };
       try {
         const payload = JSON.stringify({
           version: CACHE_VERSION,
-          data: persistedSnapshots(cachedScopes),
+          data: compact,
         });
         if (payload !== savedPayload) {
           localStorage.setItem(STORAGE_KEY, payload);

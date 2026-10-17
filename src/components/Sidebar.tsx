@@ -1,5 +1,5 @@
 // Sidebar navigation component
-import { useState, useEffect, useRef } from 'react';
+import { useRef } from 'react';
 import {
   Box,
   Server,
@@ -15,8 +15,7 @@ import {
 import { NavItem } from './NavItem';
 import { RoutingToggle } from './RoutingToggle';
 import { useI18n } from '../hooks/useI18n';
-import * as api from '../api/tauri';
-import { useDocumentVisible } from '../hooks/useDocumentVisible';
+import { useLocalServerStatusStore } from '../stores/localServerStatusStore';
 import { BirdEasterEgg } from './BirdEasterEgg';
 
 declare const __APP_EDITION__: string;
@@ -60,27 +59,7 @@ export const Sidebar = ({
   const { t } = useI18n();
   const sidebarRef = useRef<HTMLElement>(null);
   const perchRef = useRef<HTMLDivElement>(null);
-  // Poll local model server status
-  const [serverRunning, setServerRunning] = useState(false);
-  const docVisible = useDocumentVisible();
-
-  // Poll local model server status — pause when the window is hidden so a
-  // backgrounded app doesn't poll IPC every 2s for hours. Resumes on focus.
-  useEffect(() => {
-    if (!isFullEdition || !docVisible) return;
-    const check = async () => {
-      try {
-        const info = await api.getLlmServerInfo();
-        const running = info?.running ?? false;
-        setServerRunning((prev) => (prev === running ? prev : running));
-      } catch {
-        setServerRunning((prev) => (prev === false ? prev : false));
-      }
-    };
-    check();
-    const interval = setInterval(check, 2000);
-    return () => clearInterval(interval);
-  }, [docVisible]);
+  const serverRunning = useLocalServerStatusStore((state) => state.running);
 
   return (
     <nav ref={sidebarRef} className="relative w-64 flex flex-col px-6 pb-6">

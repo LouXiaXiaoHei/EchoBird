@@ -16,6 +16,7 @@ export interface ChatConversation<T> {
   createdAt: number;
   updatedAt: number;
   messages: T[];
+  messageCount?: number;
 }
 
 interface ConversationState<T> {
@@ -24,6 +25,7 @@ interface ConversationState<T> {
 }
 
 export const CONVERSATIONS_STORAGE_KEY = 'echobird:agent:conversations';
+export const conversationBodyKey = (id: string) => `echobird:agent:conversation:${id}`;
 const LEGACY_PREFIX = 'echobird:chat:agent_';
 
 function newConversation<T>(serverId: string): ChatConversation<T> {
@@ -36,6 +38,7 @@ function newConversation<T>(serverId: string): ChatConversation<T> {
     createdAt: Date.now(),
     updatedAt: Date.now(),
     messages: [],
+    messageCount: 0,
   };
 }
 
@@ -47,13 +50,36 @@ function readMessages(value: unknown): DiskMsg[] {
     : [];
 }
 
-function loadConversations<T>(fromDisk: (m: DiskMsg) => T): ConversationState<T> {
+const countDiskMessages = (messages: DiskMsg[]) =>
+  messages.filter((message) => message.role !== 'system' && message.role !== 'tool').length;
+
+function loadConversations<T>(
+  fromDisk: (m: DiskMsg) => T,
+  pending: Map<string, DiskMsg[]>,
+  stored: Set<string>
+): ConversationState<T> {
+  const readBody = (id: string) => {
+    if (pending.has(id)) return pending.get(id)!;
+    try {
+      return readMessages(JSON.parse(localStorage.getItem(conversationBodyKey(id)) ?? '[]'));
+    } catch {
+      return [];
+    }
+  };
+  const lazy = (conversation: ChatConversation<T>, read: () => DiskMsg[]) => {
+    let messages: T[] | undefined;
+    Object.defineProperty(conversation, 'messages', {
+      enumerable: true,
+      get: () => (messages ??= read().map(fromDisk)),
+    });
+    return conversation;
+  };
   const conversations: ChatConversation<T>[] = [];
   try {
     const raw = localStorage.getItem(CONVERSATIONS_STORAGE_KEY);
     if (raw) {
       const saved = JSON.parse(raw);
-      if (saved.version === 1 && Array.isArray(saved.conversations)) {
+      if ((saved.version === 1 || saved.version === 2) && Array.isArray(saved.conversations)) {
         for (const c of saved.conversations) {
           if (
             typeof c?.id !== 'string' ||
@@ -64,7 +90,31 @@ function loadConversations<T>(fromDisk: (m: DiskMsg) => T): ConversationState<T>
             !Number.isFinite(c.updatedAt)
           )
             continue;
-          conversations.push({ ...c, messages: readMessages(c.messages).map(fromDisk) });
+          const id = c.id;
+          if (saved.version === 1 || Array.isArray(c.messages)) {
+            const messages = readMessages(c.messages);
+            pending.set(c.id, messages);
+            conversations.push(
+              lazy({ ...c, messages: [], messageCount: countDiskMessages(messages) }, () =>
+                readBody(id)
+              )
+            );
+          } else {
+            stored.add(c.id);
+            conversations.push(
+              lazy(
+                {
+                  ...c,
+                  messages: [],
+                  messageCount:
+                    Number.isInteger(c.messageCount) && c.messageCount >= 0
+                      ? c.messageCount
+                      : countDiskMessages(readBody(id)),
+                },
+                () => readBody(id)
+              )
+            );
+          }
         }
         if (conversations.length) {
           const active =
@@ -85,20 +135,27 @@ function loadConversations<T>(fromDisk: (m: DiskMsg) => T): ConversationState<T>
         const diskMessages = readMessages(JSON.parse(localStorage.getItem(key) || '[]'));
         if (!diskMessages.length) continue;
         const serverId = key.slice(LEGACY_PREFIX.length);
-        conversations.push({
-          id: `legacy-${serverId}`,
-          serverId,
-          sessionKey: serverId,
-          title:
-            diskMessages
-              .find((m) => m.role === 'user')
-              ?.content.trim()
-              .split('\n')[0]
-              .slice(0, 32) || '',
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-          messages: diskMessages.map(fromDisk),
-        });
+        pending.set(`legacy-${serverId}`, diskMessages);
+        conversations.push(
+          lazy(
+            {
+              id: `legacy-${serverId}`,
+              serverId,
+              sessionKey: serverId,
+              title:
+                diskMessages
+                  .find((m) => m.role === 'user')
+                  ?.content.trim()
+                  .split('\n')[0]
+                  .slice(0, 32) || '',
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              messages: [],
+              messageCount: countDiskMessages(diskMessages),
+            },
+            () => readBody(`legacy-${serverId}`)
+          )
+        );
       } catch {
         // Recover other servers even if one old history is damaged.
       }
@@ -118,31 +175,80 @@ export function useChatPersistence<T>({
   toDisk,
   fromDisk,
   debounceMs = 800,
+  countMessage,
 }: {
   toDisk: (msg: T) => DiskMsg | null;
   fromDisk: (msg: DiskMsg) => T;
   debounceMs?: number;
+  countMessage?: (message: T) => boolean;
 }) {
-  const [state, setState] = useState(() => loadConversations(fromDisk));
+  const [storageState] = useState(() => {
+    const pending = new Map<string, DiskMsg[]>();
+    const stored = new Set<string>();
+    return { pending, stored, initial: loadConversations(fromDisk, pending, stored) };
+  });
+  const changedBodies = useRef(new Set<string>());
+  const [state, setState] = useState(storageState.initial);
   const stateRef = useRef(state);
   const dirtyRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const writeStored = useCallback(
     (value: ConversationState<T>) => {
-      localStorage.setItem(
-        CONVERSATIONS_STORAGE_KEY,
-        JSON.stringify({
-          version: 1,
-          ...value,
-          conversations: value.conversations.map((c) => ({
-            ...c,
-            messages: c.messages.map(toDisk).filter((m) => m !== null),
-          })),
-        })
+      const bodies = new Map<string, DiskMsg[]>();
+      for (const c of value.conversations) {
+        if (changedBodies.current.has(c.id) || !storageState.stored.has(c.id)) {
+          bodies.set(
+            c.id,
+            changedBodies.current.has(c.id) || !storageState.pending.has(c.id)
+              ? c.messages.map(toDisk).filter((m) => m !== null)
+              : storageState.pending.get(c.id)!
+          );
+        }
+      }
+      const writeIndex = () =>
+        localStorage.setItem(
+          CONVERSATIONS_STORAGE_KEY,
+          JSON.stringify({
+            version: 2,
+            activeConversationId: value.activeConversationId,
+            conversations: value.conversations.map((c) => ({
+              id: c.id,
+              serverId: c.serverId,
+              sessionKey: c.sessionKey,
+              title: c.title,
+              createdAt: c.createdAt,
+              updatedAt: c.updatedAt,
+              messageCount: bodies.has(c.id)
+                ? countDiskMessages(bodies.get(c.id)!)
+                : (c.messageCount ?? c.messages.length),
+              // A partially migrated index retains every not-yet-written body.
+              ...(!storageState.stored.has(c.id) && { messages: bodies.get(c.id) }),
+            })),
+          })
+        );
+      // Migrate one body and commit a smaller index at a time. Peak storage is
+      // the old index plus one body, rather than two copies of all history.
+      const migrating = storageState.pending.size > 0;
+      const order = [...bodies.keys()].sort(
+        (left, right) =>
+          Number(right === value.activeConversationId) - Number(left === value.activeConversationId)
       );
+      for (const id of order) {
+        localStorage.setItem(conversationBodyKey(id), JSON.stringify(bodies.get(id)));
+        storageState.stored.add(id);
+        try {
+          if (migrating) writeIndex();
+        } catch (error) {
+          storageState.stored.delete(id);
+          throw error;
+        }
+        storageState.pending.delete(id);
+      }
+      if (!migrating || order.length === 0) writeIndex();
+      for (const id of bodies.keys()) changedBodies.current.delete(id);
     },
-    [toDisk]
+    [toDisk, storageState]
   );
 
   const flush = useCallback(() => {
@@ -186,6 +292,11 @@ export function useChatPersistence<T>({
       const active = prev.conversations.find((c) => c.id === prev.activeConversationId)!;
       const messages = typeof value === 'function' ? value(active.messages) : value;
       if (messages === active.messages) return;
+      const messageCount = messages.reduce((total, message) => {
+        if (countMessage) return total + Number(countMessage(message));
+        const disk = toDisk(message);
+        return total + Number(!!disk && disk.role !== 'system' && disk.role !== 'tool');
+      }, 0);
       let title = '';
       for (const message of messages) {
         const diskMessage = toDisk(message);
@@ -193,14 +304,15 @@ export function useChatPersistence<T>({
         title = diskMessage.content.trim().split('\n')[0].slice(0, 32);
         break;
       }
+      changedBodies.current.add(active.id);
       update({
         ...prev,
         conversations: prev.conversations.map((c) =>
-          c.id === active.id ? { ...c, messages, title, updatedAt: Date.now() } : c
+          c.id === active.id ? { ...c, messages, messageCount, title, updatedAt: Date.now() } : c
         ),
       });
     },
-    [toDisk, update]
+    [toDisk, update, countMessage]
   );
 
   const selectConversation = useCallback(
@@ -241,6 +353,9 @@ export function useChatPersistence<T>({
       const deleted = prev.conversations.find((c) => c.id === id);
       if (!deleted) return;
       flush();
+      // Finish any partial migration before changing membership, so a failed
+      // body write cannot commit a deletion before backend cleanup.
+      if (storageState.pending.size) writeStored(prev);
       const conversations = prev.conversations.filter((c) => c.id !== id);
       let activeConversationId = prev.activeConversationId;
       if (id === activeConversationId) {
@@ -254,13 +369,30 @@ export function useChatPersistence<T>({
         activeConversationId = active.id;
       }
       const next = { conversations, activeConversationId };
-      writeStored(next);
+      const discardNewBodies = () => {
+        for (const c of conversations) {
+          if (prev.conversations.some((previous) => previous.id === c.id)) continue;
+          try {
+            localStorage.removeItem(conversationBodyKey(c.id));
+          } catch {
+            /* Retry on a future cleanup. */
+          }
+          storageState.stored.delete(c.id);
+        }
+      };
+      try {
+        writeStored(next);
+      } catch (error) {
+        discardNewBodies();
+        throw error;
+      }
       if (cleanup) {
         try {
           await cleanup();
         } catch (error) {
           try {
             writeStored(prev);
+            discardNewBodies();
           } catch {
             dirtyRef.current = true;
           }
@@ -269,8 +401,17 @@ export function useChatPersistence<T>({
       }
       update(next);
       dirtyRef.current = false;
+      // Retain the body through backend cleanup so failure can restore the index.
+      try {
+        localStorage.removeItem(conversationBodyKey(id));
+      } catch {
+        /* Harmless orphan. */
+      }
+      storageState.stored.delete(id);
+      storageState.pending.delete(id);
+      changedBodies.current.delete(id);
     },
-    [flush, writeStored, update]
+    [flush, writeStored, update, storageState]
   );
 
   const activeConversation = state.conversations.find((c) => c.id === state.activeConversationId)!;

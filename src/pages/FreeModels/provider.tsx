@@ -1,0 +1,542 @@
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { arrayMove } from '@dnd-kit/sortable';
+import * as api from '../../api/tauri';
+import { listProxyAccounts, type ProxyAccount } from '../../api/accountProxy';
+import type { AccountProvider, AccountSource, ModelConfig } from '../../api/types';
+import type { FreeModelDirectory, FreeModelEntry } from '../../api/freeModels';
+import { useToast } from '../../components/Toast';
+import { useI18n } from '../../hooks/useI18n';
+import { useNavigationStore } from '../../stores/navigationStore';
+
+const SCAN_STEP_MS = 230;
+
+const SCAN_COMPLETE_MS = 320;
+
+const ROUTER_LAYOUT_KEY = 'echobird-router-layout';
+
+interface FreeModelsContextValue {
+  layout: 'cards' | 'list';
+  setLayout: (layout: 'cards' | 'list') => void;
+  activeDragId: string | null;
+  setActiveDragId: (id: string | null) => void;
+  catalog: FreeModelDirectory;
+  models: FreeModelEntry[];
+  customModels: RouteModelNode[];
+  proxyAccounts: Partial<Record<AccountProvider, ProxyAccount[]>>;
+  selectedIds: Set<string>;
+  refreshing: boolean;
+  scanProvider: string;
+  scanProgress: number;
+  routerBaseUrl: string;
+  routerEnabled: boolean;
+  routerTogglePending: boolean;
+  pausedIds: Set<string>;
+  candidateTogglePending: Set<string>;
+  setCandidateEnabled: (id: string, enabled: boolean) => Promise<void>;
+  setRouterEnabled: (enabled: boolean) => Promise<void>;
+  refresh: () => Promise<void>;
+  addSelectedModel: (model: RouteModelInput) => Promise<void>;
+  updateSelectedModel: (model: RouteModelInput) => void;
+  changeSelectedModel: (id: string, modelId: string) => Promise<ModelConfig | undefined>;
+  savingModelIds: Set<string>;
+  removeSelectedModel: (id: string) => Promise<void>;
+  reorderSelectedModel: (activeId: string, overId: string) => Promise<void>;
+}
+
+interface RouteModelInput {
+  internalId: string;
+  name: string;
+  baseUrl: string;
+  anthropicUrl?: string;
+  apiKey?: string;
+  modelId: string;
+  accountSource?: AccountSource;
+  scope?: ModelConfig['scope'];
+}
+
+export interface RouteModelNode {
+  id: string;
+  internalId: string;
+  provider: string;
+  modelId: string;
+  baseUrl: string;
+  anthropicUrl?: string;
+  apiKey?: string;
+  accountSource?: AccountSource;
+  scope?: ModelConfig['scope'];
+}
+
+const FreeModelsContext = createContext<FreeModelsContextValue | null>(null);
+
+const emptyCatalog: FreeModelDirectory = {
+  version: 1,
+  updatedAt: '',
+  models: [],
+};
+
+const providerPriority = ['nvidia-nim', 'openrouter'];
+
+export function providerRank(model: FreeModelEntry): number {
+  const rank = providerPriority.indexOf(model.providerId);
+  return rank === -1 ? providerPriority.length : rank;
+}
+
+function groupModelsForScan(models: FreeModelEntry[]): FreeModelEntry[][] {
+  const groups = new Map<string, FreeModelEntry[]>();
+  models.forEach((model) => {
+    const id = `${model.providerId}:${model.baseUrl}`;
+    const group = groups.get(id);
+    if (group) group.push(model);
+    else groups.set(id, [model]);
+  });
+  return [...groups.values()].sort((left, right) => providerRank(left[0]) - providerRank(right[0]));
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+export function useFreeModels() {
+  const value = useContext(FreeModelsContext);
+  if (!value) throw new Error('useFreeModels must be used within FreeModelsProvider');
+  return value;
+}
+
+export function FreeModelsProvider({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
+  const { showToast } = useToast();
+  const activePage = useNavigationStore((state) => state.activePage);
+  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [layout, setLayoutState] = useState<'cards' | 'list'>(() => {
+    try {
+      return localStorage.getItem(ROUTER_LAYOUT_KEY) === 'list' ? 'list' : 'cards';
+    } catch {
+      return 'cards';
+    }
+  });
+  const setLayout = useCallback((next: 'cards' | 'list') => {
+    setLayoutState(next);
+    try {
+      localStorage.setItem(ROUTER_LAYOUT_KEY, next);
+    } catch {
+      // Keep the choice for this session when local storage is unavailable.
+    }
+  }, []);
+  const [catalog, setCatalog] = useState<FreeModelDirectory>(emptyCatalog);
+  const [customModels, setCustomModels] = useState<RouteModelNode[]>([]);
+  const [proxyAccounts, setProxyAccounts] = useState<
+    Partial<Record<AccountProvider, ProxyAccount[]>>
+  >({});
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [refreshing, setRefreshing] = useState(false);
+  const [scanProvider, setScanProvider] = useState('');
+  const [scanProgress, setScanProgress] = useState(0);
+  const [routerBaseUrl, setRouterBaseUrl] = useState('127.0.0.1:53683/v1');
+  const [routerEnabled, setRouterEnabledState] = useState(true);
+  const [routerTogglePending, setRouterTogglePending] = useState(false);
+  const [routerLoaded, setRouterLoaded] = useState(false);
+  const [pausedIds, setPausedIds] = useState<Set<string>>(() => new Set());
+  const [candidateTogglePending, setCandidateTogglePending] = useState<Set<string>>(
+    () => new Set()
+  );
+  const candidateTogglePendingRef = useRef(new Set<string>());
+  const [savingModelIds, setSavingModelIds] = useState<Set<string>>(() => new Set());
+  const savingModelIdsRef = useRef(new Set<string>());
+  const refreshInFlightRef = useRef(false);
+  const catalogRefreshedRef = useRef(false);
+  const routerMutationRef = useRef<Promise<void>>(Promise.resolve());
+  const selectedIdsRef = useRef<Set<string>>(new Set());
+  const routerLoadedRef = useRef(false);
+  const models = catalog.models;
+  const accountProvidersKey = JSON.stringify(
+    [
+      ...new Set(
+        customModels.flatMap((model) => (model.accountSource ? [model.accountSource.provider] : []))
+      ),
+    ].sort()
+  );
+
+  useEffect(() => {
+    if (activePage !== 'freeModels') return;
+    const providers: AccountProvider[] = JSON.parse(accountProvidersKey);
+    if (providers.length === 0) return;
+    let ignore = false;
+    void Promise.allSettled(providers.map((provider) => listProxyAccounts(provider))).then(
+      (results) => {
+        if (ignore) return;
+        setProxyAccounts((previous) => {
+          const next = { ...previous };
+          results.forEach((result, index) => {
+            if (result.status === 'fulfilled') next[providers[index]] = result.value;
+          });
+          return next;
+        });
+      }
+    );
+    return () => {
+      ignore = true;
+    };
+  }, [activePage, accountProvidersKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .getCachedFreeModelDirectory()
+      .then((cached) => {
+        if (!cancelled && !catalogRefreshedRef.current && cached) setCatalog(cached);
+      })
+      .catch((error) => console.error('Load cached free model directory failed:', error));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const loadRouter = useCallback(async () => {
+    routerLoadedRef.current = false;
+    const [loadedRouter, configuredModels] = await Promise.all([
+      api.getSmartRouterConfig(),
+      api.getSmartRouterCandidates(),
+    ]);
+    const modelsById = new Map(configuredModels.map((model) => [model.internalId, model]));
+    const routeModels = loadedRouter.candidateIds.flatMap((internalId) => {
+      const model = modelsById.get(internalId);
+      if (!model) return [];
+      return [
+        {
+          id: internalId,
+          internalId,
+          provider: model.name,
+          modelId: model.modelId ?? '',
+          baseUrl: model.baseUrl,
+          anthropicUrl: model.anthropicUrl,
+          apiKey: model.apiKey,
+          accountSource: model.accountSource,
+          scope: model.scope,
+        },
+      ];
+    });
+    const router =
+      loadedRouter.enabled && routeModels.length === 0
+        ? await api.setSmartRouterEnabled(false)
+        : loadedRouter;
+    setCustomModels(routeModels);
+    const next = new Set(router.candidateIds);
+    selectedIdsRef.current = next;
+    setSelectedIds((current) => {
+      if (
+        current.size === next.size &&
+        [...current].every((id, index) => id === router.candidateIds[index])
+      ) {
+        return current;
+      }
+      return next;
+    });
+    setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
+    setRouterEnabledState(router.enabled);
+    setPausedIds(new Set(router.disabledCandidateIds ?? []));
+    setRouterLoaded(true);
+    routerLoadedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (routerLoadedRef.current && activePage !== 'freeModels') return;
+    // Keep reads and their state updates in the mutation queue, so a late
+    // page-entry response cannot overwrite a newer addition or priority order.
+    const load = routerMutationRef.current.catch(() => undefined).then(loadRouter);
+    routerMutationRef.current = load;
+    void load.catch((error) => console.error('Load smart router config failed:', error));
+  }, [activePage, loadRouter]);
+
+  const setRouterEnabled = useCallback(
+    async (enabled: boolean) => {
+      setRouterTogglePending(true);
+      const change = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const router = await api.setSmartRouterEnabled(enabled);
+          setRouterEnabledState(router.enabled);
+          setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
+        });
+      routerMutationRef.current = change;
+      try {
+        await change;
+      } catch (error) {
+        console.error('Toggle smart router failed:', error);
+        showToast('error', t('error.requestFailed'));
+      } finally {
+        setRouterTogglePending(false);
+      }
+    },
+    [showToast, t]
+  );
+
+  const setCandidateEnabled = useCallback(
+    async (id: string, enabled: boolean) => {
+      if (candidateTogglePendingRef.current.has(id)) return;
+      candidateTogglePendingRef.current.add(id);
+      setCandidateTogglePending(new Set(candidateTogglePendingRef.current));
+      const change = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const router = await api.setSmartRouterCandidateEnabled(id, enabled);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
+        });
+      routerMutationRef.current = change;
+      try {
+        await change;
+      } catch (error) {
+        console.error('Toggle smart router candidate failed:', error);
+        showToast('error', t('error.requestFailed'));
+      } finally {
+        candidateTogglePendingRef.current.delete(id);
+        setCandidateTogglePending(new Set(candidateTogglePendingRef.current));
+      }
+    },
+    [showToast, t]
+  );
+
+  const refresh = useCallback(async () => {
+    if (refreshInFlightRef.current) return;
+    refreshInFlightRef.current = true;
+    setScanProvider('');
+    setScanProgress(0);
+    setRefreshing(true);
+    try {
+      const remote = await api.getFreeModelDirectory();
+      if (!remote) {
+        showToast('warning', t('freeModels.fetchFailed'));
+        return;
+      }
+
+      catalogRefreshedRef.current = true;
+      setCatalog({ ...remote, models: [] });
+      const groups = groupModelsForScan(remote.models);
+      const revealedModels: FreeModelEntry[] = [];
+      for (const [index, group] of groups.entries()) {
+        setScanProvider(group[0]?.provider ?? '');
+        await wait(SCAN_STEP_MS);
+        revealedModels.push(...group);
+        setCatalog({ ...remote, models: [...revealedModels] });
+        setScanProgress((index + 1) / groups.length);
+      }
+      await wait(SCAN_COMPLETE_MS);
+    } catch (error) {
+      console.error('Fetch free model directory failed:', error);
+      showToast('error', t('freeModels.fetchFailed'));
+    } finally {
+      refreshInFlightRef.current = false;
+      setScanProvider('');
+      setScanProgress(0);
+      setRefreshing(false);
+    }
+  }, [showToast, t]);
+
+  const addSelectedModel = useCallback(
+    async (model: RouteModelInput) => {
+      const id = model.internalId;
+      const addition = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          // Retry a failed initial/refresh read before constructing a full-list
+          // write. An unread configuration must never be treated as an empty one.
+          if (!routerLoadedRef.current) await loadRouter();
+          const candidateIds = [...new Set([...selectedIdsRef.current, id])];
+          const router = await api.setSmartRouterCandidates(candidateIds);
+          if (!router.candidateIds.includes(id)) {
+            throw new Error(`Smart Router rejected candidate: ${id}`);
+          }
+
+          const nextIds = new Set(router.candidateIds);
+          selectedIdsRef.current = nextIds;
+          setSelectedIds(nextIds);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
+          setCustomModels((current) => [
+            ...current.filter((entry) => entry.id !== id),
+            {
+              id,
+              internalId: model.internalId,
+              provider: model.name,
+              modelId: model.modelId,
+              baseUrl: model.baseUrl,
+              anthropicUrl: model.anthropicUrl,
+              apiKey: model.apiKey,
+              accountSource: model.accountSource,
+              scope: model.scope,
+            },
+          ]);
+          setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
+        });
+      routerMutationRef.current = addition;
+      await addition;
+    },
+    [loadRouter]
+  );
+
+  const updateSelectedModel = useCallback(
+    (model: RouteModelInput) => {
+      routerMutationRef.current = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          setCustomModels((current) =>
+            current.map((entry) =>
+              entry.id === model.internalId
+                ? {
+                    ...entry,
+                    provider: model.name,
+                    modelId: model.modelId,
+                    baseUrl: model.baseUrl,
+                    anthropicUrl: model.anthropicUrl,
+                    apiKey: model.apiKey,
+                    accountSource: model.accountSource,
+                    scope: model.scope ?? entry.scope,
+                  }
+                : entry
+            )
+          );
+          await loadRouter();
+        })
+        .catch((error) => console.error('Refresh smart router after model update failed:', error));
+    },
+    [loadRouter]
+  );
+
+  const changeSelectedModel = useCallback(
+    async (id: string, modelId: string) => {
+      if (savingModelIdsRef.current.has(id)) return;
+      savingModelIdsRef.current.add(id);
+      setSavingModelIds(new Set(savingModelIdsRef.current));
+      const change = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!routerLoadedRef.current) await loadRouter();
+          if (!selectedIdsRef.current.has(id))
+            throw new Error(`Smart router model not found: ${id}`);
+          const updated = await api.updateModel(id, { modelId });
+          if (!updated) throw new Error(`Smart router model not found: ${id}`);
+          setCustomModels((current) =>
+            current.map((entry) =>
+              entry.id === id ? { ...entry, modelId: updated.modelId ?? modelId } : entry
+            )
+          );
+          return updated;
+        });
+      routerMutationRef.current = change.then(
+        () => undefined,
+        () => undefined
+      );
+      try {
+        return await change;
+      } finally {
+        savingModelIdsRef.current.delete(id);
+        setSavingModelIds(new Set(savingModelIdsRef.current));
+      }
+    },
+    [loadRouter]
+  );
+
+  const removeSelectedModel = useCallback(
+    async (id: string) => {
+      const removal = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!routerLoadedRef.current) await loadRouter();
+          let router = await api.removeSmartRouterCandidate(id);
+          if (router.enabled && router.candidateIds.length === 0) {
+            router = await api.setSmartRouterEnabled(false);
+          }
+          const nextIds = new Set(router.candidateIds);
+          selectedIdsRef.current = nextIds;
+          setSelectedIds(nextIds);
+          setCustomModels((current) => current.filter((model) => model.id !== id));
+          setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
+          setRouterEnabledState(router.enabled);
+          setPausedIds(new Set(router.disabledCandidateIds ?? []));
+        });
+      routerMutationRef.current = removal;
+      try {
+        await removal;
+      } catch (error) {
+        console.error('Remove smart router candidate failed:', error);
+        showToast('error', t('error.requestFailed'));
+      }
+    },
+    [loadRouter, showToast, t]
+  );
+
+  const reorderSelectedModel = useCallback(
+    async (activeId: string, overId: string) => {
+      const reorder = routerMutationRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (!routerLoadedRef.current) await loadRouter();
+          const previous = selectedIdsRef.current;
+          const ids = [...previous];
+          const from = ids.indexOf(activeId);
+          const to = ids.indexOf(overId);
+          if (from < 0 || to < 0 || from === to) return;
+          const candidateIds = arrayMove(ids, from, to);
+          setSelectedIds(new Set(candidateIds));
+          try {
+            const router = await api.setSmartRouterCandidates(candidateIds);
+            const next = new Set(router.candidateIds);
+            selectedIdsRef.current = next;
+            setSelectedIds(next);
+          } catch (error) {
+            setSelectedIds(previous);
+            throw error;
+          }
+        });
+      routerMutationRef.current = reorder;
+      try {
+        await reorder;
+      } catch (error) {
+        console.error('Save smart router order failed:', error);
+        showToast('error', t('error.requestFailed'));
+      }
+    },
+    [loadRouter, showToast, t]
+  );
+
+  return (
+    <FreeModelsContext.Provider
+      value={{
+        layout,
+        setLayout,
+        activeDragId,
+        setActiveDragId,
+        catalog,
+        models,
+        customModels,
+        proxyAccounts,
+        selectedIds,
+        refreshing,
+        scanProvider,
+        scanProgress,
+        routerBaseUrl,
+        routerEnabled,
+        routerTogglePending: routerTogglePending || !routerLoaded,
+        pausedIds,
+        candidateTogglePending,
+        setCandidateEnabled,
+        setRouterEnabled,
+        refresh,
+        addSelectedModel,
+        updateSelectedModel,
+        changeSelectedModel,
+        savingModelIds,
+        removeSelectedModel,
+        reorderSelectedModel,
+      }}
+    >
+      {children}
+    </FreeModelsContext.Provider>
+  );
+}

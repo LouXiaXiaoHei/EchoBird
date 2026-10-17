@@ -23,7 +23,7 @@ vi.mock('../ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };
 });
-vi.mock('../FreeModels', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
 vi.mock('./useClaudeCodeAccounts', () => ({ useClaudeCodeAccounts: () => ({ accounts: [] }) }));
 vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
 vi.mock('./useDeepSeekAccounts', () => ({ useDeepSeekAccounts: () => ({ accounts: [] }) }));

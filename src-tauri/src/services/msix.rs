@@ -41,7 +41,7 @@ fn select_application(uri: &str, applications: &[Application]) -> Option<String>
 }
 
 #[cfg(windows)]
-fn installed_applications(identity: &str) -> windows::core::Result<Vec<Application>> {
+fn installed_applications(identities: &[&str]) -> windows::core::Result<Vec<Application>> {
     use windows::{core::HSTRING, Management::Deployment::PackageManager};
 
     let packages = PackageManager::new()?.FindPackagesByUserSecurityId(&HSTRING::new())?;
@@ -49,7 +49,10 @@ fn installed_applications(identity: &str) -> windows::core::Result<Vec<Applicati
     for package in packages {
         let id = package.Id()?;
         let name = id.Name()?.to_string();
-        if !identity_matches(identity, &name) {
+        if !identities
+            .iter()
+            .any(|identity| identity_matches(identity, &name))
+        {
             continue;
         }
         let version = id.Version()?;
@@ -70,9 +73,31 @@ fn installed_applications(identity: &str) -> windows::core::Result<Vec<Applicati
 }
 
 #[cfg(windows)]
+pub(crate) struct Snapshot(Vec<Application>);
+#[cfg(windows)]
+impl Snapshot {
+    pub(crate) fn capture(configured: &[String]) -> Option<Self> {
+        let identities: Vec<_> = configured
+            .iter()
+            .filter_map(|uri| configured_identity(uri).map(|(identity, _)| identity))
+            .collect();
+        installed_applications(&identities)
+            .map(Self)
+            .map_err(|error| log::warn!("[MSIX] Installation snapshot unavailable: {error}"))
+            .ok()
+    }
+    pub(crate) fn resolve(&self, configured: &str) -> Option<String> {
+        select_application(configured, &self.0)
+    }
+}
+
+#[cfg(windows)]
 pub(crate) fn resolve_launch_uri(configured: &str) -> Option<String> {
     let (identity, _) = configured_identity(configured)?;
-    match installed_applications(identity) {
+    if let Some(result) = super::tool_manager::discovery_msix_uri(configured) {
+        return result;
+    }
+    match installed_applications(&[identity]) {
         Ok(applications) => select_application(configured, &applications),
         Err(error) => {
             log::warn!("[MSIX] Package lookup failed for {identity}: {error}");
@@ -187,7 +212,7 @@ mod tests {
     #[test]
     #[ignore = "live Windows package inventory: requires Microsoft Store installed"]
     fn real_inventory_has_a_positive_control_and_rejects_missing_packages() {
-        let apps = installed_applications("Microsoft.WindowsStore").unwrap();
+        let apps = installed_applications(&["Microsoft.WindowsStore"]).unwrap();
         assert!(
             !apps.is_empty(),
             "positive control must find a registered app"

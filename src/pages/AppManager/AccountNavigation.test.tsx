@@ -48,7 +48,9 @@ vi.mock('../../pages/ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };
 });
-vi.mock('../../pages/FreeModels', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
+vi.mock('../../pages/FreeModels/provider', () => ({
+  useFreeModels: () => ({ routerEnabled: false }),
+}));
 vi.mock('../../pages/AppManager/ClaudeCodeLoginDialog', () => ({
   ClaudeCodeLoginDialog: () => null,
 }));

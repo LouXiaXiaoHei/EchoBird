@@ -2,17 +2,20 @@ import { useLayoutEffect } from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { useLocalServerStatusStore } from '../../stores/localServerStatusStore';
 import type { GgufFile } from '../../api/types';
 import { LocalServerMain, LocalServerPanel, LocalServerProvider } from './LocalServer';
 import { useLocalServer } from './context';
 
-const { downloads, startDownload, confirm } = vi.hoisted(() => ({
+const { downloads, startDownload, confirm, visibility } = vi.hoisted(() => ({
   downloads: new Map(),
+  visibility: { visible: false },
   startDownload: vi.fn(),
   confirm: vi.fn(),
 }));
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
-vi.mock('../../hooks/useDocumentVisible', () => ({ useDocumentVisible: () => false }));
+vi.mock('../../hooks/useDocumentVisible', () => ({ useDocumentVisible: () => visibility.visible }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
 vi.mock('../../components/DownloadContext', () => ({
   useDownload: () => ({ downloads, startDownload, isDownloading: false }),
@@ -24,6 +27,8 @@ vi.mock('../../components/MiniSelect', () => ({
 }));
 vi.mock('../../api/tauri', () => ({
   getModelsDirs: vi.fn(),
+  getLlmServerInfo: vi.fn(),
+  getLlmServerLogs: vi.fn(),
   scanGgufFiles: vi.fn(),
   scanHfModels: vi.fn(),
   getDownloadDir: vi.fn(),
@@ -72,6 +77,9 @@ describe('Local model page navigation', () => {
   }
   beforeEach(() => {
     vi.clearAllMocks();
+    visibility.visible = false;
+    useNavigationStore.setState({ activePage: 'localLlm' });
+    useLocalServerStatusStore.setState({ running: false });
     downloads.clear();
     vi.stubGlobal('navigator', { platform: 'Linux' });
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Offline')));
@@ -98,6 +106,7 @@ describe('Local model page navigation', () => {
   afterEach(() => {
     act(() => renderer?.unmount());
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('positive control: scans local models on entry without installing or downloading', async () => {
@@ -494,5 +503,34 @@ describe('Local model page navigation', () => {
       click('server.store');
     });
     expect(JSON.stringify(renderer.toJSON())).not.toContain('store.ready');
+  });
+  it('pauses a mounted log view off-page and ignores its late response', async () => {
+    vi.useFakeTimers();
+    visibility.visible = true;
+    vi.mocked(api.getLlmServerInfo).mockResolvedValue({ running: false } as Awaited<
+      ReturnType<typeof api.getLlmServerInfo>
+    >);
+    let resolve!: (logs: string[]) => void;
+    vi.mocked(api.getLlmServerLogs).mockReturnValue(
+      new Promise((done) => {
+        resolve = done;
+      })
+    );
+    await open(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(api.getLlmServerLogs).toHaveBeenCalledOnce();
+    await act(async () => useNavigationStore.getState().setActivePage('apps'));
+    await act(async () => resolve(['old hidden log']));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(api.getLlmServerLogs).toHaveBeenCalledOnce();
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('old hidden log');
+    vi.mocked(api.getLlmServerLogs).mockResolvedValue(['current log']);
+    await act(async () => useNavigationStore.getState().setActivePage('localLlm'));
+    expect(api.getLlmServerLogs).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(renderer.toJSON())).toContain('current log');
   });
 });

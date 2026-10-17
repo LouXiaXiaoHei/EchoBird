@@ -54,7 +54,7 @@ beforeEach(() => {
   );
   locale = 'en';
   activePage = 'mother';
-  vi.stubGlobal('document', new EventTarget());
+  vi.stubGlobal('document', Object.assign(new EventTarget(), { visibilityState: 'visible' }));
   state = {
     conversations: [
       {
@@ -102,6 +102,18 @@ beforeEach(() => {
     reasoningLevels: [],
     setReasoningEffort: vi.fn(),
   };
+});
+
+it('focuses an existing prefill when the first-visit input mounts late', () => {
+  const focus = vi.fn();
+  state = { ...state, chatInput: 'Install the selected application' };
+  act(() => {
+    renderer = create(<MotherAgentMain />, {
+      createNodeMock: (element) => (element.type === 'textarea' ? { focus } : null),
+    });
+  });
+  expect(focus).toHaveBeenCalledOnce();
+  expect(state.handleChatSend).toBeUndefined();
 });
 
 it('keeps automatic memory operations out of the visible conversation', () => {

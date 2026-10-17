@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
-import { useDocumentVisible } from '../../hooks/useDocumentVisible';
+import { useUsageClock } from '../../hooks/useUsageClock';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useMotherAgent } from './context';
 
@@ -15,17 +14,8 @@ export function ConversationList() {
     deleteConversation,
     isProcessing,
   } = useMotherAgent();
-  const docVisible = useDocumentVisible();
   const isMotherActive = useNavigationStore((s) => s.activePage === 'mother');
-  const [now, setNow] = useState(Date.now);
-
-  useEffect(() => {
-    if (!docVisible || !isMotherActive) return;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(timer);
-  }, [docVisible, isMotherActive]);
+  const now = useUsageClock(isMotherActive);
 
   const relativeTime = new Intl.RelativeTimeFormat(locale, { numeric: 'always' });
   const formatUpdatedTime = (updatedAt: number) => {
@@ -55,9 +45,11 @@ export function ConversationList() {
       <div className="mt-2 space-y-2">
         {conversations.map((conversation) => {
           const active = conversation.id === activeConversationId;
-          const messageCount = conversation.messages.filter(
-            (message) => message.type === 'user' || message.type === 'assistant'
-          ).length;
+          const messageCount =
+            conversation.messageCount ??
+            conversation.messages.filter(
+              (message) => message.type === 'user' || message.type === 'assistant'
+            ).length;
           return (
             <div
               key={conversation.id}

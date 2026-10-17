@@ -2,7 +2,7 @@
 // its arguments, and the result. Modeled after Claude.ai / Cursor's
 // "Calling tool…" panels: a one-line preview while running, expandable
 // for full args + output.
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import {
   Loader2,
   Check,
@@ -55,7 +55,12 @@ function previewFor(toolName: string, args: string): string {
 
 const OUTPUT_PREVIEW_LIMIT = 4000;
 
-export function ToolCallCard({ name, args, status, output }: ToolCallCardProps) {
+export const ToolCallCard = memo(function ToolCallCard({
+  name,
+  args,
+  status,
+  output,
+}: ToolCallCardProps) {
   const [open, setOpen] = useState(false);
 
   const meta = TOOL_META[name] || { icon: Wrench, label: name };
@@ -118,4 +123,4 @@ export function ToolCallCard({ name, args, status, output }: ToolCallCardProps) 
       )}
     </div>
   );
-}
+});

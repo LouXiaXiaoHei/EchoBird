@@ -228,3 +228,29 @@ it('drops only daily snapshots when their recorded timezone differs', async () =
   });
   expect(second.getState().cachedScopes.codex?.sessions).toEqual([session(1)]);
 });
+
+it('does not aggregate unchanged token samples for unrelated scope writes', async () => {
+  const store = await restart();
+  const aggregate = vi.spyOn(Date.prototype, 'toDateString');
+  const data: DailyTokenResponse = {
+    entries: Array.from({ length: 100_000 }, (_, index) => ({
+      ts: 1_791_676_800 + index,
+      input_tokens: 3,
+      output_tokens: 2,
+    })),
+    unavailable_families: [],
+  };
+  store.getState().cacheDailyTokens(null, data);
+  expect(aggregate).toHaveBeenCalledTimes(100_000);
+  aggregate.mockClear();
+  setItem.mockClear();
+  store.getState().cacheDailyTokens(null, data);
+  store
+    .getState()
+    .cacheDailyTokens(null, { ...data, entries: data.entries.map((entry) => ({ ...entry })) });
+  expect(setItem).not.toHaveBeenCalled();
+  store.getState().cacheDashboard('codex', [{ ts: 1_791_676_800, count: 1 }], 3);
+  expect(aggregate).not.toHaveBeenCalled();
+  expect(setItem).toHaveBeenCalledOnce();
+  aggregate.mockRestore();
+});

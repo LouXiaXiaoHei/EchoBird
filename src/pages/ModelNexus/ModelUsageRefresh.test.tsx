@@ -29,7 +29,7 @@ vi.mock('../../components', () => ({
   ModelIdCombobox: () => null,
   getModelIcon: () => null,
 }));
-vi.mock('../FreeModels/FreeModels', () => ({
+vi.mock('../FreeModels/provider', () => ({
   useFreeModels: () => ({
     addSelectedModel: vi.fn(),
     updateSelectedModel: vi.fn(),

@@ -31,7 +31,7 @@ vi.mock('../ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };
 });
-vi.mock('../FreeModels', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
 
 const account: ClineAccount = {
   id: 'saved',

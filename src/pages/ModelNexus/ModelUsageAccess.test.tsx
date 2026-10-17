@@ -16,7 +16,7 @@ vi.mock('../../components', () => ({
   ModelIdCombobox: () => null,
   getModelIcon: () => null,
 }));
-vi.mock('../FreeModels/FreeModels', () => ({ useFreeModels: vi.fn() }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: vi.fn() }));
 vi.mock('../../api/tauri', () => ({
   getModels: vi.fn().mockResolvedValue([
     {

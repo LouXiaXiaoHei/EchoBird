@@ -24,6 +24,9 @@ export function selectAgentProtocol(baseUrl: string, anthropicUrl?: string) {
 
 // ===== Provider =====
 
+const countConversationMessage = (message: ChatMessage) =>
+  message.type === 'user' || message.type === 'assistant';
+
 export function MotherAgentProvider({ children }: { children: React.ReactNode }) {
   // From stores (replaces drilled props)
   const { detectedTools: _detectedTools } = useToolsStore();
@@ -261,6 +264,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const persistence = useChatPersistence<ChatMessage>({
     toDisk,
     fromDisk,
+    countMessage: countConversationMessage,
   });
   const {
     messages: chatOutput,

@@ -28,11 +28,17 @@ pub(crate) struct ModelMetadata {
 
 static CATALOGS: OnceLock<Mutex<HashMap<String, Vec<ModelMetadata>>>> = OnceLock::new();
 
-fn client() -> Result<reqwest::Client, ProxyError> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(15))
-        .build()
+fn client() -> Result<&'static reqwest::Client, ProxyError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(15))
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
         .map_err(ProxyError::upstream)
 }
 

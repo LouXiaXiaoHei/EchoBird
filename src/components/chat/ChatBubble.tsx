@@ -1,7 +1,7 @@
 // ChatBubble — modern AI conversation style.
 // Assistant: full-width markdown, no bubble (plain text on the page bg).
 // User: subtle right-aligned card. Streaming caret while the agent types.
-import { useEffect, useState, useMemo } from 'react';
+import { memo, useEffect, useState, useMemo } from 'react';
 import { Paperclip, KeyRound, Image as ImageIcon } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -204,7 +204,7 @@ function cleanAgentText(content: string): string {
 }
 
 // ── Main ChatBubble ───────────────────────────────────────────────────────────
-export function ChatBubble({
+export const ChatBubble = memo(function ChatBubble({
   role,
   content,
   chips = [],
@@ -294,4 +294,4 @@ export function ChatBubble({
       {chips.length > 0 && <ReadonlyChips chips={chips} />}
     </div>
   );
-}
+});

@@ -1,4 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useSyncExternalStore } from 'react';
+import { useUsageClock } from '../../hooks/useUsageClock';
+
+const subscribeMounted = () => () => {};
+const clientMounted = () => true;
+const serverMounted = () => false;
 
 function formatQuotaCountdown(resetAt: number, now: number, compact?: boolean): string {
   const minutes = Math.max(0, Math.ceil((resetAt * 1000 - now) / 60_000));
@@ -21,18 +26,10 @@ export const QuotaCountdown: React.FC<{
   label?: string;
   keepZero?: boolean;
 }> = ({ resetAt, compact, small, parenthesized, label, keepZero }) => {
-  const [now, setNow] = useState<number | null>(null);
-  useEffect(() => {
-    if (!resetAt) return;
-    const initial = setTimeout(() => setNow(Date.now()), 0);
-    const timer = setInterval(() => setNow(Date.now()), 60_000);
-    return () => {
-      clearTimeout(initial);
-      clearInterval(timer);
-    };
-  }, [resetAt]);
-  if (compact && (!resetAt || now === null || (!keepZero && resetAt * 1000 <= now))) return null;
-  const countdown = resetAt && now !== null ? formatQuotaCountdown(resetAt, now, compact) : '';
+  const now = useUsageClock(!!resetAt);
+  const mounted = useSyncExternalStore(subscribeMounted, clientMounted, serverMounted);
+  if (compact && (!mounted || !resetAt || (!keepZero && resetAt * 1000 <= now))) return null;
+  const countdown = resetAt && mounted ? formatQuotaCountdown(resetAt, now, compact) : '';
   return (
     <span
       aria-label={label && countdown ? `${label} ${countdown}` : undefined}

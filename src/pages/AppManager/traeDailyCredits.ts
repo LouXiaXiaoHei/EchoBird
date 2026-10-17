@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useUsageClock } from '../../hooks/useUsageClock';
 import type { TraeAccount } from '../../api/tauri';
 
 export const traeClaimedToday = (at?: number | null, now = Date.now()) =>
@@ -15,11 +15,6 @@ export const traeClaimUnavailable = (
   accounts.some((row) => row.edition === 'traecn' && traeClaimedToday(row.deviceClaimedAt, now));
 
 export function useTraeClaimedToday(enabled: boolean) {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    if (!enabled) return;
-    const timer = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(timer);
-  }, [enabled]);
+  const now = useUsageClock(enabled);
   return (at?: number | null) => traeClaimedToday(at, now);
 }

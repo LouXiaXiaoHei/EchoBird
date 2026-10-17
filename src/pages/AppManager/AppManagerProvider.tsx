@@ -26,7 +26,7 @@ import { AppManagerContext } from './context';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useModelNexus } from '../ModelNexus/context';
-import { useFreeModels } from '../FreeModels';
+import { useFreeModels } from '../FreeModels/provider';
 import { getOfficialEndpoint, isOfficialModelSentinel } from '../../data/officialEndpoints';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 
@@ -62,7 +62,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
 
   // Wrapped navigation: build prefill and go to Mother Agent (model check happens there)
   const handleGoToMother = useCallback(
-    async (toolId: string, toolName: string) => {
+    async (_toolId: string, toolName: string) => {
       const prefill = t('mother.hintInstall').replace('{agent}', toolName);
       goToMother(prefill);
     },

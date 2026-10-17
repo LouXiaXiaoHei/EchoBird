@@ -3,7 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
 import type { AgentEvent, AgentRequest, ModelConfig } from '../../api/types';
-import { CONVERSATIONS_STORAGE_KEY } from '../../hooks/useChatPersistence';
+import { CONVERSATIONS_STORAGE_KEY, conversationBodyKey } from '../../hooks/useChatPersistence';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { MotherAgentProvider } from './MotherAgentProvider';
 import { useMotherAgent } from './context';
@@ -252,6 +252,9 @@ describe('Mother Agent protocol switching', () => {
       vi.advanceTimersByTime(800);
     });
     const disk = JSON.parse(stored.get(CONVERSATIONS_STORAGE_KEY)!);
+    disk.conversations[0].messages = JSON.parse(
+      stored.get(conversationBodyKey(disk.conversations[0].id))!
+    );
     expect(disk.activeConversationId).toBe('saved-conversation');
     expect(disk.conversations[0].sessionKey).toBe('saved-context');
     expect(

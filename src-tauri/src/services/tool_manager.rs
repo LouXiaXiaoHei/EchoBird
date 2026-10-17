@@ -81,39 +81,19 @@ pub fn init_resource_dir(path: PathBuf) {
 
 // ─── Tool directory resolution ───
 
-/// Find the tools directory (tools/)
-/// In dev: relative to project root
-/// In production: bundled with the app binary
+#[cfg(any(debug_assertions, test))]
+fn source_tools_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    manifest_dir
+        .parent()
+        .map(|root| root.join("tools"))
+        .filter(|tools| tools.is_dir())
+}
+
+/// Find source tools in debug builds, otherwise use bundled app resources.
 pub fn find_tools_dir() -> Option<PathBuf> {
-    // DEV-MODE PRIORITY: if the exe path contains /target/debug/ or
-    // /target/release/, we're running from a Cargo build dir (not an
-    // installed binary). Tauri only mirrors ../tools/ into _up_/tools/
-    // at the START of `tauri dev`, so subdirs added during a dev session
-    // won't appear in the mirror until the user restarts. Prefer the
-    // SOURCE tree's tools/ directly — it's always the freshest copy.
-    if let Ok(exe) = std::env::current_exe() {
-        let exe_str = exe.to_string_lossy().replace('\\', "/");
-        let is_cargo_target =
-            exe_str.contains("/target/debug/") || exe_str.contains("/target/release/");
-        if is_cargo_target {
-            // exe at <repo>/src-tauri/target/{debug,release}/echobird.exe
-            // Walk up 4 parents: target/debug → target → src-tauri → <repo>
-            if let Some(repo_root) = exe
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-            {
-                let src_tools = repo_root.join("tools");
-                if src_tools.is_dir() {
-                    log::info!(
-                        "[ToolManager] dev mode — using source tree tools dir: {:?}",
-                        src_tools
-                    );
-                    return Some(src_tools);
-                }
-            }
-        }
+    #[cfg(debug_assertions)]
+    if let Some(source_tools) = source_tools_dir(Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        return Some(source_tools);
     }
 
     // 0. Tauri-native resource_dir (most reliable — set at startup via init_resource_dir)
@@ -737,8 +717,6 @@ fn scan_windows_registry(hints: &InstallHints) -> Option<String> {
     if hints.windows_display_names.is_empty() && hints.windows_display_name_prefixes.is_empty() {
         return None;
     }
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
-    use winreg::RegKey;
 
     let names_lower: Vec<String> = hints
         .windows_display_names
@@ -752,146 +730,114 @@ fn scan_windows_registry(hints: &InstallHints) -> Option<String> {
         .collect();
     let publisher_filter = hints.windows_publisher.as_ref().map(|p| p.to_lowercase());
 
-    // Standard Uninstall hives. WOW6432Node catches 32-bit installers on 64-bit Windows.
-    let hives: &[(_, &str)] = &[
-        (
-            HKEY_LOCAL_MACHINE,
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-        (
-            HKEY_CURRENT_USER,
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-    ];
-
-    for (hive, path) in hives {
-        let key = RegKey::predef(*hive);
-        let uninstall = match key.open_subkey_with_flags(path, KEY_READ) {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        for subkey_name in uninstall.enum_keys().filter_map(|x| x.ok()) {
-            let entry = match uninstall.open_subkey(&subkey_name) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let display_name: String = entry.get_value("DisplayName").unwrap_or_default();
-            if display_name.is_empty() {
+    let entries = SCAN_DISCOVERY
+        .try_with(|snapshot| snapshot.registry.clone())
+        .unwrap_or_else(|_| Arc::new(read_registry_entries()));
+    for entry in entries.iter() {
+        let display_name: String = entry.get("DisplayName").cloned().unwrap_or_default();
+        if display_name.is_empty() {
+            continue;
+        }
+        let dn_lower = display_name.to_lowercase();
+        // EXACT case-insensitive match by default (windowsDisplayNames) —
+        // we don't blanket substring-match because a base product would
+        // then match a regional edition and claim the wrong install.
+        // Apps whose DisplayName embeds a version ("WorkBuddy 4.24.2") opt
+        // into PREFIX matching via windowsDisplayNamePrefixes instead.
+        if !registry_display_name_matches(&dn_lower, &names_lower, &prefixes_lower) {
+            continue;
+        }
+        if let Some(ref pub_filter) = publisher_filter {
+            let pub_val: String = entry.get("Publisher").cloned().unwrap_or_default();
+            if !pub_val.to_lowercase().contains(pub_filter) {
                 continue;
             }
-            let dn_lower = display_name.to_lowercase();
-            // EXACT case-insensitive match by default (windowsDisplayNames) —
-            // we don't blanket substring-match because a base product would
-            // then match a regional edition and claim the wrong install.
-            // Apps whose DisplayName embeds a version ("WorkBuddy 4.24.2") opt
-            // into PREFIX matching via windowsDisplayNamePrefixes instead.
-            if !registry_display_name_matches(&dn_lower, &names_lower, &prefixes_lower) {
-                continue;
-            }
-            if let Some(ref pub_filter) = publisher_filter {
-                let pub_val: String = entry.get_value("Publisher").unwrap_or_default();
-                if !pub_val.to_lowercase().contains(pub_filter) {
-                    continue;
-                }
-            }
-            // Collect install-dir candidates for the exe-glob fallback below.
-            // Populated when DisplayIcon is a non-exe file (its parent dir is
-            // still a strong install-dir signal) and/or UninstallString exposes
-            // the install dir — covers installers (electron-builder NSIS at a
-            // custom path) that leave InstallLocation empty.
-            let mut install_dir_candidates: Vec<PathBuf> = Vec::new();
+        }
+        // Collect install-dir candidates for the exe-glob fallback below.
+        // Populated when DisplayIcon is a non-exe file (its parent dir is
+        // still a strong install-dir signal) and/or UninstallString exposes
+        // the install dir — covers installers (electron-builder NSIS at a
+        // custom path) that leave InstallLocation empty.
+        let mut install_dir_candidates: Vec<PathBuf> = Vec::new();
 
-            // DisplayIcon usually points at the main exe directly. Strip ",N" icon-index
-            // suffix if present (Windows convention for selecting an icon from a multi-icon exe).
-            if let Ok(icon) = entry.get_value::<String, _>("DisplayIcon") {
-                let icon_path = icon.split(',').next().unwrap_or(&icon).trim();
-                let unquoted = icon_path.trim_matches('"');
-                if !unquoted.is_empty() && Path::new(unquoted).exists() {
-                    // Reject non-executable targets (standalone .ico files,
-                    // .dll icon resources). Start-Process on one would open
-                    // it with the default image viewer instead of launching
-                    // the app — remember its parent dir as an install-dir
-                    // candidate, then fall through.
-                    if is_windows_exe(unquoted) {
-                        log::info!(
-                            "[InstallHints] Registry hit (DisplayIcon): {} → {}",
-                            display_name,
-                            unquoted
-                        );
-                        return Some(unquoted.to_string());
-                    }
-                    if let Some(parent) = Path::new(unquoted).parent() {
-                        install_dir_candidates.push(parent.to_path_buf());
-                    }
+        // DisplayIcon usually points at the main exe directly. Strip ",N" icon-index
+        // suffix if present (Windows convention for selecting an icon from a multi-icon exe).
+        if let Some(icon) = entry.get("DisplayIcon") {
+            let icon_path = icon.split(',').next().unwrap_or(icon).trim();
+            let unquoted = icon_path.trim_matches('"');
+            if !unquoted.is_empty() && Path::new(unquoted).exists() {
+                // Reject non-executable targets (standalone .ico files,
+                // .dll icon resources). Start-Process on one would open
+                // it with the default image viewer instead of launching
+                // the app — remember its parent dir as an install-dir
+                // candidate, then fall through.
+                if is_windows_exe(unquoted) {
                     log::info!(
+                        "[InstallHints] Registry hit (DisplayIcon): {} → {}",
+                        display_name,
+                        unquoted
+                    );
+                    return Some(unquoted.to_string());
+                }
+                if let Some(parent) = Path::new(unquoted).parent() {
+                    install_dir_candidates.push(parent.to_path_buf());
+                }
+                log::info!(
                         "[InstallHints] DisplayIcon is not an exe, using its dir as install-dir candidate: {} → {}",
                         display_name,
                         unquoted
                     );
-                }
             }
-            // Fallback: InstallLocation is a directory; we return it as-is.
-            // detect_tool's caller knows how to handle both file and directory results.
-            if let Ok(install_loc) = entry.get_value::<String, _>("InstallLocation") {
-                let trimmed = install_loc.trim().trim_matches('"');
-                if !trimmed.is_empty() && Path::new(trimmed).exists() {
-                    log::info!(
-                        "[InstallHints] Registry hit (InstallLocation): {} → {}",
-                        display_name,
-                        trimmed
-                    );
-                    return Some(trimmed.to_string());
-                }
+        }
+        // Fallback: InstallLocation is a directory; we return it as-is.
+        // detect_tool's caller knows how to handle both file and directory results.
+        if let Some(install_loc) = entry.get("InstallLocation") {
+            let trimmed = install_loc.trim().trim_matches('"');
+            if !trimmed.is_empty() && Path::new(trimmed).exists() {
+                log::info!(
+                    "[InstallHints] Registry hit (InstallLocation): {} → {}",
+                    display_name,
+                    trimmed
+                );
+                return Some(trimmed.to_string());
             }
-            // Fallback 2: installers that leave InstallLocation empty but record
-            // an UninstallString like `"E:\ZCode\Uninstall ZCode.exe" /currentuser`.
-            // The uninstaller sits next to the real app exe, so its parent dir
-            // is the install dir — glob it for a name-matching exe. This is what
-            // makes a custom-path ZCode install (E:\ZCode\ZCode.exe) detectable
-            // when DisplayIcon is a .ico and InstallLocation is blank.
-            if let Ok(uninst) = entry.get_value::<String, _>("UninstallString") {
-                if let Some(exe_path) = parse_uninstall_exe_path(&uninst) {
-                    if let Some(parent) = Path::new(&exe_path).parent() {
-                        if !install_dir_candidates.iter().any(|c| c == parent) {
-                            install_dir_candidates.push(parent.to_path_buf());
-                        }
+        }
+        // Fallback 2: installers that leave InstallLocation empty but record
+        // an UninstallString like `"E:\ZCode\Uninstall ZCode.exe" /currentuser`.
+        // The uninstaller sits next to the real app exe, so its parent dir
+        // is the install dir — glob it for a name-matching exe. This is what
+        // makes a custom-path ZCode install (E:\ZCode\ZCode.exe) detectable
+        // when DisplayIcon is a .ico and InstallLocation is blank.
+        if let Some(uninst) = entry.get("UninstallString") {
+            if let Some(exe_path) = parse_uninstall_exe_path(uninst) {
+                if let Some(parent) = Path::new(&exe_path).parent() {
+                    if !install_dir_candidates.iter().any(|c| c == parent) {
+                        install_dir_candidates.push(parent.to_path_buf());
                     }
                 }
             }
-            for dir in &install_dir_candidates {
-                if let Some(exe) = find_name_matching_exe(dir, &names_lower, &prefixes_lower) {
-                    log::info!(
-                        "[InstallHints] Registry hit (exe glob in install dir): {} → {}",
-                        display_name,
-                        exe
-                    );
-                    return Some(exe);
-                }
+        }
+        for dir in &install_dir_candidates {
+            if let Some(exe) = find_name_matching_exe(dir, &names_lower, &prefixes_lower) {
+                log::info!(
+                    "[InstallHints] Registry hit (exe glob in install dir): {} → {}",
+                    display_name,
+                    exe
+                );
+                return Some(exe);
             }
         }
     }
     None
 }
 
-/// Read the clean `DisplayVersion` from the Windows registry Uninstall entry
-/// matching `hints`. Desktop GUI apps don't answer `--version` on the CLI
-/// (their `command` is empty), but their installer records a version here —
-/// e.g. WorkBuddy's entry carries DisplayVersion="4.24.2". Same name/publisher
-/// matching as `scan_windows_registry`; that path-finding walk is deliberately
-/// left untouched, so this is a small parallel read rather than a refactor of
-/// proven multi-tool detection code. Returns None when nothing matches or the
-/// matched entry has no DisplayVersion.
+/// Read a GUI installer's DisplayVersion using the same name/publisher
+/// matching and scan-scoped registry snapshot as executable discovery.
 #[cfg(windows)]
 fn scan_windows_registry_version(hints: &InstallHints) -> Option<String> {
     if hints.windows_display_names.is_empty() && hints.windows_display_name_prefixes.is_empty() {
         return None;
     }
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
-    use winreg::RegKey;
 
     let names_lower: Vec<String> = hints
         .windows_display_names
@@ -905,56 +851,33 @@ fn scan_windows_registry_version(hints: &InstallHints) -> Option<String> {
         .collect();
     let publisher_filter = hints.windows_publisher.as_ref().map(|p| p.to_lowercase());
 
-    let hives: &[(_, &str)] = &[
-        (
-            HKEY_LOCAL_MACHINE,
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-        (
-            HKEY_LOCAL_MACHINE,
-            "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-        (
-            HKEY_CURRENT_USER,
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-        ),
-    ];
-
-    for (hive, path) in hives {
-        let key = RegKey::predef(*hive);
-        let uninstall = match key.open_subkey_with_flags(path, KEY_READ) {
-            Ok(k) => k,
-            Err(_) => continue,
-        };
-        for subkey_name in uninstall.enum_keys().filter_map(|x| x.ok()) {
-            let entry = match uninstall.open_subkey(&subkey_name) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let display_name: String = entry.get_value("DisplayName").unwrap_or_default();
-            if display_name.is_empty() {
+    let entries = SCAN_DISCOVERY
+        .try_with(|snapshot| snapshot.registry.clone())
+        .unwrap_or_else(|_| Arc::new(read_registry_entries()));
+    for entry in entries.iter() {
+        let display_name: String = entry.get("DisplayName").cloned().unwrap_or_default();
+        if display_name.is_empty() {
+            continue;
+        }
+        let dn_lower = display_name.to_lowercase();
+        if !registry_display_name_matches(&dn_lower, &names_lower, &prefixes_lower) {
+            continue;
+        }
+        if let Some(ref pub_filter) = publisher_filter {
+            let pub_val: String = entry.get("Publisher").cloned().unwrap_or_default();
+            if !pub_val.to_lowercase().contains(pub_filter) {
                 continue;
             }
-            let dn_lower = display_name.to_lowercase();
-            if !registry_display_name_matches(&dn_lower, &names_lower, &prefixes_lower) {
-                continue;
-            }
-            if let Some(ref pub_filter) = publisher_filter {
-                let pub_val: String = entry.get_value("Publisher").unwrap_or_default();
-                if !pub_val.to_lowercase().contains(pub_filter) {
-                    continue;
-                }
-            }
-            let version: String = entry.get_value("DisplayVersion").unwrap_or_default();
-            let version = version.trim().to_string();
-            if !version.is_empty() {
-                log::info!(
-                    "[InstallHints] Registry version hit: {} → {}",
-                    display_name,
-                    version
-                );
-                return Some(version);
-            }
+        }
+        let version: String = entry.get("DisplayVersion").cloned().unwrap_or_default();
+        let version = version.trim().to_string();
+        if !version.is_empty() {
+            log::info!(
+                "[InstallHints] Registry version hit: {} → {}",
+                display_name,
+                version
+            );
+            return Some(version);
         }
     }
     None
@@ -982,6 +905,18 @@ fn scan_macos_applications(hints: &InstallHints) -> Option<String> {
             log::info!("[InstallHints] macOS hit (user): {}", candidate.display());
             return Some(candidate.to_string_lossy().to_string());
         }
+    }
+    if let Ok(Some(applications)) =
+        SCAN_DISCOVERY.try_with(|snapshot| snapshot.applications.clone())
+    {
+        return applications
+            .iter()
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name == normalized.as_str())
+                    && path.exists()
+            })
+            .map(|path| path.to_string_lossy().into_owned());
     }
     // Fallback: mdfind covers non-/Applications installs (e.g. ~/Tools/Foo.app).
     if let Ok(out) = crate::utils::process::command("mdfind")
@@ -1033,77 +968,57 @@ fn scan_linux_desktop(hints: &InstallHints) -> Option<String> {
         .map(|s| s.to_lowercase())
         .collect();
 
-    let mut search_dirs: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/share/applications"),
-        PathBuf::from("/usr/local/share/applications"),
-        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
-    ];
-    if let Some(home) = dirs::home_dir() {
-        search_dirs.push(home.join(".local/share/applications"));
-    }
-
-    for dir in &search_dirs {
-        let entries = match fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("desktop") {
-                continue;
+    let entries = SCAN_DISCOVERY
+        .try_with(|snapshot| snapshot.desktop.clone())
+        .unwrap_or_else(|_| Arc::new(read_desktop_entries()));
+    for (path, content) in entries.iter() {
+        // Parse the [Desktop Entry] Name= and Exec= keys (first occurrence wins).
+        let mut name = String::new();
+        let mut exec = String::new();
+        for line in content.lines() {
+            if name.is_empty() {
+                if let Some(v) = line.strip_prefix("Name=") {
+                    name = v.trim().to_string();
+                }
             }
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
+            if exec.is_empty() {
+                if let Some(v) = line.strip_prefix("Exec=") {
+                    exec = v.trim().to_string();
+                }
+            }
+            if !name.is_empty() && !exec.is_empty() {
+                break;
+            }
+        }
+        let name_lower = name.to_lowercase();
+        let filename_lower = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        // Match against either visible Name= or the .desktop filename stem.
+        let hit = names_lower
+            .iter()
+            .any(|n| name_lower == *n || filename_lower == *n);
+        if !hit {
+            continue;
+        }
+        // Exec= often contains %U/%F field codes — keep only the command itself.
+        if let Some(program) = desktop_exec_program(&exec) {
+            let executable = if Path::new(&program).is_absolute() {
+                PathBuf::from(program)
+            } else if let Ok(path) = which::which(&program) {
+                path
+            } else {
+                continue;
             };
-            // Parse the [Desktop Entry] Name= and Exec= keys (first occurrence wins).
-            let mut name = String::new();
-            let mut exec = String::new();
-            for line in content.lines() {
-                if name.is_empty() {
-                    if let Some(v) = line.strip_prefix("Name=") {
-                        name = v.trim().to_string();
-                    }
-                }
-                if exec.is_empty() {
-                    if let Some(v) = line.strip_prefix("Exec=") {
-                        exec = v.trim().to_string();
-                    }
-                }
-                if !name.is_empty() && !exec.is_empty() {
-                    break;
-                }
-            }
-            let name_lower = name.to_lowercase();
-            let filename_lower = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            // Match against either visible Name= or the .desktop filename stem.
-            let hit = names_lower
-                .iter()
-                .any(|n| name_lower == *n || filename_lower == *n);
-            if !hit {
-                continue;
-            }
-            // Exec= often contains %U/%F field codes — keep only the command itself.
-            if let Some(program) = desktop_exec_program(&exec) {
-                let executable = if Path::new(&program).is_absolute() {
-                    PathBuf::from(program)
-                } else if let Ok(path) = which::which(&program) {
-                    path
-                } else {
-                    continue;
-                };
-                if executable.is_file() {
-                    log::info!(
-                        "[InstallHints] .desktop hit: {} → {}",
-                        name,
-                        executable.display()
-                    );
-                    return Some(executable.to_string_lossy().into_owned());
-                }
+            if executable.is_file() {
+                log::info!(
+                    "[InstallHints] .desktop hit: {} → {}",
+                    name,
+                    executable.display()
+                );
+                return Some(executable.to_string_lossy().into_owned());
             }
         }
     }
@@ -1812,17 +1727,168 @@ pub fn delete_nested_value(obj: &mut serde_json::Value, path: &str) {
     }
 }
 
+#[cfg(windows)]
+fn read_registry_entries() -> Vec<HashMap<String, String>> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+    let mut entries = Vec::new();
+    let hives: &[(_, &str)] = &[
+        (
+            HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        ),
+        (
+            HKEY_CURRENT_USER,
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        ),
+    ];
+
+    for (hive, path) in hives {
+        let key = RegKey::predef(*hive);
+        let uninstall = match key.open_subkey_with_flags(path, KEY_READ) {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+        for subkey_name in uninstall.enum_keys().filter_map(|x| x.ok()) {
+            let entry = match uninstall.open_subkey(&subkey_name) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            entries.push(
+                [
+                    "DisplayName",
+                    "Publisher",
+                    "DisplayIcon",
+                    "InstallLocation",
+                    "UninstallString",
+                    "DisplayVersion",
+                ]
+                .into_iter()
+                .filter_map(|name| {
+                    entry.get_value::<String, _>(name).ok().map(|value| {
+                        let value = if matches!(
+                            name,
+                            "DisplayIcon" | "InstallLocation" | "UninstallString"
+                        ) {
+                            expand_path(&value).to_string_lossy().into_owned()
+                        } else {
+                            value
+                        };
+                        (name.to_owned(), value)
+                    })
+                })
+                .collect(),
+            );
+        }
+    }
+    entries
+}
+
+#[cfg(target_os = "linux")]
+fn read_desktop_entries() -> Vec<(PathBuf, String)> {
+    let mut search_dirs: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/share/applications"),
+        PathBuf::from("/usr/local/share/applications"),
+        PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Some(home) = dirs::home_dir() {
+        search_dirs.push(home.join(".local/share/applications"));
+    }
+
+    let mut collected = Vec::new();
+    for dir in &search_dirs {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("desktop") {
+                continue;
+            }
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            collected.push((path, content));
+        }
+    }
+    collected
+}
+
+struct DiscoverySnapshot {
+    #[cfg(windows)]
+    registry: Arc<Vec<HashMap<String, String>>>,
+    #[cfg(windows)]
+    msix: Option<super::msix::Snapshot>,
+    #[cfg(target_os = "linux")]
+    desktop: Arc<Vec<(PathBuf, String)>>,
+    #[cfg(target_os = "macos")]
+    applications: Option<Arc<Vec<PathBuf>>>,
+}
+
+tokio::task_local! { static SCAN_DISCOVERY: Arc<DiscoverySnapshot>; }
+
+impl DiscoverySnapshot {
+    fn capture(_definitions: &[ToolDefinition]) -> Self {
+        Self {
+            #[cfg(windows)]
+            registry: Arc::new(read_registry_entries()),
+            #[cfg(windows)]
+            msix: super::msix::Snapshot::capture(
+                &_definitions
+                    .iter()
+                    .filter_map(|definition| definition.paths_config.launch_uri.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            #[cfg(target_os = "linux")]
+            desktop: Arc::new(read_desktop_entries()),
+            #[cfg(target_os = "macos")]
+            applications: crate::utils::process::command("mdfind")
+                .arg("kMDItemContentType == 'com.apple.application-bundle'")
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| {
+                    Arc::new(
+                        String::from_utf8_lossy(&output.stdout)
+                            .lines()
+                            .map(PathBuf::from)
+                            .collect(),
+                    )
+                }),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn discovery_msix_uri(configured: &str) -> Option<Option<String>> {
+    SCAN_DISCOVERY
+        .try_with(|snapshot| {
+            snapshot
+                .msix
+                .as_ref()
+                .map(|applications| applications.resolve(configured))
+        })
+        .ok()
+        .flatten()
+}
+
 // ─── Global tool definitions cache ───
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-static TOOL_DEFINITIONS: Mutex<Option<Vec<ToolDefinition>>> = Mutex::new(None);
+static TOOL_DEFINITIONS: Mutex<Option<Arc<Vec<ToolDefinition>>>> = Mutex::new(None);
 
 /// Get or load tool definitions (cached)
-fn get_definitions() -> Vec<ToolDefinition> {
+fn get_definitions() -> Arc<Vec<ToolDefinition>> {
     let mut cache = TOOL_DEFINITIONS.lock().unwrap();
     if cache.is_none() {
-        *cache = Some(load_tool_definitions());
+        *cache = Some(Arc::new(load_tool_definitions()));
     }
     cache.as_ref().unwrap().clone()
 }
@@ -1914,8 +1980,8 @@ pub fn merge_override_seed(
 pub(crate) fn model_config_paths() -> (Vec<PathBuf>, Vec<String>) {
     let mut paths = Vec::new();
     let mut errors = Vec::new();
-    for def in get_definitions() {
-        match model_config_path(&def) {
+    for def in get_definitions().iter() {
+        match model_config_path(def) {
             Ok(path) if !path.as_os_str().is_empty() => paths.push(path),
             Ok(_) => {}
             Err(error) => errors.push(format!("{} config path: {error}", def.id)),
@@ -1944,9 +2010,9 @@ fn model_config_path(def: &ToolDefinition) -> Result<PathBuf, String> {
 /// Get the config mapping for a specific tool
 pub fn get_tool_config_mapping(tool_id: &str) -> Option<(ToolDefinition, PathBuf)> {
     let defs = get_definitions();
-    defs.into_iter().find(|d| d.id == tool_id).and_then(|def| {
-        let config_path = model_config_path(&def).ok()?;
-        Some((def, config_path))
+    defs.iter().find(|d| d.id == tool_id).and_then(|def| {
+        let config_path = model_config_path(def).ok()?;
+        Some((def.clone(), config_path))
     })
 }
 
@@ -2551,10 +2617,20 @@ pub async fn scan_tools() -> Vec<DetectedTool> {
     }
     let definitions = get_definitions();
 
+    let snapshot_definitions = definitions.clone();
+    let snapshot = Arc::new(
+        tokio::task::spawn_blocking(move || DiscoverySnapshot::capture(&snapshot_definitions))
+            .await
+            .expect("installation snapshot task"),
+    );
     // Spawn a task per tool so all detections run concurrently
     let mut handles = Vec::with_capacity(definitions.len());
-    for def in definitions {
-        handles.push(tokio::spawn(async move { scan_single_tool(def).await }));
+    for index in 0..definitions.len() {
+        let definitions = definitions.clone();
+        let snapshot = snapshot.clone();
+        handles.push(tokio::spawn(SCAN_DISCOVERY.scope(snapshot, async move {
+            scan_single_tool(definitions[index].clone()).await
+        })));
     }
 
     let mut results = Vec::with_capacity(handles.len());
@@ -2571,6 +2647,77 @@ pub async fn scan_tools() -> Vec<DetectedTool> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_resources_follow_the_compiled_checkout_not_the_target_directory() {
+        let root =
+            std::env::temp_dir().join(format!("echobird-performance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = root.as_path().join("checkout-one");
+        let second = root.as_path().join("checkout-two");
+        std::fs::create_dir_all(first.join("tools")).unwrap();
+        std::fs::create_dir_all(second.join("tools")).unwrap();
+        assert_eq!(
+            super::source_tools_dir(&first.join("src-tauri")),
+            Some(first.join("tools"))
+        );
+        assert_eq!(
+            super::source_tools_dir(&second.join("src-tauri")),
+            Some(second.join("tools"))
+        );
+        assert_eq!(
+            super::source_tools_dir(&root.join("unavailable/src-tauri")),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn repeated_catalog_reads_share_immutable_definitions() {
+        let first = super::get_definitions();
+        let second = super::get_definitions();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn scan_snapshot_reuses_registry_path_and_version_and_remains_task_scoped() {
+        use std::{collections::HashMap, sync::Arc};
+        let root =
+            std::env::temp_dir().join(format!("echobird-performance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let exe = root.as_path().join("snapshot-fixture.exe");
+        std::fs::write(&exe, "fixture").unwrap();
+        let hints: crate::models::tool::InstallHints = serde_json::from_value(
+            serde_json::json!({"windowsDisplayNames":["EchoBird snapshot fixture"]}),
+        )
+        .unwrap();
+        let snapshot = Arc::new(super::DiscoverySnapshot {
+            registry: Arc::new(vec![HashMap::from([
+                ("DisplayName".into(), "EchoBird snapshot fixture".into()),
+                ("DisplayIcon".into(), exe.to_string_lossy().into_owned()),
+                ("DisplayVersion".into(), "3.2.1".into()),
+            ])]),
+            msix: None,
+        });
+        super::SCAN_DISCOVERY
+            .scope(snapshot, async {
+                assert_eq!(
+                    super::scan_windows_registry(&hints),
+                    Some(exe.to_string_lossy().into_owned())
+                );
+                assert_eq!(
+                    super::scan_windows_registry_version(&hints).as_deref(),
+                    Some("3.2.1")
+                );
+                std::fs::remove_file(&exe).unwrap();
+                // Paths are still validated live: a removed executable is not installed.
+                assert_eq!(super::scan_windows_registry(&hints), None);
+            })
+            .await;
+        assert_eq!(super::scan_windows_registry_version(&hints), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn qoder_campaign_resources_follow_each_desktop_package_layout() {
         for (platform, executable, resources) in [

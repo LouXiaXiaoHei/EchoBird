@@ -435,3 +435,55 @@ async fn supported_text_images_and_tools_preserve_content_with_noop_client_defau
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn dedicated_client_reuses_connections_without_sharing_authentication() {
+    use axum::{extract::ConnectInfo, http::HeaderMap, routing::get, Router};
+    use std::net::SocketAddr;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observed = seen.clone();
+    let app = Router::new().route(
+        "/probe",
+        get(
+            move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push((peer, headers["authorization"].to_str().unwrap().to_owned()));
+                async { "ok" }
+            },
+        ),
+    );
+    let task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    for token in ["account-one", "account-two"] {
+        assert_eq!(
+            client()
+                .unwrap()
+                .get(format!("http://{address}/probe"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "ok"
+        );
+    }
+    task.abort();
+    let rows = seen.lock().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, rows[1].0);
+    assert_eq!(rows[0].1, "Bearer account-one");
+    assert_eq!(rows[1].1, "Bearer account-two");
+    assert!(std::ptr::eq(client().unwrap(), client().unwrap()));
+}

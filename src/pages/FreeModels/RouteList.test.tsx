@@ -118,7 +118,9 @@ describe('Smart Router list layout and candidate pause', () => {
         <header>
           <FreeModelsTitleActions />
         </header>
-        {activePage === 'freeModels' && <FreeModelsMain />}
+        <div hidden={activePage !== 'freeModels'}>
+          <FreeModelsMain />
+        </div>
       </>
     );
   }

@@ -34,7 +34,7 @@ vi.mock('../ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };
 });
-vi.mock('../FreeModels', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
 vi.mock('./ClaudeCodeLoginDialog', () => ({ ClaudeCodeLoginDialog: () => null }));
 
 type Tool = 'minimaxcode' | 'minimaxdesktop' | 'qoder' | 'qodercn';

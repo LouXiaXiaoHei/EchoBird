@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useI18n } from '../../hooks/useI18n';

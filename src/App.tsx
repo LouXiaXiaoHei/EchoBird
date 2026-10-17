@@ -1,9 +1,9 @@
 // App.tsx — Tauri application shell (lightweight router)
 // Layout matches the original v1.1.0 structure exactly.
 // Pages extracted to src/pages/ with Provider pattern.
-// All Providers are always mounted; pages are shown/hidden via CSS to avoid remounting.
+// Providers stay mounted; visited pages retain their state behind CSS.
 
-import { useState, useEffect } from 'react';
+import { lazy, useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
@@ -14,8 +14,8 @@ import { DownloadProvider } from './components/DownloadContext';
 import { DownloadBar } from './components/DownloadBar';
 import { TitleBar } from './components/TitleBar';
 import { AppBackground } from './components/AppBackground';
-import { SettingsDialog } from './components/SettingsDialog';
-import { ChangelogDialog } from './components/ChangelogDialog';
+import { OnFirstVisit } from './components/OnFirstVisit';
+import { useModelNexus } from './pages/ModelNexus/context';
 import { getSettings, hideMainWindow } from './api/tauri';
 
 import { useI18n } from './hooks/useI18n';
@@ -24,47 +24,145 @@ import { useI18n } from './hooks/useI18n';
 import { useToolsStore } from './stores/toolsStore';
 import { useNavigationStore } from './stores/navigationStore';
 
-// Pages
-import {
-  ModelNexusProvider,
-  ModelNexusTitleActions,
-  ModelNexusMain,
-  ModelNexusPanel,
-  AddModelModal,
-} from './pages/ModelNexus';
-
-import {
-  AppManagerProvider,
-  AppManagerMain,
-  AppManagerTitleActions,
-  AppManagerPanel,
-  AppManagerBottom,
-  AppManagerErrorModal,
-} from './pages/AppManager';
-import {
-  LocalServerProvider,
-  LocalServerMain,
-  LocalServerPanel,
-  LocalServerBottom,
-} from './pages/LocalServer';
-import { MotherAgentProvider, MotherAgentMain, MotherAgentPanel } from './pages/MotherAgent';
-import { FeedbackMain } from './pages/Feedback';
-import { MyProjectsMain, MyProjectsPanel, MyProjectsBottom } from './pages/MyProjects';
-import { AiCareerMain, AiCareerFamilyPanel, AiCareerTitleActions } from './pages/AiCareer';
-import { AiPulseProvider, AiPulseTitleActions, AiPulsePanel, AiNewsMain } from './pages/AiPulse';
+// Shared providers remain mounted; display modules load on first use.
+import { ModelNexusProvider } from './pages/ModelNexus/provider';
+import { AppManagerProvider } from './pages/AppManager/AppManagerProvider';
+import { LocalServerProvider } from './pages/LocalServer/provider';
+import { MotherAgentProvider } from './pages/MotherAgent/MotherAgentProvider';
+import { AiPulseProvider } from './pages/AiPulse/provider';
+import { FreeModelsProvider, useFreeModels } from './pages/FreeModels/provider';
 import { useMyProjectsStore } from './stores/myProjectsStore';
-import {
-  AccountCenterMain,
-  AccountCenterPanel,
-  AccountCenterTitleActions,
-} from './pages/AccountCenter/AccountCenter';
-import {
-  FreeModelsProvider,
-  FreeModelsTitleActions,
-  FreeModelsMain,
-  FreeModelsPanel,
-  useFreeModels,
-} from './pages/FreeModels';
+const ModelNexusTitleActions = lazy(() =>
+  import('./pages/ModelNexus/ModelNexus').then((module) => ({
+    default: module.ModelNexusTitleActions,
+  }))
+);
+const ModelNexusMain = lazy(() =>
+  import('./pages/ModelNexus/ModelNexus').then((module) => ({ default: module.ModelNexusMain }))
+);
+const ModelNexusPanel = lazy(() =>
+  import('./pages/ModelNexus/ModelNexus').then((module) => ({ default: module.ModelNexusPanel }))
+);
+const AddModelModal = lazy(() =>
+  import('./pages/ModelNexus/ModelNexus').then((module) => ({ default: module.AddModelModal }))
+);
+const AppManagerMain = lazy(() =>
+  import('./pages/AppManager/AppManagerComponents').then((module) => ({
+    default: module.AppManagerMain,
+  }))
+);
+const AppManagerTitleActions = lazy(() =>
+  import('./pages/AppManager/AppManagerComponents').then((module) => ({
+    default: module.AppManagerTitleActions,
+  }))
+);
+const AppManagerPanel = lazy(() =>
+  import('./pages/AppManager/AppManagerComponents').then((module) => ({
+    default: module.AppManagerPanel,
+  }))
+);
+const AppManagerBottom = lazy(() =>
+  import('./pages/AppManager/AppManagerComponents').then((module) => ({
+    default: module.AppManagerBottom,
+  }))
+);
+const AppManagerErrorModal = lazy(() =>
+  import('./pages/AppManager/AppManagerComponents').then((module) => ({
+    default: module.AppManagerErrorModal,
+  }))
+);
+const LocalServerMain = lazy(() =>
+  import('./pages/LocalServer/LocalServer').then((module) => ({ default: module.LocalServerMain }))
+);
+const LocalServerPanel = lazy(() =>
+  import('./pages/LocalServer/LocalServer').then((module) => ({ default: module.LocalServerPanel }))
+);
+const LocalServerBottom = lazy(() =>
+  import('./pages/LocalServer/LocalServer').then((module) => ({
+    default: module.LocalServerBottom,
+  }))
+);
+const MotherAgentMain = lazy(() =>
+  import('./pages/MotherAgent/MotherAgentMain').then((module) => ({
+    default: module.MotherAgentMain,
+  }))
+);
+const MotherAgentPanel = lazy(() =>
+  import('./pages/MotherAgent/MotherAgentPanel').then((module) => ({
+    default: module.MotherAgentPanel,
+  }))
+);
+const FeedbackMain = lazy(() =>
+  import('./pages/Feedback').then((module) => ({ default: module.FeedbackMain }))
+);
+const MyProjectsMain = lazy(() =>
+  import('./pages/MyProjects').then((module) => ({ default: module.MyProjectsMain }))
+);
+const MyProjectsPanel = lazy(() =>
+  import('./pages/MyProjects').then((module) => ({ default: module.MyProjectsPanel }))
+);
+const MyProjectsBottom = lazy(() =>
+  import('./pages/MyProjects').then((module) => ({ default: module.MyProjectsBottom }))
+);
+const AiCareerMain = lazy(() =>
+  import('./pages/AiCareer').then((module) => ({ default: module.AiCareerMain }))
+);
+const AiCareerFamilyPanel = lazy(() =>
+  import('./pages/AiCareer').then((module) => ({ default: module.AiCareerFamilyPanel }))
+);
+const AiCareerTitleActions = lazy(() =>
+  import('./pages/AiCareer').then((module) => ({ default: module.AiCareerTitleActions }))
+);
+const AiPulseTitleActions = lazy(() =>
+  import('./pages/AiPulse/AiPulse').then((module) => ({ default: module.AiPulseTitleActions }))
+);
+const AiPulsePanel = lazy(() =>
+  import('./pages/AiPulse/AiPulse').then((module) => ({ default: module.AiPulsePanel }))
+);
+const AiNewsMain = lazy(() =>
+  import('./pages/AiPulse/AiPulse').then((module) => ({ default: module.AiNewsMain }))
+);
+const AccountCenterMain = lazy(() =>
+  import('./pages/AccountCenter/AccountCenter').then((module) => ({
+    default: module.AccountCenterMain,
+  }))
+);
+const AccountCenterPanel = lazy(() =>
+  import('./pages/AccountCenter/AccountCenter').then((module) => ({
+    default: module.AccountCenterPanel,
+  }))
+);
+const AccountCenterTitleActions = lazy(() =>
+  import('./pages/AccountCenter/AccountCenter').then((module) => ({
+    default: module.AccountCenterTitleActions,
+  }))
+);
+const FreeModelsTitleActions = lazy(() =>
+  import('./pages/FreeModels/FreeModels').then((module) => ({
+    default: module.FreeModelsTitleActions,
+  }))
+);
+const FreeModelsMain = lazy(() =>
+  import('./pages/FreeModels/FreeModels').then((module) => ({ default: module.FreeModelsMain }))
+);
+const FreeModelsPanel = lazy(() =>
+  import('./pages/FreeModels/FreeModels').then((module) => ({ default: module.FreeModelsPanel }))
+);
+const SettingsDialog = lazy(() =>
+  import('./components/SettingsDialog').then((module) => ({ default: module.SettingsDialog }))
+);
+const ChangelogDialog = lazy(() =>
+  import('./components/ChangelogDialog').then((module) => ({ default: module.ChangelogDialog }))
+);
+
+function ModelDialogs() {
+  const { showAddModelModal } = useModelNexus();
+  return (
+    <OnFirstVisit active={showAddModelModal}>
+      <AddModelModal />
+    </OnFirstVisit>
+  );
+}
 
 function SidebarConnected({ onSettingsClick }: { onSettingsClick: () => void }) {
   // Selector form (one field per call) so unrelated store fields like
@@ -309,28 +407,42 @@ function AppContent() {
                                   </div>
                                   {/* Title actions — always mounted but hidden */}
                                   <span className={page(is('models'))}>
-                                    <ModelNexusTitleActions />
+                                    <OnFirstVisit active={is('models')}>
+                                      <ModelNexusTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                   <span className={page(is('accounts'))}>
-                                    <AccountCenterTitleActions />
+                                    <OnFirstVisit active={is('accounts')}>
+                                      <AccountCenterTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                   <span className={page(is('freeModels'))}>
-                                    <FreeModelsTitleActions />
+                                    <OnFirstVisit active={is('freeModels')}>
+                                      <FreeModelsTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                   <span className={page(is('aiCareer'))}>
-                                    <AiCareerTitleActions />
+                                    <OnFirstVisit active={is('aiCareer')}>
+                                      <AiCareerTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                   <span className={page(is('aiNews'))}>
-                                    <AiPulseTitleActions />
+                                    <OnFirstVisit active={is('aiNews')}>
+                                      <AiPulseTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                   <span className={page(is('apps'))}>
-                                    <AppManagerTitleActions />
+                                    <OnFirstVisit active={is('apps') || is('myProjects')}>
+                                      <AppManagerTitleActions />
+                                    </OnFirstVisit>
                                   </span>
                                 </div>
 
                                 {/* Page content — always mounted, CSS hidden */}
                                 <div className={pageScroll(is('models'))}>
-                                  <ModelNexusMain />
+                                  <OnFirstVisit active={is('models')}>
+                                    <ModelNexusMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div
                                   className={
@@ -339,77 +451,127 @@ function AppContent() {
                                       : 'hidden'
                                   }
                                 >
-                                  <AccountCenterMain />
+                                  <OnFirstVisit active={is('accounts')}>
+                                    <AccountCenterMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div
                                   className={is('freeModels') ? 'flex-1 overflow-y-auto' : 'hidden'}
                                 >
-                                  {is('freeModels') && <FreeModelsMain />}
+                                  <OnFirstVisit active={is('freeModels')}>
+                                    <FreeModelsMain />
+                                  </OnFirstVisit>
                                 </div>
 
                                 <div className={pageBlock(is('apps'))}>
-                                  <AppManagerMain />
+                                  <OnFirstVisit active={is('apps') || is('myProjects')}>
+                                    <AppManagerMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div className={pageBlock(is('myProjects'))}>
-                                  <MyProjectsMain />
+                                  <OnFirstVisit active={is('myProjects')}>
+                                    <MyProjectsMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div className={pageBlock(is('localLlm'))}>
-                                  <LocalServerMain />
+                                  <OnFirstVisit active={is('localLlm')}>
+                                    <LocalServerMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div className={pageBlock(is('aiCareer'))}>
-                                  <AiCareerMain />
+                                  <OnFirstVisit active={is('aiCareer')}>
+                                    <AiCareerMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div className={pageBlock(is('aiNews'))}>
-                                  <AiNewsMain />
+                                  <OnFirstVisit active={is('aiNews')}>
+                                    <AiNewsMain />
+                                  </OnFirstVisit>
                                 </div>
                                 {/* MotherAgent: always mounted, hidden via CSS to preserve chat state */}
                                 <div
                                   className={`flex-1 flex flex-col overflow-hidden ${is('mother') ? '' : 'hidden'}`}
                                 >
-                                  <MotherAgentMain />
+                                  <OnFirstVisit active={is('mother')}>
+                                    <MotherAgentMain />
+                                  </OnFirstVisit>
                                 </div>
                                 <div className={pageScroll(is('feedback'))}>
-                                  <FeedbackMain />
+                                  <OnFirstVisit active={is('feedback')}>
+                                    <FeedbackMain />
+                                  </OnFirstVisit>
                                 </div>
                               </section>
                             </main>
 
                             <aside className="w-80 flex flex-col">
                               <div className={page(is('models'))}>
-                                <ModelNexusPanel />
+                                <OnFirstVisit active={is('models')}>
+                                  <ModelNexusPanel />
+                                </OnFirstVisit>
                               </div>
                               <div className={page(is('accounts'))}>
-                                <AccountCenterPanel />
+                                <OnFirstVisit active={is('accounts')}>
+                                  <AccountCenterPanel />
+                                </OnFirstVisit>
                               </div>
                               <div className={page(is('freeModels'))}>
-                                <FreeModelsPanel />
+                                <OnFirstVisit active={is('freeModels')}>
+                                  <FreeModelsPanel />
+                                </OnFirstVisit>
                               </div>
 
                               <div className={page(is('apps') || is('myProjects'))}>
-                                {useMyProjectsPanel ? <MyProjectsPanel /> : <AppManagerPanel />}
+                                {useMyProjectsPanel ? (
+                                  <OnFirstVisit active={is('myProjects')}>
+                                    <MyProjectsPanel />
+                                  </OnFirstVisit>
+                                ) : (
+                                  <OnFirstVisit active={is('apps') || is('myProjects')}>
+                                    <AppManagerPanel />
+                                  </OnFirstVisit>
+                                )}
                               </div>
                               <div className={page(is('localLlm'))}>
-                                <LocalServerPanel />
+                                <OnFirstVisit active={is('localLlm')}>
+                                  <LocalServerPanel />
+                                </OnFirstVisit>
                               </div>
                               <div className={page(is('aiCareer'))}>
-                                <AiCareerFamilyPanel />
+                                <OnFirstVisit active={is('aiCareer')}>
+                                  <AiCareerFamilyPanel />
+                                </OnFirstVisit>
                               </div>
                               <div className={page(is('aiNews'))}>
-                                <AiPulsePanel />
+                                <OnFirstVisit active={is('aiNews')}>
+                                  <AiPulsePanel />
+                                </OnFirstVisit>
                               </div>
                               {/* MotherAgent panel: always mounted, hidden via CSS */}
                               <div className={!is('mother') ? 'hidden' : 'contents'}>
-                                <MotherAgentPanel />
+                                <OnFirstVisit active={is('mother')}>
+                                  <MotherAgentPanel />
+                                </OnFirstVisit>
                               </div>
                             </aside>
                           </div>
 
                           {/* Bottom bars — always mounted, CSS hidden */}
                           <div className={page(is('apps') || is('myProjects'))}>
-                            {useMyProjectsPanel ? <MyProjectsBottom /> : <AppManagerBottom />}
+                            {useMyProjectsPanel ? (
+                              <OnFirstVisit active={is('myProjects')}>
+                                <MyProjectsBottom />
+                              </OnFirstVisit>
+                            ) : (
+                              <OnFirstVisit active={is('apps') || is('myProjects')}>
+                                <AppManagerBottom />
+                              </OnFirstVisit>
+                            )}
                           </div>
                           <div className={page(is('localLlm'))}>
-                            <LocalServerBottom />
+                            <OnFirstVisit active={is('localLlm')}>
+                              <LocalServerBottom />
+                            </OnFirstVisit>
                           </div>
 
                           {/* Download bar */}
@@ -421,23 +583,29 @@ function AppContent() {
                     </div>
 
                     {/* Modals */}
-                    <AddModelModal />
-                    <AppManagerErrorModal />
+                    <ModelDialogs />
+                    <OnFirstVisit active={is('apps') || is('myProjects')}>
+                      <AppManagerErrorModal />
+                    </OnFirstVisit>
                   </LocalServerProvider>
                 </AppManagerProvider>
               </ModelNexusProvider>
             </MotherAgentProvider>
 
             {/* Settings dialog */}
-            <SettingsDialog
-              isOpen={showSettings}
-              onClose={() => setShowSettings(false)}
-              locale={locale}
-              onLocaleChange={setLocale}
-            />
+            <OnFirstVisit active={showSettings}>
+              <SettingsDialog
+                isOpen={showSettings}
+                onClose={() => setShowSettings(false)}
+                locale={locale}
+                onLocaleChange={setLocale}
+              />
+            </OnFirstVisit>
 
             {/* Changelog dialog */}
-            <ChangelogDialog isOpen={showChangelog} onClose={() => setShowChangelog(false)} />
+            <OnFirstVisit active={showChangelog}>
+              <ChangelogDialog isOpen={showChangelog} onClose={() => setShowChangelog(false)} />
+            </OnFirstVisit>
           </DownloadProvider>
         </ConfirmDialogProvider>
       </FreeModelsProvider>

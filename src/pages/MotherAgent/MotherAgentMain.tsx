@@ -2,13 +2,9 @@ import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from
 import { ArrowUp, ChevronDown, Square } from 'lucide-react';
 import { RemoteModelSelector, type ModelOption } from '../../components/RemoteModelSelector';
 import { getModelIcon } from '../../components/cards/ModelCard';
-import { PendingChipsRow } from '../../components/PendingChipsRow';
 import { ChatBubble, ToolCallCard } from '../../components/chat';
-import { buildPendingMessage } from '../../utils/buildPendingMessage';
 import { useI18n } from '../../hooks/useI18n';
-import * as api from '../../api/tauri';
 import { useNavigationStore } from '../../stores/navigationStore';
-import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useMotherAgent } from './context';
 import { QuickCommandChips } from './QuickCommandChips';
 import { ReasoningControl } from './ReasoningControl';
@@ -38,7 +34,6 @@ export function MotherAgentMain() {
     chatEndRef,
     chatInputRef,
     handleChatSend,
-    sendMessage,
 
     sshServers: _sshServers,
     selectedServerId,
@@ -50,6 +45,11 @@ export function MotherAgentMain() {
     setParasiteAgent,
     parasiteAvailable,
   } = useMotherAgent();
+  // A first-visit chunk can arrive after the provider's prefill focus timer.
+  const initialInput = useRef(chatInput);
+  useLayoutEffect(() => {
+    if (initialInput.current) chatInputRef.current?.focus();
+  }, [chatInputRef]);
   const visibleChatOutput = React.useMemo(() => chatOutput.filter(isVisibleMessage), [chatOutput]);
 
   // Build model list for RemoteModelSelector (with icons)
@@ -75,81 +75,6 @@ export function MotherAgentMain() {
     const id = setTimeout(() => setContextBytes(estimateContextBytes(chatOutput)), 300);
     return () => clearTimeout(id);
   }, [chatOutput]);
-
-  const [_serverModel, setServerModel] = useState<string | null>(null);
-  const _fileInputRef = useRef<HTMLInputElement>(null!);
-  const _imageInputRef = useRef<HTMLInputElement>(null!);
-
-  const [pendingFiles, setPendingFiles] = useState<
-    Array<{ id: string; name: string; type: 'file' | 'image'; preview?: string }>
-  >([]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setPendingFiles([]);
-  }, [activeConversationId, selectedServerId]);
-
-  // Wrap handleChatSend to append pending file info as text
-  const localSend = useCallback(() => {
-    const hasFiles = pendingFiles.length > 0;
-
-    if (hasFiles) {
-      const { messageText, chips } = buildPendingMessage(chatInput, pendingFiles, [], []);
-
-      setPendingFiles([]);
-      setChatInput('');
-      sendMessage(messageText, chatInput.trim(), chips);
-    } else {
-      handleChatSend();
-    }
-  }, [pendingFiles, chatInput, setChatInput, handleChatSend, sendMessage, setPendingFiles]);
-
-  // File handling
-  const _handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    Array.from(files).forEach((f) => {
-      const id = `file-${Date.now()}-${f.name}`;
-      setPendingFiles((prev) => [...prev, { id, name: f.name, type: 'file' }]);
-    });
-    e.target.value = '';
-  };
-
-  const _handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files) return;
-    Array.from(files).forEach((f) => {
-      const id = `img-${Date.now()}-${f.name}`;
-      const reader = new FileReader();
-      reader.onload = () => {
-        setPendingFiles((prev) => [
-          ...prev,
-          { id, name: f.name, type: 'image', preview: reader.result as string },
-        ]);
-      };
-      reader.readAsDataURL(f);
-    });
-    e.target.value = '';
-  };
-
-  const docVisible = useDocumentVisible();
-
-  // Poll Local Server status — pause when the window is hidden so a
-  // backgrounded app doesn't poll IPC every 3s for hours. Resumes on focus.
-  useEffect(() => {
-    if (!docVisible) return;
-    const check = async () => {
-      try {
-        const info = await api.getLlmServerInfo();
-        setServerModel(info.running ? info.modelName || 'unknown' : null);
-      } catch {
-        setServerModel(null);
-      }
-    };
-    check();
-    const interval = setInterval(check, 3000);
-    return () => clearInterval(interval);
-  }, [docVisible]);
 
   // ── Scroll management — sticky-bottom auto-follow ──
   // Default-stuck-to-bottom: streaming chunks, tool calls, "thinking" indicators
@@ -401,11 +326,6 @@ export function MotherAgentMain() {
       {/* Rich input area — Claude-style elevated rounded card */}
       <div className="flex-shrink-0 mt-1 mb-1">
         <div className="bg-cyber-elevated/75 rounded-2xl p-2.5 border border-cyber-border">
-          {/* Pending attachments chips — shared component */}
-          <PendingChipsRow
-            files={pendingFiles}
-            onRemoveFile={(id) => setPendingFiles((prev) => prev.filter((x) => x.id !== id))}
-          />
           <textarea
             ref={chatInputRef}
             value={chatInput}
@@ -413,7 +333,7 @@ export function MotherAgentMain() {
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                if (!isProcessing) localSend();
+                if (!isProcessing) handleChatSend();
               }
             }}
             placeholder={t('mother.enterMessage')}
@@ -487,7 +407,7 @@ export function MotherAgentMain() {
               </button>
             ) : (
               <button
-                onClick={localSend}
+                onClick={handleChatSend}
                 disabled={!chatInput.trim()}
                 className="w-8 h-8 rounded-lg flex items-center justify-center bg-cyber-accent hover:brightness-110 transition-all disabled:opacity-20"
               >
