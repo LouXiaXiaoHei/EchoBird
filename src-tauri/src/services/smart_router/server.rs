@@ -5398,13 +5398,22 @@ mod tests {
 
     #[test]
     fn reauthentication_only_clears_authentication_and_rejects_old_epoch_results() {
+        for provider in [AccountProvider::Kilo, AccountProvider::CodeArts] {
+            assert_account_reauthentication(provider);
+        }
+    }
+
+    fn assert_account_reauthentication(provider: AccountProvider) {
         let state = AppState::for_tests().unwrap();
         let mut auth = bound_health_candidate("reauthentication-auth");
+        auth.account_source.as_mut().unwrap().provider = provider;
         begin_attempt(&state, &mut auth);
         bind_attempt_credentials(&state, &auth, &json!({"accessToken":"T0"}));
         mark_failure(&state, &auth, FailureClass::Authentication, None);
-        let billing = bound_health_candidate("reauthentication-billing");
-        let limited = bound_health_candidate("reauthentication-limited");
+        let mut billing = bound_health_candidate("reauthentication-billing");
+        billing.account_source = auth.account_source.clone();
+        let mut limited = bound_health_candidate("reauthentication-limited");
+        limited.account_source = auth.account_source.clone();
         mark_failure_scoped(&state, &billing, FailureClass::Billing, None, true);
         mark_failure_scoped(
             &state,

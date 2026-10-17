@@ -1,5 +1,9 @@
 use super::{ApplyResult, ModelInfo};
-use crate::services::{codearts_accounts, native_account_files as files, process_manager};
+use crate::services::{
+    codearts_accounts,
+    free_model_directory::{self, KeylessAuth},
+    native_account_files as files, process_manager,
+};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -45,6 +49,7 @@ fn parameters(info: &ModelInfo) -> Result<(&str, &str, &str, &str), String> {
             url.host_str(),
             Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
         )
+        && free_model_directory::keyless_auth(base, model) != Some(KeylessAuth::Anonymous)
     {
         return Err("CodeArts API key is empty".into());
     }

@@ -224,35 +224,29 @@ pub fn list_saved_accounts() -> Result<Vec<Account>, String> {
 
 pub async fn list_accounts() -> Result<Vec<Account>, String> {
     let _guard = ACCOUNTS.lock().await;
-    let mut rows = load()?;
-    if rows.is_empty() {
-        return Ok(vec![]);
-    }
-    if super::tool_manager::get_tool_exe_path(TOOL_ID).is_none() {
-        return Ok(rows
-            .into_values()
-            .map(|mut s| {
-                s.account.active = false;
-                s.account
-            })
-            .collect());
-    }
-    let native = native::read()?;
-    let active = native.as_ref().map(account).transpose()?;
-    if let (Some(native), Some(active)) = (native, active.as_ref()) {
-        if let Some(row) = rows.get_mut(&active.id) {
-            if update_native_session(row, &native)? {
-                save(&rows)?;
-            }
-        }
-    }
-    Ok(rows
-        .into_values()
+    let rows = load()?;
+    let native = if rows.is_empty() || super::tool_manager::get_tool_exe_path(TOOL_ID).is_none() {
+        Ok(None)
+    } else {
+        native::read()
+    };
+    Ok(account_list(rows, native))
+}
+
+fn account_list(
+    rows: BTreeMap<String, Saved>,
+    native: Result<Option<Value>, String>,
+) -> Vec<Account> {
+    let active = native
+        .ok()
+        .flatten()
+        .and_then(|native| account(&native).ok());
+    rows.into_values()
         .map(|mut s| {
             s.account.active = active.as_ref().is_some_and(|a| a.id == s.account.id);
             s.account
         })
-        .collect())
+        .collect()
 }
 
 fn client() -> Result<reqwest::Client, String> {
@@ -537,6 +531,10 @@ pub async fn poll_login(login_id: &str) -> Result<Option<Account>, String> {
         },
     );
     save(&rows)?;
+    super::smart_router::forget_account_authentication(
+        crate::models::model::AccountProvider::CodeArts,
+        &account.id,
+    );
     pending.cancel.cancel();
     Ok(Some(account))
 }
@@ -937,7 +935,7 @@ pub async fn delete_account(account_id: &str) -> Result<(), String> {
     let mut rows = load()?;
     rows.remove(account_id).ok_or("accountError.notFound")?;
     save(&rows)?;
-    super::account_proxy::forget_preparation_metadata(
+    super::smart_router::forget_account_authentication(
         crate::models::model::AccountProvider::CodeArts,
         account_id,
     );

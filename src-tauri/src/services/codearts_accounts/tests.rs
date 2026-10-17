@@ -138,6 +138,43 @@ fn newer_native_credentials_only_update_the_same_account_and_preserve_public_met
 }
 
 #[test]
+fn saved_account_list_survives_missing_unreadable_or_invalid_native_state() {
+    let native = native_from_login(&context(), &response(), &user()).unwrap();
+    let mut saved = Saved {
+        account: account(&native).unwrap(),
+        native: native.clone(),
+    };
+    saved.account.plan = Some("Free".into());
+    saved.account.balance = Some(6498.62);
+    saved.account.total = Some(6500.0);
+    saved.account.subscription_end_at = Some(1234);
+    saved.account.daily_claimed_at = Some(5678);
+    // A stale persisted flag must not mark a failed native probe as active.
+    saved.account.active = true;
+    let rows = BTreeMap::from([(saved.account.id.clone(), saved.clone())]);
+    for native in [
+        Ok(None),
+        Err("accountError.read".into()),
+        Err("accountError.keychain".into()),
+        Err("accountError.format".into()),
+        Ok(Some(json!({"session":{}}))),
+    ] {
+        let listed = account_list(rows.clone(), native);
+        let mut expected = saved.account.clone();
+        expected.active = false;
+        assert_eq!(serde_json::to_value(listed).unwrap(), json!([expected]));
+    }
+    let listed = account_list(rows.clone(), Ok(Some(native.clone())));
+    assert_eq!(
+        serde_json::to_value(listed).unwrap(),
+        json!([saved.account])
+    );
+    let mut other = native;
+    other["session"]["userId"] = json!("another-user");
+    assert!(!account_list(rows, Ok(Some(other)))[0].active);
+}
+
+#[test]
 fn saving_and_deleting_desktop_rows_preserves_legacy_records_and_unknown_metadata() {
     let desktop = json!({"account":{"id":"codearts:fixture","toolId":"codearts","email":"old","futureAccountField":{"preserved":true}},"session":"enc:v1:old","futureRecordField":[1,2]});
     let ide = json!({"account":{"id":"codeartsagent:legacy","toolId":"codeartsagent"},"session":"opaque-legacy","futureField":17});

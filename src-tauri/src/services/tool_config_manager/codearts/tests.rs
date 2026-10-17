@@ -158,3 +158,34 @@ fn local_ipv6_models_accept_an_empty_key_without_allowing_remote_endpoints() {
     info.base_url = Some("http://[2001:db8::1]:8787/v1".into());
     assert!(parameters(&info).is_err());
 }
+
+#[test]
+fn known_anonymous_remote_models_round_trip_without_a_key() {
+    let fixture = Fixture::desktop();
+    let mut info = model("openai");
+    info.base_url = Some("https://api.kilo.ai/api/gateway".into());
+    info.model = Some("kilo-auto/free".into());
+    info.api_key = None;
+    assert!(crate::services::free_model_directory::is_keyless_model(
+        info.base_url.as_deref().unwrap(),
+        info.model.as_deref().unwrap()
+    ));
+    configure_desktop_with(&fixture.0, Some(&info), encrypt_fixture)
+        .unwrap()
+        .commit();
+    let loaded = read_desktop_with(&fixture.0, decrypt_fixture).unwrap();
+    assert_eq!(loaded.model, info.model);
+    assert_eq!(loaded.base_url, info.base_url);
+    assert_eq!(loaded.api_key.as_deref(), Some(""));
+    assert!(!secret_path(&fixture.0).exists());
+    for (base, model) in [
+        ("https://api.kilo.ai/api/gateway", "not-a-free-model"),
+        ("https://example.test/v1", "kilo-auto/free"),
+        ("https://api.kilo.ai/other-path", "kilo-auto/free"),
+        ("https://opencode.ai/inference/v1", "big-pickle"),
+    ] {
+        info.base_url = Some(base.into());
+        info.model = Some(model.into());
+        assert!(parameters(&info).is_err());
+    }
+}
