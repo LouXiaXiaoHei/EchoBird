@@ -39,6 +39,7 @@ const zhHant: Partial<Translations> = {
   'nav.accountCenter': '帳號管理',
   'accountCenter.quota': '可用額度',
   'accountCenter.authFailed': '授權失敗',
+  'accountCenter.reauthorize': '重新授權',
   'accountCenter.batchAuthFailed': '授權失敗：{n} 個帳號，請重新新增授權。',
   'accountCenter.batchRefreshFailed': '重新整理失敗：{n} 個帳號，請檢查網路或稍後重試。',
   'accountCenter.window': '額度 {n}',

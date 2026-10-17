@@ -9,6 +9,7 @@ import * as accountApi from '../../api/accountProxy';
 import type { ModelConfig } from '../../api/types';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { AppManagerContext, type AppManagerContextType } from '../AppManager/context';
 import {
   FreeModelsMain,
   FreeModelsProvider,
@@ -95,6 +96,7 @@ describe('Smart Router list layout and candidate pause', () => {
   let order: string[];
   let paused: string[];
   let storage: Map<string, string>;
+  let appManager: AppManagerContextType | null;
   function config() {
     return {
       enabled: true,
@@ -114,19 +116,31 @@ describe('Smart Router list layout and candidate pause', () => {
       context = value;
     });
     return (
-      <>
-        <header>
-          <FreeModelsTitleActions />
-        </header>
-        <div hidden={activePage !== 'freeModels'}>
-          <FreeModelsMain />
-        </div>
-      </>
+      <AppManagerContext.Provider value={appManager}>
+        <>
+          <header>
+            <FreeModelsTitleActions />
+          </header>
+          <div hidden={activePage !== 'freeModels'}>
+            <FreeModelsMain />
+          </div>
+        </>
+      </AppManagerContext.Provider>
     );
   }
-  async function open() {
+  async function open(accounts: AppManagerContextType | null = null) {
+    appManager = accounts;
     await act(async () => {
       renderer = create(
+        <FreeModelsProvider>
+          <Harness />
+        </FreeModelsProvider>
+      );
+    });
+  }
+  async function rerender() {
+    await act(async () => {
+      renderer.update(
         <FreeModelsProvider>
           <Harness />
         </FreeModelsProvider>
@@ -185,6 +199,7 @@ describe('Smart Router list layout and candidate pause', () => {
     ];
     order = models.map((model) => model.internalId);
     paused = [];
+    appManager = null;
     storage = new Map();
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => storage.get(key) ?? null,
@@ -433,6 +448,94 @@ describe('Smart Router list layout and candidate pause', () => {
     expect(context.customModels).toHaveLength(3);
     expect(api.removeSmartRouterCandidate).not.toHaveBeenCalled();
     noModelWrites();
+  });
+
+  it('auto-pauses an authorization-failed account and reauthorizes it from the list', async () => {
+    const addAccount = vi.fn().mockResolvedValue(undefined);
+    const failed = {
+      codexAccounts: [
+        {
+          id: 'account-one',
+          email: 'private@example.test',
+          plan: 'Pro',
+          active: false,
+          quotaWindows: [],
+        },
+      ],
+      codexAuthorizationFailedIds: new Set(['account-one']),
+      addCodexAccount: addAccount,
+      isAddingCodexAccount: false,
+      codexOAuthRemainingSeconds: 0,
+    } as unknown as AppManagerContextType;
+    await open(failed);
+    await layout('list');
+
+    expect(api.setSmartRouterCandidateEnabled).toHaveBeenCalledExactlyOnceWith('two', false);
+    const accountRow = rows()[1];
+    const accountSwitch = accountRow.findAllByProps({ role: 'switch' })[0];
+    expect(accountSwitch.props['aria-checked']).toBe(false);
+    expect(accountSwitch.props.disabled).toBe(true);
+    expect(accountRow.findAllByProps({ role: 'status' })[0].children).toEqual([
+      'accountCenter.authFailed',
+    ]);
+
+    const reauthorize = renderer.root.findByProps({
+      'aria-label': 'accountCenter.reauthorize ChatGPT / Codex',
+    });
+    expect(reauthorize.children).toHaveLength(1);
+    await act(async () => reauthorize.props.onClick({ stopPropagation: vi.fn() }));
+    expect(addAccount).toHaveBeenCalledOnce();
+    expect(api.setSmartRouterCandidateEnabled).toHaveBeenCalledTimes(1);
+
+    await layout('cards');
+    expect(
+      renderer.root.findAll(
+        (node) =>
+          node.type === 'div' &&
+          String(node.props.className).includes('free-model-route-node') &&
+          String(node.props.className).includes('is-paused')
+      )
+    ).toHaveLength(1);
+
+    appManager = {
+      ...failed,
+      codexAuthorizationFailedIds: new Set<string>(),
+    } as AppManagerContextType;
+    await rerender();
+    await layout('list');
+    expect(api.setSmartRouterCandidateEnabled).toHaveBeenLastCalledWith('two', true);
+    expect(context.pausedIds.has('two')).toBe(false);
+    expect(JSON.stringify(renderer.toJSON())).not.toContain('accountCenter.authFailed');
+  });
+
+  it('keeps an auto-paused candidate off after its failed account is deleted', async () => {
+    const failed = {
+      codexAccounts: [
+        {
+          id: 'account-one',
+          email: 'private@example.test',
+          plan: 'Pro',
+          active: false,
+          quotaWindows: [],
+        },
+      ],
+      codexAuthorizationFailedIds: new Set(['account-one']),
+      addCodexAccount: vi.fn(),
+      isAddingCodexAccount: false,
+      codexOAuthRemainingSeconds: 0,
+    } as unknown as AppManagerContextType;
+    await open(failed);
+    await layout('list');
+    expect(api.setSmartRouterCandidateEnabled).toHaveBeenCalledExactlyOnceWith('two', false);
+
+    appManager = {
+      ...failed,
+      codexAccounts: [],
+      codexAuthorizationFailedIds: new Set<string>(),
+    } as AppManagerContextType;
+    await rerender();
+    expect(api.setSmartRouterCandidateEnabled).toHaveBeenCalledTimes(1);
+    expect(context.pausedIds.has('two')).toBe(true);
   });
 
   it('toggles from the whole row without changing independent model controls', async () => {

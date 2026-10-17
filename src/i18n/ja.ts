@@ -44,6 +44,7 @@ const ja: Partial<Translations> = {
   'nav.accountCenter': 'アカウント管理',
   'accountCenter.quota': '利用可能な枠',
   'accountCenter.authFailed': '認証失敗',
+  'accountCenter.reauthorize': '再認証',
   'accountCenter.batchAuthFailed':
     '{n} 個のアカウントで認証に失敗しました。再度追加してログインしてください。',
   'accountCenter.batchRefreshFailed':

@@ -42,6 +42,7 @@ const en: Translations = {
   'nav.accountCenter': 'Accounts',
   'accountCenter.quota': 'Available quota',
   'accountCenter.authFailed': 'Authorization failed',
+  'accountCenter.reauthorize': 'Reauthorize',
   'accountCenter.batchAuthFailed':
     'Authorization failed for {n} accounts. Add them again to sign in.',
   'accountCenter.batchRefreshFailed':

@@ -37,6 +37,7 @@ const zhHans: Partial<Translations> = {
   'nav.accountCenter': '账号管理',
   'accountCenter.quota': '可用额度',
   'accountCenter.authFailed': '授权失败',
+  'accountCenter.reauthorize': '重新授权',
   'accountCenter.batchAuthFailed': '授权失败：{n} 个账号，请重新添加授权。',
   'accountCenter.batchRefreshFailed': '刷新失败：{n} 个账号，请检查网络或稍后重试。',
   'accountCenter.window': '额度 {n}',

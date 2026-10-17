@@ -1071,6 +1071,59 @@ describe('Account Center display data', () => {
     }
   });
 
+  it('reauthorizes a failed card through the same provider add flow and locks while pending', () => {
+    const state = context();
+    state.codexAccounts = [
+      {
+        id: 'failed',
+        email: 'failed@example.test',
+        plan: 'Pro',
+        active: false,
+        quotaWindows: [],
+      },
+    ];
+    state.codexAuthorizationFailedIds.add('failed');
+    const add = vi.fn();
+    const base = providers(state).find((provider) => provider.id === 'codex')!;
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      act(() => {
+        renderer = create(
+          <AccountCard provider={{ ...base, installed: true, add }} account={base.accounts[0]} />
+        );
+      });
+      const button = renderer!.root.findByProps({
+        'aria-label': 'accountCenter.reauthorize ChatGPT / Codex',
+      });
+      expect(button.props.disabled).not.toBe(true);
+      act(() => button.props.onClick());
+      expect(add).toHaveBeenCalledOnce();
+
+      act(() => {
+        renderer!.update(
+          <AccountCard
+            provider={{
+              ...base,
+              installed: true,
+              add,
+              busy: true,
+              remainingSeconds: 42,
+              waitingLabel: 'agent.waitingForBrowser {seconds}',
+            }}
+            account={base.accounts[0]}
+          />
+        );
+      });
+      const pending = renderer!.root.findByProps({
+        'aria-label': 'accountCenter.reauthorize ChatGPT / Codex',
+      });
+      expect(pending.props.disabled).toBe(true);
+      expect(JSON.stringify(renderer!.toJSON())).toContain('agent.waitingForBrowser 42');
+    } finally {
+      act(() => renderer?.unmount());
+    }
+  });
+
   it('shows real balances without making up percentages and preserves unknown vs zero', () => {
     const state = context();
     state.deepSeekAccounts.accounts = [

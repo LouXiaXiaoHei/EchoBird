@@ -153,9 +153,32 @@ export function AccountCard({
           }
         >
           {account.authorizationFailed ? (
-            <span role="status" className="text-sm font-semibold text-cyber-error">
-              {t('accountCenter.authFailed')}
-            </span>
+            <div className="flex min-w-0 flex-col items-center gap-2 text-center">
+              <span role="status" className="text-sm font-semibold text-cyber-error">
+                {t('accountCenter.authFailed')}
+              </span>
+              <button
+                type="button"
+                aria-label={`${t('accountCenter.reauthorize')} ${provider.name}`}
+                disabled={!provider.installed || provider.busy || account.pending}
+                onClick={provider.add}
+                className="inline-flex h-7 max-w-full items-center gap-1.5 rounded-button border border-cyber-accent/45 px-3 text-xs font-semibold text-cyber-accent transition-colors hover:bg-cyber-accent/10 disabled:opacity-40"
+              >
+                <RefreshCw
+                  size={13}
+                  className={provider.busy ? 'animate-spin' : ''}
+                  aria-hidden="true"
+                />
+                <span className="truncate">
+                  {provider.busy
+                    ? (provider.waitingLabel ?? t('agent.waitingForBrowser')).replace(
+                        '{seconds}',
+                        String(provider.remainingSeconds)
+                      )
+                    : t('accountCenter.reauthorize')}
+                </span>
+              </button>
+            </div>
           ) : missingUsage ? (
             <span
               role="status"

@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -79,6 +80,8 @@ import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
 import { copyText } from '../../utils/copyText';
 import { useModelNexus } from '../ModelNexus/context';
 import { accountProxyIdentityLabel, accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
+import { accountProxyStatus } from '../AppManager/accountProxyStatus';
+import { AppManagerContext } from '../AppManager/context';
 import './FreeModels.css';
 import { type RouteModelNode, providerRank, useFreeModels } from './provider';
 export { FreeModelsProvider, useFreeModels } from './provider';
@@ -364,6 +367,9 @@ interface RouteModelCardProps {
   paused?: boolean;
   pending?: boolean;
   statusLabel?: string;
+  authorizationFailed?: boolean;
+  reauthorizing?: boolean;
+  onReauthorize?: () => void;
   onEnabledChange?: (enabled: boolean) => void;
   onEdit?: () => void;
   onRemove?: () => void;
@@ -390,6 +396,9 @@ function RouteModelCard({
   paused = false,
   pending = false,
   statusLabel,
+  authorizationFailed = false,
+  reauthorizing = false,
+  onReauthorize,
   onEnabledChange,
   onEdit,
   onRemove,
@@ -406,6 +415,7 @@ function RouteModelCard({
   const dragPointerDown: PointerEventHandler<HTMLElement> | undefined =
     dragHandleProps?.onPointerDown;
   const accountProvider = accountProxyProviders.find((p) => p.id === model.accountSource?.provider);
+  const accountProviderName = accountProvider?.name ?? model.provider;
   const displayName = model.accountSource
     ? hideAccountNames
       ? ACCOUNT_NAME_MASK
@@ -465,20 +475,20 @@ function RouteModelCard({
       {...dragHandleProps}
       type="button"
       tabIndex={overlay ? -1 : dragHandleProps?.tabIndex}
-      disabled={list ? pending || saving || overlay : undefined}
+      disabled={list ? pending || saving || overlay || authorizationFailed : undefined}
       aria-label={`${t('freeModels.router.priority')} ${priority}: ${model.modelId}`}
       aria-pressed={list ? !paused : undefined}
       aria-expanded={!list && hasModelPicker ? pickerOpen : undefined}
       onPointerDown={dragPointerDown}
       onClick={() => {
-        if (saving || dragging || pending || overlay) return;
+        if (saving || dragging || pending || overlay || authorizationFailed) return;
         if (list) onEnabledChange?.(paused);
         else if (hasModelPicker) changePickerOpen(!pickerOpen);
       }}
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          if (saving || dragging || pending || overlay) return;
+          if (saving || dragging || pending || overlay || authorizationFailed) return;
           if (list) onEnabledChange?.(paused);
           else if (hasModelPicker) changePickerOpen(true);
         } else {
@@ -524,11 +534,41 @@ function RouteModelCard({
           </div>
         </div>
         <div className="free-model-route-row-details relative pointer-events-none">
-          <span
-            className={`truncate text-xs ${active ? 'text-cyber-accent' : 'text-cyber-text-muted'}`}
-          >
-            {statusLabel}
-          </span>
+          <div className="flex min-w-0 items-center gap-2">
+            {authorizationFailed ? (
+              <>
+                <span role="status" className="shrink-0 text-xs font-semibold text-cyber-error">
+                  {t('accountCenter.authFailed')}
+                </span>
+                {onReauthorize && (
+                  <button
+                    type="button"
+                    aria-label={`${t('accountCenter.reauthorize')} ${accountProviderName}`}
+                    aria-busy={reauthorizing || undefined}
+                    disabled={reauthorizing}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onReauthorize();
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    className="pointer-events-auto relative flex h-5 w-5 shrink-0 items-center justify-center rounded border border-cyber-accent/40 text-cyber-accent transition-colors hover:bg-cyber-accent/10 disabled:opacity-40"
+                  >
+                    <RefreshCw
+                      size={11}
+                      className={reauthorizing ? 'animate-spin' : ''}
+                      aria-hidden="true"
+                    />
+                  </button>
+                )}
+              </>
+            ) : (
+              <span
+                className={`truncate text-xs ${active ? 'text-cyber-accent' : 'text-cyber-text-muted'}`}
+              >
+                {statusLabel}
+              </span>
+            )}
+          </div>
           {modelPicker}
         </div>
         <div className="free-model-route-row-actions relative flex shrink-0 items-center gap-1">
@@ -559,6 +599,7 @@ function RouteModelCard({
               hideLabel
               label={`${t('freeModels.router.candidateEnabled')}: ${displayName} (${priority})`}
               checked={!paused}
+              disabled={authorizationFailed}
               pending={pending || saving || dragging}
               onChange={onEnabledChange}
             />
@@ -747,6 +788,7 @@ function routeCatalogBinding(model: RouteModelNode) {
 
 export function FreeModelsMain() {
   const activePage = useNavigationStore((state) => state.activePage);
+  const appManager = useContext(AppManagerContext);
   const { t } = useI18n();
   const docVisible = useDocumentVisible();
   const { showToast } = useToast();
@@ -772,6 +814,7 @@ export function FreeModelsMain() {
   } = useFreeModels();
   const [removingIds, setRemovingIds] = useState<Set<string>>(() => new Set());
   const removalRequests = useRef(new Set<string>());
+  const autoToggleRef = useRef(new Map<string, 'pause' | 'resume'>());
   const removeFromList = async (id: string) => {
     if (removalRequests.current.has(id)) return;
     removalRequests.current.add(id);
@@ -1046,6 +1089,57 @@ export function FreeModelsMain() {
       return model ? [model] : [];
     });
   }, [customModels, selectedIds]);
+  const accountStatusByModel = useMemo(() => {
+    const bindings = new Map<
+      string,
+      { status: ReturnType<typeof accountProxyStatus>; accountId: string }
+    >();
+    if (!appManager) return bindings;
+    for (const model of selectedModels) {
+      const source = model.accountSource;
+      if (!source) continue;
+      const status = accountProxyStatus(appManager, source.provider);
+      bindings.set(model.id, { status, accountId: source.accountId });
+    }
+    return bindings;
+  }, [appManager, selectedModels]);
+  const authorizationByModel = useMemo(() => {
+    const failed = new Map<string, ReturnType<typeof accountProxyStatus>>();
+    for (const [id, binding] of accountStatusByModel) {
+      if (binding.status.authorizationFailedIds.has(binding.accountId))
+        failed.set(id, binding.status);
+    }
+    return failed;
+  }, [accountStatusByModel]);
+  useEffect(() => {
+    for (const id of authorizationByModel.keys()) {
+      if (!autoToggleRef.current.has(id) && !pausedIds.has(id) && !candidateTogglePending.has(id)) {
+        autoToggleRef.current.set(id, 'pause');
+        void setCandidateEnabled(id, false);
+      }
+    }
+    for (const [id, intent] of [...autoToggleRef.current]) {
+      if (authorizationByModel.has(id)) continue;
+      const binding = accountStatusByModel.get(id);
+      const accountExists =
+        binding != null &&
+        binding.status.accounts.some((account) => account.id === binding.accountId);
+      if (!pausedIds.has(id)) {
+        autoToggleRef.current.delete(id);
+      } else if (accountExists && intent === 'pause' && !candidateTogglePending.has(id)) {
+        autoToggleRef.current.set(id, 'resume');
+        void setCandidateEnabled(id, true);
+      } else if (!accountExists) {
+        autoToggleRef.current.delete(id);
+      }
+    }
+  }, [
+    accountStatusByModel,
+    authorizationByModel,
+    pausedIds,
+    candidateTogglePending,
+    setCandidateEnabled,
+  ]);
   useEffect(() => () => setActiveDragId(null), [setActiveDragId, activePage]);
   const activeDragModel = selectedModels.find((model) => model.id === activeDragId);
   const sensors = useSensors(
@@ -1394,57 +1488,67 @@ export function FreeModelsMain() {
                       : { paddingInline: NODE_SIDE_PADDING, marginTop: 40 }
                   }
                 >
-                  {selectedModels.map((model, index) => (
-                    <SortableRouteModel
-                      key={model.id}
-                      model={model}
-                      account={accountFor(model)}
-                      keyless={keylessFor(model)}
-                      providerIconSrc={providerIconFor(model)}
-                      priority={index + 1}
-                      list={layout === 'list'}
-                      paused={pausedIds.has(model.id)}
-                      pending={candidateTogglePending.has(model.id) || removingIds.has(model.id)}
-                      active={
-                        routerEnabled &&
-                        !pausedIds.has(model.id) &&
-                        (layout === 'list'
-                          ? workingIds.includes(model.id)
-                          : activeRoutePath?.id === model.id)
-                      }
-                      statusLabel={t(
-                        pausedIds.has(model.id)
-                          ? 'freeModels.router.paused'
-                          : !routerEnabled
-                            ? 'freeModels.router.disabled'
-                            : workingIds.includes(model.id)
-                              ? 'freeModels.router.working'
-                              : 'freeModels.router.idle'
-                      )}
-                      onEnabledChange={(enabled) => void setCandidateEnabled(model.id, enabled)}
-                      onRemove={() => void removeFromList(model.id)}
-                      onEdit={
-                        model.id === 'local-server'
-                          ? undefined
-                          : () =>
-                              void handleCardEdit({
-                                internalId: model.internalId,
-                                name: model.provider,
-                                baseUrl: model.baseUrl,
-                                anthropicUrl: model.anthropicUrl,
-                                apiKey: model.apiKey ?? '',
-                                modelId: model.modelId,
-                                accountSource: model.accountSource,
-                                scope: model.scope,
-                              })
-                      }
-                      modelIdOptions={modelIdOptionsFor(model)}
-                      {...modelMetadataFor(model)}
-                      saving={savingModelIds.has(model.id)}
-                      onModelChange={switchModel}
-                      registerNode={setNodeRef}
-                    />
-                  ))}
+                  {selectedModels.map((model, index) => {
+                    const authorization = authorizationByModel.get(model.id);
+                    const authorizationFailed = Boolean(authorization);
+                    return (
+                      <SortableRouteModel
+                        key={model.id}
+                        model={model}
+                        account={accountFor(model)}
+                        keyless={keylessFor(model)}
+                        providerIconSrc={providerIconFor(model)}
+                        priority={index + 1}
+                        list={layout === 'list'}
+                        paused={pausedIds.has(model.id) || authorizationFailed}
+                        pending={candidateTogglePending.has(model.id) || removingIds.has(model.id)}
+                        active={
+                          routerEnabled &&
+                          !authorizationFailed &&
+                          !pausedIds.has(model.id) &&
+                          (layout === 'list'
+                            ? workingIds.includes(model.id)
+                            : activeRoutePath?.id === model.id)
+                        }
+                        statusLabel={t(
+                          authorizationFailed
+                            ? 'accountCenter.authFailed'
+                            : pausedIds.has(model.id)
+                              ? 'freeModels.router.paused'
+                              : !routerEnabled
+                                ? 'freeModels.router.disabled'
+                                : workingIds.includes(model.id)
+                                  ? 'freeModels.router.working'
+                                  : 'freeModels.router.idle'
+                        )}
+                        authorizationFailed={authorizationFailed}
+                        reauthorizing={authorization?.busy}
+                        onReauthorize={authorization ? () => void authorization.add() : undefined}
+                        onEnabledChange={(enabled) => void setCandidateEnabled(model.id, enabled)}
+                        onRemove={() => void removeFromList(model.id)}
+                        onEdit={
+                          model.id === 'local-server'
+                            ? undefined
+                            : () =>
+                                void handleCardEdit({
+                                  internalId: model.internalId,
+                                  name: model.provider,
+                                  baseUrl: model.baseUrl,
+                                  anthropicUrl: model.anthropicUrl,
+                                  apiKey: model.apiKey ?? '',
+                                  modelId: model.modelId,
+                                  accountSource: model.accountSource,
+                                  scope: model.scope,
+                                })
+                        }
+                        modelIdOptions={modelIdOptionsFor(model)}
+                        {...modelMetadataFor(model)}
+                        saving={savingModelIds.has(model.id)}
+                        onModelChange={switchModel}
+                        registerNode={setNodeRef}
+                      />
+                    );
+                  })}
                 </div>
               </SortableContext>
               {layout === 'cards' &&
@@ -1466,7 +1570,10 @@ export function FreeModelsMain() {
                       providerIconSrc={providerIconFor(activeDragModel)}
                       compact
                       list={layout === 'list'}
-                      paused={pausedIds.has(activeDragModel.id)}
+                      paused={
+                        pausedIds.has(activeDragModel.id) ||
+                        authorizationByModel.has(activeDragModel.id)
+                      }
                       priority={selectedModels.indexOf(activeDragModel) + 1}
                       overlay
                     />

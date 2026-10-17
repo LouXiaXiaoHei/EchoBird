@@ -39,6 +39,7 @@ export type TKey =
   | 'nav.accountCenter'
   | 'accountCenter.quota'
   | 'accountCenter.authFailed'
+  | 'accountCenter.reauthorize'
   | 'accountCenter.batchAuthFailed'
   | 'accountCenter.batchRefreshFailed'
   | 'accountCenter.window'
