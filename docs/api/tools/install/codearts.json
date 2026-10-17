@@ -1,0 +1,29 @@
+{
+    "id": "codearts",
+    "displayName": "CodeArts",
+    "homepage": "https://codearts.huaweicloud.com/download.html",
+    "docs": "https://support.huaweicloud.com/productdesc-codeartsagent/codeartsagent_pd_0001.html",
+    "kind": "desktop_app",
+    "platforms": ["windows", "macos"],
+    "install": {
+        "windows": "Use the 桌面端(Beta) section of https://codearts.huaweicloud.com/download.html. Download the current Windows x64 CodeArts installer and its SHA256, verify the hash, then open the installer. Preserve the existing install location and user data on upgrade.",
+        "macos": "Use the 桌面端(Beta) section of https://codearts.huaweicloud.com/download.html. The current macOS package is an Apple Silicon ZIP. Verify its official SHA256, extract CodeArts.app and install in /Applications or ~/Applications.",
+        "linux": "The official desktop Beta download page currently provides no Linux package. Do not substitute the IDE, CLI or browser portal."
+    },
+    "install_flow": {
+        "agent_steps": [
+            "Detect OS and architecture, then check the existing executable or app bundle before installing. The current desktop packages cover Windows x64 and macOS arm64 only; do not assume other architectures are available.",
+            "Read the current official download page and select the desktop Beta package, not the IDE or CLI. The release filenames change, so resolve the current href and SHA256 link from that section instead of pinning a version.",
+            "Download to the user's Downloads directory, compare the SHA256 to the official checksum and report the exact installer path. Open the Windows installer for the user to complete, or extract the macOS app bundle. Preserve existing configuration and sessions.",
+            "Re-scan through EchoBird. On Windows use the CodeArts versioned uninstall entry to honor custom installation directories and verify CodeArts.exe exists. On macOS verify CodeArts.app and its CFBundleExecutable.",
+            "Installation success requires the native executable or app bundle. Opening the download page or installer is not installed; report started only after an explicit launch and confirmation that the native client remains running."
+        ]
+    },
+    "identity_guard": {
+        "description": "CodeArts is Huawei Cloud's general AI desktop workbench, branded 桌面端(Beta). It is distinct from the CodeArts Agent coding IDE, the codearts CLI, VS Code/JetBrains extensions and the cloud portal. Windows executable: CodeArts.exe; macOS bundle: CodeArts.app. A CodeArts Agent installation is not proof that this desktop product is installed."
+    },
+    "network_requirements": {
+        "test_urls": ["https://codearts.huaweicloud.com"],
+        "mirrors": {}
+    }
+}

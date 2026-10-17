@@ -581,6 +581,7 @@ impl ChatDecoder {
             .map_err(|error| format!("Invalid account stream: {error}"))?;
         if event == "error"
             || value.get("error").is_some_and(|error| !error.is_null())
+            || (value["error_code"].is_string() && value["error_msg"].is_string())
             || matches!(value["type"].as_str(), Some("error" | "response.failed"))
         {
             let error = value
@@ -590,6 +591,7 @@ impl ChatDecoder {
                 .unwrap_or(&value);
             return Err(error["message"]
                 .as_str()
+                .or_else(|| error["error_msg"].as_str())
                 .unwrap_or("Account inference failed")
                 .to_string());
         }

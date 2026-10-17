@@ -18,6 +18,7 @@ pub mod claude_code_oauth;
 pub mod claude_desktop_accounts;
 pub mod cline_accounts;
 pub mod cline_native;
+pub mod codearts_accounts;
 pub mod codex_accounts;
 pub mod codex_catalog;
 #[cfg(any(target_os = "macos", test))]

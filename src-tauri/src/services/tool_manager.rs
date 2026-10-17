@@ -571,7 +571,7 @@ fn registry_display_name_matches(
         return true;
     }
     prefixes_lower.iter().any(|p| {
-        if matches!(p.as_str(), "qoder" | "qoder cn") {
+        if matches!(p.as_str(), "qoder" | "qoder cn" | "codearts") {
             return dn_lower == p
                 || dn_lower
                     .strip_prefix(&format!("{p} "))
@@ -1077,8 +1077,29 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
                 super::qoder_native::desktop_edition(path)
                     == Some(super::qoder_accounts::Edition::QoderCn)
             }
+            "CodeArts" => codearts_desktop_identity(path),
             _ => true,
         }
+}
+
+fn codearts_desktop_identity(executable: &Path) -> bool {
+    let Some(directory) = executable.parent() else {
+        return false;
+    };
+    let resources = if directory.file_name().is_some_and(|name| name == "MacOS") {
+        directory
+            .parent()
+            .map(|contents| contents.join("Resources"))
+    } else {
+        Some(directory.join("resources"))
+    };
+    let Some(resources) = resources else {
+        return false;
+    };
+    fs::read(resources.join("product.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|product| product["nameShort"].as_str() == Some("CodeArts"))
 }
 
 fn environment_executable(pc: &PathsConfig) -> Option<String> {
@@ -3123,6 +3144,68 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn codearts_desktop_detection_requires_the_native_product_metadata() {
+        let root = std::env::temp_dir().join(format!("echobird-codearts-{}", uuid::Uuid::new_v4()));
+        let desktop = root.join("desktop");
+        let other = root.join("unrelated");
+        fs::create_dir_all(desktop.join("resources")).unwrap();
+        fs::create_dir_all(other.join("resources")).unwrap();
+        let desktop_exe = desktop.join("CodeArts.exe");
+        let other_exe = other.join("codearts.exe");
+        fs::write(&desktop_exe, b"fixture").unwrap();
+        fs::write(&other_exe, b"fixture").unwrap();
+        assert!(!super::codearts_desktop_identity(&desktop_exe));
+        fs::write(
+            desktop.join("resources/product.json"),
+            br#"{"nameShort":"CodeArts"}"#,
+        )
+        .unwrap();
+        assert!(super::codearts_desktop_identity(&desktop_exe));
+        assert!(!super::codearts_desktop_identity(&other_exe));
+        fs::write(
+            other.join("resources/product.json"),
+            br#"{"nameShort":"Another Product"}"#,
+        )
+        .unwrap();
+        assert!(!super::codearts_desktop_identity(&other_exe));
+        let contents = root.join("CodeArts.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("Resources")).unwrap();
+        fs::write(
+            contents.join("Resources/product.json"),
+            br#"{"nameShort":"CodeArts"}"#,
+        )
+        .unwrap();
+        assert!(super::codearts_desktop_identity(
+            &contents.join("MacOS/CodeArts")
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn codearts_registry_detection_does_not_confuse_the_ide_or_cli() {
+        let desktop: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/codearts/paths.json")).unwrap();
+        let hints = desktop.install_hints.unwrap();
+        let prefixes: Vec<_> = hints
+            .windows_display_name_prefixes
+            .iter()
+            .map(|name| name.to_lowercase())
+            .collect();
+        for name in ["codearts", "codearts 0.2.6", "codearts 1.0.0"] {
+            assert!(registry_display_name_matches(name, &[], &prefixes));
+        }
+        for name in [
+            "codearts agent",
+            "codearts agent 26.9.902",
+            "codearts cli",
+            "codeartside",
+        ] {
+            assert!(!registry_display_name_matches(name, &[], &prefixes));
+        }
     }
 
     #[test]

@@ -76,6 +76,30 @@ afterEach(() => {
 });
 
 describe('shared account request boundaries', () => {
+  it('uses the shared unavailable error for reward failures and treats already claimed results as success', async () => {
+    await mount();
+    const claim = vi.fn().mockRejectedValueOnce('accountError.unavailable');
+    await act(async () => {
+      await state.refresh(account, claim);
+    });
+    expect(showError).toHaveBeenCalledExactlyOnceWith('accountError.unavailable');
+    expect(state.accounts).toEqual([account]);
+    expect(state.selectedId).toBe(account.id);
+    expect(state.authorizationFailedIds.size).toBe(0);
+    expect(state.refreshing.size).toBe(0);
+
+    showError.mockClear();
+    claim.mockResolvedValueOnce({ ...account, quota: 42 });
+    await act(async () => {
+      await state.refresh(account, claim);
+    });
+    expect(showError).not.toHaveBeenCalled();
+    expect(state.accounts).toEqual([{ ...account, quota: 42 }]);
+    expect(state.selectedId).toBe(account.id);
+    expect(client.refresh).not.toHaveBeenCalled();
+    expect(client.start).not.toHaveBeenCalled();
+  });
+
   it('marks each navigation pending before its deferred list starts and retains rows after failure', async () => {
     act(() => {
       renderer = create(<Harness />);

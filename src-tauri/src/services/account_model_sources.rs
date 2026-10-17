@@ -44,6 +44,10 @@ fn option(
 pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccountOption>, String> {
     use AccountProvider::*;
     let mut accounts: Vec<SavedAccountOption> = match provider {
+        CodeArts => super::codearts_accounts::list_saved_accounts()?
+            .into_iter()
+            .map(|a| option(provider, a.id, a.email, a.plan))
+            .collect(),
         OpenDesign => super::opendesign_accounts::list_saved_accounts()
             .await?
             .into_iter()
@@ -219,6 +223,9 @@ pub(crate) async fn credentials(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        CodeArts => {
+            super::codearts_accounts::proxy_credentials(&source.account_id, force_refresh).await
+        }
         OpenDesign => super::opendesign_accounts::proxy_credentials(&source.account_id).await,
         ClaudeCode => {
             claude_code_accounts::proxy_credentials(&source.account_id, force_refresh).await
@@ -271,6 +278,13 @@ pub(crate) async fn credentials_after_rejection(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        CodeArts => {
+            super::codearts_accounts::proxy_credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
         OpenDesign => {
             let current = super::opendesign_accounts::proxy_credentials(&source.account_id).await?;
             if current["accessToken"] == rejected_credentials["accessToken"] {
@@ -448,6 +462,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
             if matches!(
                 source.provider,
                 AccountProvider::Trae
+                    | AccountProvider::CodeArts
                     | AccountProvider::Traecn
                     | AccountProvider::Minimax
                     | AccountProvider::Qoder

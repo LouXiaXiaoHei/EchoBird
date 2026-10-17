@@ -338,7 +338,8 @@ fn base(provider: AccountProvider, credentials: &Value) -> &str {
             | AccountProvider::Minimax
             | AccountProvider::Qoder
             | AccountProvider::QoderCn
-            | AccountProvider::Zcode => {
+            | AccountProvider::Zcode
+            | AccountProvider::CodeArts => {
                 unreachable!("Provider uses its account gateway")
             }
         })
@@ -439,7 +440,8 @@ fn signed(
         | AccountProvider::Minimax
         | AccountProvider::Qoder
         | AccountProvider::QoderCn
-        | AccountProvider::Zcode => {
+        | AccountProvider::Zcode
+        | AccountProvider::CodeArts => {
             unreachable!("Provider uses its account gateway")
         }
     }
@@ -486,6 +488,7 @@ pub(super) fn upstream_error(status: StatusCode, headers: &HeaderMap, value: &Va
     error.error_code = detail["code"]
         .as_str()
         .or_else(|| detail["status"].as_str())
+        .or_else(|| detail["error_code"].as_str())
         .map(str::to_string);
     error.error_type = detail["type"].as_str().map(str::to_string);
     error.model_scope = detail["scope"] == "model"
@@ -570,7 +573,10 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
         &value["response"]["error"]
     } else if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         error
-    } else if event == "error" || value["type"] == "error" {
+    } else if event == "error"
+        || value["type"] == "error"
+        || (value["error_code"].is_string() && value["error_msg"].is_string())
+    {
         &value
     } else {
         return None;
@@ -578,6 +584,7 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
     let code = detail["code"]
         .as_str()
         .or_else(|| detail["status"].as_str())
+        .or_else(|| detail["error_code"].as_str())
         .or_else(|| detail["type"].as_str());
     let status = if context_limit_error(code, &safe_error(&json!({"error":detail}))) {
         StatusCode::BAD_REQUEST
@@ -594,6 +601,10 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
                     | "usage_limit_reached"
                     | "RESOURCE_EXHAUSTED",
                 ) => StatusCode::TOO_MANY_REQUESTS,
+                Some(
+                    "ModelArts.81101" | "ModelArts.81111" | "ModelArts.81114" | "BusyException",
+                ) => StatusCode::TOO_MANY_REQUESTS,
+                Some("TM.00020005") => StatusCode::BAD_REQUEST,
                 Some("insufficient_quota" | "billing_error" | "billing_hard_limit_reached") => {
                     StatusCode::PAYMENT_REQUIRED
                 }
@@ -674,7 +685,9 @@ mod context_limit_regressions {
 fn safe_error(value: &Value) -> String {
     value["error"]["message"]
         .as_str()
+        .or_else(|| value["error"]["error_msg"].as_str())
         .or_else(|| value["message"].as_str())
+        .or_else(|| value["error_msg"].as_str())
         .or_else(|| value["msg"].as_str())
         .unwrap_or("Account upstream refused the request")
         .chars()
@@ -938,7 +951,8 @@ async fn fetch_models(
         | AccountProvider::Minimax
         | AccountProvider::Qoder
         | AccountProvider::QoderCn
-        | AccountProvider::Zcode => {
+        | AccountProvider::Zcode
+        | AccountProvider::CodeArts => {
             unreachable!("Provider uses its account gateway")
         }
     };

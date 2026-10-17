@@ -1213,9 +1213,9 @@ impl ProcessManager {
                 .is_ok_and(|output| output.status.success());
         }
 
-        // MiniMax editions share a process name; macOS WorkBuddy shares Electron
-        // with unrelated apps. Match these clients by their executable path.
-        if tool_id == "minimaxdesktop"
+        // CodeArts Desktop shares its image name with an unrelated native CLI;
+        // MiniMax editions and macOS WorkBuddy also need exact executable paths.
+        if matches!(tool_id, "minimaxdesktop" | "codearts")
             || (cfg!(target_os = "macos") && matches!(tool_id, "workbuddy" | "workbuddyai"))
         {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
@@ -1234,8 +1234,8 @@ impl ProcessManager {
             #[cfg(windows)]
             {
                 return crate::utils::process::command("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", "$stopped=$false; Get-CimInstance Win32_Process -Filter \"Name = 'MiniMax Code.exe'\" | Where-Object { $_.ExecutablePath -eq $env:ECHOBIRD_MINIMAX_EXE } | ForEach-Object { taskkill /PID $_.ProcessId /T /F; if($LASTEXITCODE -eq 0){$stopped=$true} }; if($stopped){exit 0}else{exit 1}"])
-                    .env("ECHOBIRD_MINIMAX_EXE", path)
+                    .args(["-NoProfile", "-NonInteractive", "-Command", "$stopped=$false; Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:ECHOBIRD_DESKTOP_EXE } | ForEach-Object { taskkill /PID $_.ProcessId /T /F; if($LASTEXITCODE -eq 0){$stopped=$true} }; if($stopped){exit 0}else{exit 1}"])
+                    .env("ECHOBIRD_DESKTOP_EXE", path)
                     .output().is_ok_and(|out|out.status.success());
             }
             #[cfg(not(windows))]
@@ -2368,6 +2368,7 @@ mod tests {
             "/Applications/Kilo.app/Contents/MacOS/kilo-desktop",
             "/home/alice/Apps/Kilo (custom).app/Contents/MacOS/native-kilo",
             "/opt/kilo-desktop/kilo-desktop",
+            "/Applications/CodeArts.app/Contents/MacOS/CodeArts",
         ] {
             let pattern = regex::Regex::new(&super::executable_process_pattern(path)).unwrap();
             assert!(pattern.is_match(path));

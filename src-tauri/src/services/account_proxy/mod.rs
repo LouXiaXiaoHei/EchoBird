@@ -2,6 +2,7 @@
 
 mod bridge;
 mod cline;
+mod codearts;
 mod grok;
 mod kiro;
 mod minimax;
@@ -23,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::models::model::AccountProvider;
 
+pub(crate) use codearts::signed_headers as codearts_signed_headers;
 pub(crate) use protocol::SseParser;
 #[cfg(test)]
 pub(crate) fn remember_free_model_ids(
@@ -178,7 +180,9 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if provider == AccountProvider::Grok {
+    if provider == AccountProvider::CodeArts {
+        codearts::route(credentials, model, body, client).await
+    } else if provider == AccountProvider::Grok {
         grok::route(credentials, model, body, client).await
     } else if provider == AccountProvider::Kiro {
         kiro::route(credentials, model, body, client).await
@@ -217,7 +221,9 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if provider == AccountProvider::Grok {
+    if provider == AccountProvider::CodeArts {
+        codearts::list_models(credentials, client).await
+    } else if provider == AccountProvider::Grok {
         grok::list_models(credentials, client).await
     } else if provider == AccountProvider::Kiro {
         kiro::list_models(credentials, client).await

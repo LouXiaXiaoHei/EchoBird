@@ -156,6 +156,13 @@ impl Transaction {
     pub(crate) fn replace_private_file(&mut self, path: &Path, bytes: &[u8]) -> Result<(), String> {
         self.replace_with(path, bytes, true)
     }
+    pub(crate) fn remove(&mut self, path: &Path) -> Result<(), String> {
+        if let Some(bytes) = read_optional(path)? {
+            fs::remove_file(path).map_err(|_| "accountError.write")?;
+            self.original.push((path.to_path_buf(), Some(bytes), false));
+        }
+        Ok(())
+    }
     fn replace_with(
         &mut self,
         path: &Path,

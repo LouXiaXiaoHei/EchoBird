@@ -51,7 +51,8 @@ export type AccountProvider =
   | 'cline'
   | 'zcode'
   | 'kimi'
-  | 'openDesign';
+  | 'openDesign'
+  | 'codeArts';
 
 export interface AccountSource {
   provider: AccountProvider;

@@ -10,6 +10,8 @@ import { useTraeAccounts } from './useTraeAccounts';
 import { useKiroAccounts } from './useKiroAccounts';
 import { useZCodeAccounts } from './useZCodeAccounts';
 import { useKimiAccounts } from './useKimiAccounts';
+import { useCodeArtsAccounts } from './useCodeArtsAccounts';
+import { switchCodeArtsAccount } from '../../api/codeArtsAccounts';
 import { switchKimiAccount } from '../../api/kimiAccounts';
 import { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import { useMinimaxAccounts } from './useMinimaxAccounts';
@@ -493,6 +495,20 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     () => setToolModelConfig((prev) => ({ ...prev, zcode: null })),
     setApplyError
   );
+  const codeArtsAccounts = useCodeArtsAccounts(
+    accountGroupEnabled('codearts') ||
+      (activePage === 'freeModels' &&
+        detectedTools.some((tool) => tool.id === 'codearts' && tool.installed)),
+    !!toolModelConfig.codearts,
+    () => setToolModelConfig((prev) => ({ ...prev, codearts: null })),
+    setApplyError,
+    `${activePage}:${selectedTool ?? ''}`
+  );
+  const codeArtsModel = toolModelConfig.codearts;
+  const codeArtsSelectionRevision = useRef(0);
+  useEffect(() => {
+    codeArtsSelectionRevision.current += 1;
+  }, [activePage, selectedTool, codeArtsAccounts.selectedId, codeArtsModel]);
   const openDesignAccounts = useOpenDesignAccounts(
     accountGroupEnabled('opendesign'),
     !!toolModelConfig.opendesign,
@@ -502,6 +518,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
 
   // Set tool model (single selection) - UI state update
   const handleSelectModel = (toolId: string, modelId: string) => {
+    if (toolId === 'codearts') {
+      codeArtsSelectionRevision.current += 1;
+      codeArtsAccounts.select(null);
+    }
     if (toolId === 'cline' || toolId === 'clinedesktop') {
       clineSelectionRevision.current += 1;
       clineAccounts.select(null);
@@ -776,6 +796,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   // Launch handler
   const handleLaunch = async () => {
     if (!selectedTool || isLaunching) return;
+    if (selectedTool === 'codearts' && codeArtsAccounts.busy) return;
     if (selectedTool === 'zcode' && zcodeAccounts.busy) return;
     if (['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.busy) return;
     if (selectedTool === 'opendesign' && openDesignAccounts.busy) return;
@@ -809,6 +830,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
       !((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
+      !(selectedTool === 'codearts' && codeArtsAccounts.selectedId) &&
       !(['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.selectedId) &&
       !(selectedTool === 'opendesign' && openDesignAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
@@ -1024,6 +1046,27 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         await api.startTool(selectedTool, toolData?.startCommand);
       } catch (error) {
         setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (selectedTool === 'codearts' && codeArtsAccounts.selectedId) {
+      const selectionRevision = codeArtsSelectionRevision.current;
+      const current = () =>
+        selectionRevision === codeArtsSelectionRevision.current &&
+        accountNavigation.current.tool === selectedTool &&
+        accountNavigation.current.page === activePage;
+      try {
+        const cwd = launchAfterApply ? await pickWorkingDirectory() : undefined;
+        if (cwd === null || !current()) return;
+        await switchCodeArtsAccount(codeArtsAccounts.selectedId);
+        if (current()) {
+          await codeArtsAccounts.reload();
+        }
+        if (launchAfterApply && current())
+          await api.startTool(selectedTool, toolData?.startCommand, cwd);
+      } catch (error) {
+        if (current()) setApplyError(accountError(error, t));
       } finally {
         finishLaunch();
       }
@@ -1311,6 +1354,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         kimiAccounts: {
           ...kimiAccounts,
           accounts: orderedAccounts('kimi', kimiAccounts.accounts),
+        },
+        codeArtsAccounts: {
+          ...codeArtsAccounts,
+          accounts: orderedAccounts('codearts', codeArtsAccounts.accounts),
         },
         openDesignAccounts: {
           ...openDesignAccounts,

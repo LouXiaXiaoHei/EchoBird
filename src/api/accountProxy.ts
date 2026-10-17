@@ -20,6 +20,7 @@ export const accountProxyProviders: { id: AccountProvider; name: string; icon: s
   { id: 'zcode', name: 'ZCode', icon: 'zcode.png' },
   { id: 'kimi', name: 'Kimi', icon: 'kimidesktop.png' },
   { id: 'openDesign', name: 'Open Design', icon: 'opendesign.png' },
+  { id: 'codeArts', name: 'CodeArts', icon: 'codearts.png' },
 ];
 
 export interface ProxyAccount {

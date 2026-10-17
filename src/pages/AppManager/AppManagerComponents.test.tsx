@@ -90,6 +90,23 @@ it('Open Design offers both API protocols and its native official mode in the sh
   expect(markup).toContain('Open Design Official');
 });
 
+it('CodeArts shows API models without an Official restore card', async () => {
+  vi.stubGlobal('__APP_EDITION__', 'full');
+  const { ModelListSection } = await import('./AppManagerComponents');
+  const markup = renderToStaticMarkup(
+    <ModelListSection
+      selectedToolData={{ ...tool, id: 'codearts', name: 'CodeArts' }}
+      userModels={[models[0]]}
+      toolModelConfig={{}}
+      selectedTool="codearts"
+      handleSelectModel={vi.fn()}
+      t={(key) => key}
+    />
+  );
+  expect(markup).toContain('Cloud Model');
+  expect(markup).not.toContain('CodeArts Official');
+});
+
 describe('ModelListSection', () => {
   it.each([
     ['qoder', qoderDefinition],

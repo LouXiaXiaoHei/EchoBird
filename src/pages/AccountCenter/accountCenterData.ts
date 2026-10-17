@@ -18,6 +18,7 @@ import {
 import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
 import { clineBalanceLabel } from '../AppManager/clineAccountDisplay';
 import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
+import { codeArtsRemainingPercent } from '../AppManager/codeArtsAccountDisplay';
 
 export interface AccountMetric {
   label: string;
@@ -723,5 +724,36 @@ export function accountCenterProviders(
           : [credits(t('model.balance'), account.balanceUsd, undefined, undefined, 'USD')],
       })
     ),
+    ...(context.codeArtsAccounts
+      ? [
+          provider(
+            'codearts',
+            'CodeArts',
+            '/icons/tools/codearts.png',
+            ['codearts'],
+            context.codeArtsAccounts,
+            (account) => {
+              const percent = codeArtsRemainingPercent(account);
+              return {
+                identity: account.email,
+                plan: account.plan,
+                subscriptionEndAt: !isFreePlan(account.plan)
+                  ? (account.subscriptionEndAt ?? undefined)
+                  : undefined,
+                dailyClaimedAt: account.dailyClaimedAt,
+                metrics: [
+                  {
+                    label: t('agent.credits'),
+                    value: percent == null ? number(account.balance) : `${percent}%`,
+                    percent,
+                    showProgress: true,
+                  },
+                ],
+                claim: () => context.codeArtsAccounts.claimDaily(account),
+              };
+            }
+          ),
+        ]
+      : []),
   ];
 }

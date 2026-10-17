@@ -14,6 +14,7 @@ import { TraeAccountSection } from './TraeAccountSection';
 import { KiroAccountSection } from './KiroAccountSection';
 import { ZCodeAccountSection } from './ZCodeAccountSection';
 import { KimiAccountSection } from './KimiAccountSection';
+import { CodeArtsAccountSection } from './CodeArtsAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
@@ -1062,6 +1063,9 @@ export const AppManagerPanel: React.FC = () => {
           ) : (
             <div className="flex h-full flex-col gap-2">
               {selectedTool === 'opendesign' && <OpenDesignAccountSection showDivider />}
+              {selectedTool === 'codearts' && (
+                <CodeArtsAccountSection showDivider={hasVisibleModels} />
+              )}
               {showCodexAccounts && (
                 <CodexAccountSection showDivider={hasVisibleModels || showWebSearchToggle} />
               )}
@@ -1162,6 +1166,7 @@ export const AppManagerBottom: React.FC = () => {
     kiroAccounts,
     zcodeAccounts,
     kimiAccounts,
+    codeArtsAccounts,
     openDesignAccounts,
     minimaxAccounts,
     qoderAccounts,
@@ -1193,7 +1198,9 @@ export const AppManagerBottom: React.FC = () => {
   const isInstallAction = isUninstalled || (activePage === 'apps' && viewMode === 'install');
   const isBuiltInApp = selectedTool === 'reversi' || selectedTool === 'translator';
   const hasModelSelected = !!(selectedTool && toolModelConfig[selectedTool]);
+  const codeArtsAccountSelected = selectedTool === 'codearts' && !!codeArtsAccounts.selectedId;
   const hasAccountSelected =
+    codeArtsAccountSelected ||
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') &&
       !!minimaxAccounts.selectedId) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
@@ -1233,6 +1240,7 @@ export const AppManagerBottom: React.FC = () => {
   const buttonDisabled =
     !selectedToolData ||
     isLaunching ||
+    (selectedTool === 'codearts' && codeArtsAccounts.busy) ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
     (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && kimiAccounts.busy) ||
     (selectedTool === 'opendesign' && openDesignAccounts.busy) ||
@@ -1320,7 +1328,7 @@ export const AppManagerBottom: React.FC = () => {
         >
           {/* Apply & Launch checkbox */}
           <label
-            className={`flex items-center gap-2 select-none ${noModelConfig ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+            className="flex items-center gap-2 select-none"
             onClick={() => {
               if (!noModelConfig) setLaunchAfterApply(!launchAfterApply);
             }}
@@ -1358,7 +1366,7 @@ export const AppManagerBottom: React.FC = () => {
           </label>
           {/* Config policy agreement */}
           <label
-            className={`flex items-center gap-2 select-none ${noModelConfig ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+            className="flex items-center gap-2 select-none"
             onClick={() => {
               if (!noModelConfig) setAgreedConfigPolicy(!agreedConfigPolicy);
             }}

@@ -40,6 +40,7 @@ describe('account errors', () => {
   });
 
   it('localizes both backend strings and Error objects without leaking diagnostics', () => {
+    expect(accountError('accountError.unavailable', t)).toBe(zhHans['accountError.unavailable']);
     expect(accountError('accountError.expired', t)).toBe(zhHans['accountError.expired']);
     expect(accountError(new Error('accountError.write|Permission denied'), t)).toBe(
       zhHans['accountError.write']

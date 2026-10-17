@@ -61,5 +61,7 @@ export function accountProxyStatus(
       return context.kimiAccounts;
     case 'openDesign':
       return context.openDesignAccounts;
+    case 'codeArts':
+      return context.codeArtsAccounts;
   }
 }

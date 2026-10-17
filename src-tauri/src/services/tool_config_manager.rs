@@ -10,6 +10,7 @@ pub(crate) fn claude_science_restart_file() -> std::path::PathBuf {
     echobird_dir().join(claudescience::RESTART_FILE)
 }
 pub(crate) mod cline;
+mod codearts;
 mod codex;
 mod copilot;
 pub(crate) mod dsh;
@@ -310,6 +311,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 
     // Dispatch custom tools to their own handlers
     match tool_id {
+        "codearts" => return codearts::configure(tool_id, Some(&model_info)).await,
         "vscode" => return vscode::apply(&model_info),
         // OpenClaw: direct write to ~/.openclaw/openclaw.json (no patch needed since v2026.3.13)
         "openclaw" => return apply_openclaw(&model_info),
@@ -403,6 +405,9 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 /// the tool itself regenerates a fresh, vendor-default config on next launch.
 /// Used by the App Desktop "restore to official" flow.
 pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
+    if tool_id == "codearts" {
+        return codearts::configure(tool_id, None).await;
+    }
     if tool_id == "opendesign" {
         return opendesign::restore().await;
     }
@@ -536,6 +541,7 @@ pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
 
 pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
     match tool_id {
+        "codearts" => return codearts::read(tool_id),
         "vscode" => return vscode::read(),
         "openclaw" => return read_openclaw(),
         "opencode" | "opencodedesktop" => return read_opencode(),
