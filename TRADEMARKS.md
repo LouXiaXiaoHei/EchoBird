@@ -119,47 +119,42 @@ shipped:
 
 | **2026-05-20** | `05a35d13` | **My AI Projects / 我的AI项目** (`src/pages/MyProjects/`) — bundled with two complete reference applications (Reversi + AI Translator) as user-tutorial templates | — |
 
-**Original four-surface relationship diagram:**
+**Current relationship diagram — including Account Management and Smart Router:**
 
-```
-                            ┌─────────────────────┐
-                            │   Local Server      │
-                            │   2026-03-02        │
-                            │   (model producer)  │
-                            └──────────┬──────────┘
-                                       │ locally-deployed LLMs
-                                       │ enter the central pool
-                                       ▼
-                       ┌──────────────────────────────────┐
-                       │           Model Nexus            │
-                       │       central model pool         │
-                       │  • Aggregates remote/user-       │
-                       │    configured + local-deployed   │
-                       │  • UI shows remote/user-         │
-                       │    configured only; local        │
-                       │    models hidden here (managed   │
-                       │    via Local Server) but live    │
-                       │    in the same pool              │
-                       │   2026-03-02 / 2026-03-26        │
-                       └──────────────┬───────────────────┘
-                                      │ each consumer below can
-                                      │ select ANY model in the
-                                      │ pool — remote OR local
-        ┌─────────────────────────────┼─────────────────────────────┐
-        ▼                             ▼                             ▼
-   ┌──────────────┐             ┌──────────────┐             ┌─────────────────┐
-   │  App Manager │             │ Mother Agent │             │ My AI Projects  │
-   │  2026-03-02  │             │ 2026-03-02   │             │ 2026-05-20      │
-   └──────────────┘             └──────────────┘             └─────────────────┘
+```mermaid
+flowchart TD
+    local["Local Server<br/>locally-deployed LLMs"]
+    nexus["Model Nexus<br/>central model pool"]
+    accounts["Account Management<br/>saved accounts"]
+    free["Free models<br/>fetched remotely"]
+    router["Smart Router<br/>unified access"]
+    apps["App Manager"]
+    agent["Mother Agent"]
+    projects["My AI Projects"]
 
-           (Local Server is the only one of the four UI surfaces that
-            FEEDS the pool; the other three READ from it. This dual
-            role of Local Server is intentional architecture, not
-            convenience — see §4 model-bound condition.)
+    local --> nexus
+    nexus --> router
+    accounts --> router
+    free --> router
+    router --> apps
+    router --> agent
+    router --> projects
+    accounts -->|account access| apps
+    nexus -.-> apps
+    nexus -.-> agent
+    nexus -.-> projects
 ```
 
-The "configure once, used everywhere" relationship between Model Nexus
-and its consumers — combined with **Local Server's role as the only
+Solid arrows show model supply and access; dashed arrows show direct model
+selection from Model Nexus, alongside Smart Router access. The central pool
+still aggregates remote/user-configured and locally-deployed models. Local
+models are managed through Local Server and hidden in the Model Nexus page,
+but remain selectable by the three consumers. The dates above describe the
+original architecture; the later-page milestones are recorded below.
+
+In the original four-surface architecture, the "configure once, used everywhere"
+relationship between Model Nexus and its consumers — combined with
+**Local Server's role as the only
 producer-side surface** that injects locally-deployed LLMs into the
 same pool — and the **specific UI grammar shared between App Manager
 and My AI Projects** (same card-grid + right-panel container, same
@@ -169,8 +164,9 @@ above the pool (producer) and the other three surfaces below it
 (consumers) is part of the trade dress, not an incidental layout.
 
 **Later additions — Smart Router and Account Management.** Two further
-pages extend this architecture: **Smart Router / 智能路由** and **Account
-Management / 账号管理**. **Orchestration Router / 多模型编排路由** is a view
+pages extend this architecture: **Smart Router / 智能接入** (previously
+**智能路由**) and **Account Management / 账号管理**.
+**Orchestration Router / 多模型编排路由** is a view
 within the Smart Router page. These later milestones are recorded separately from
 the original four-surface combination referenced in §5 and [NOTICE](NOTICE).
 Dates below use Git committer timestamps in **UTC+08:00** and record
@@ -203,17 +199,21 @@ combination of model nodes, a router hub and dashed routing links before
 
 **Relationships of the later pages:**
 
-- **Smart Router ↔ shared model configuration.** The page selects and
-  orders candidate models, reuses the Model Nexus model editor, and
-  exposes a local proxy with OpenAI / Anthropic-compatible endpoints through the
-  selectable `smart-router` model. Its hub, numbered draggable cards
-  and connecting paths visualize the candidate order and active route.
+- **Account Management, Model Nexus and remotely-fetched free models → Smart Router.**
+  These provide saved accounts and candidate models. The page selects and
+  orders candidates and reuses the Model Nexus model editor. Its hub,
+  numbered draggable cards and connecting paths visualize the candidate
+  order and active route.
+- **Smart Router → App Manager, Mother Agent and My AI Projects.** All three
+  can select the `smart-router` model to use its local OpenAI /
+  Anthropic-compatible proxy endpoints. Direct selection from Model Nexus
+  remains available alongside routed access.
 - **Orchestration Router within Smart Router.** The preview reuses the router
   hub and model-card components, arranging the hub beside or above the
   primary model, with supplemental cards below it. The view switch
   preserves Smart Router's saved configuration; the preview has no
   separate routing backend.
-- **Account Management ↔ App Manager.** Both use the same saved-account
+- **Account Management → App Manager.** Both use the same saved-account
   state and `useManagedAccounts.ts` lifecycle. The dedicated page
   combines accounts from multiple providers in one sortable card grid
   showing identity, plan and quota, with refresh / delete actions and
@@ -625,46 +625,38 @@ rewrite to Tauri + Rust architecture」)在同一个 Tauri 桌面二进制里
 
 | **2026-05-20** | `05a35d13` | **我的AI项目 / My AI Projects**(`src/pages/MyProjects/`) —— 内置两个完整可运行的参考应用(黑白棋 + AI 翻译)作为用户教程模板 | — |
 
-**最初四个界面的关系示意图:**
+**当前关系示意图 —— 包含账号管理与智能接入:**
 
-```
-                            ┌─────────────────────┐
-                            │   本地大模型         │
-                            │   Local Server      │
-                            │   2026-03-02        │
-                            │   (模型生产者)      │
-                            └──────────┬──────────┘
-                                       │  本地部署的 LLM
-                                       │  进入中央模型池
-                                       ▼
-                       ┌──────────────────────────────────┐
-                       │           Model Nexus            │
-                       │         中央模型池               │
-                       │  • 池子聚合:远程/用户配置 +     │
-                       │    本地部署的模型                │
-                       │  • UI 显示:仅远程/用户配置;    │
-                       │    本地模型在 Nexus 页隐藏       │
-                       │    (由本地大模型页管理),       │
-                       │    但仍在同一池子里              │
-                       │   2026-03-02 / 2026-03-26        │
-                       └──────────────┬───────────────────┘
-                                      │  以下三个消费者都能
-                                      │  从池子里选**任意**模型
-                                      │  (远程 OR 本地)
-        ┌─────────────────────────────┼─────────────────────────────┐
-        ▼                             ▼                             ▼
-   ┌──────────────┐             ┌──────────────┐             ┌─────────────────┐
-   │   应用管理   │             │  安装与修复  │             │  我的 AI 项目    │
-   │ App Manager  │             │ Mother Agent │             │ My AI Projects  │
-   │ 2026-03-02   │             │ 2026-03-02   │             │ 2026-05-20      │
-   └──────────────┘             └──────────────┘             └─────────────────┘
+```mermaid
+flowchart TD
+    local["本地大模型<br/>本地部署的 LLM"]
+    nexus["模型中心 / Model Nexus<br/>中央模型池"]
+    accounts["账号管理<br/>已存账号"]
+    free["免费模型<br/>远程获取"]
+    router["智能接入 / Smart Router<br/>统一接入"]
+    apps["应用管理 / App Manager"]
+    agent["AI 助手 / Mother Agent"]
+    projects["我的 AI 项目 / My AI Projects"]
 
-         (本地大模型是四个 UI 界面中**唯一向池子注入模型**的;
-          其他三个**从池子读取**。本地大模型的「生产者 + 消费者」
-          双重身份是有意为之的架构,不是凑数 —— 详见 §4 模型绑定条件。)
+    local --> nexus
+    nexus --> router
+    accounts --> router
+    free --> router
+    router --> apps
+    router --> agent
+    router --> projects
+    accounts -->|账号接入| apps
+    nexus -.-> apps
+    nexus -.-> agent
+    nexus -.-> projects
 ```
 
-「**一处配置,四处生效**」—— Model Nexus 与其消费者之间的这种关系、
+实线表示模型供给与接入,虚线表示通过模型中心直接选择模型,与智能接入并行。
+中央模型池仍聚合远程/用户配置和本地部署模型;本地模型由本地大模型页面管理,
+在模型中心页面隐藏,但仍可供三个消费页面选择。上方日期记录最初架构,
+后续页面的里程碑见下文。
+
+在最初四个界面的架构中,「**一处配置,四处生效**」—— Model Nexus 与其消费者之间的这种关系、
 **本地大模型作为唯一的生产者侧界面**向池子注入本地部署 LLM 的角色,
 以及**应用管理与我的 AI 项目共享同一种 UI 语法**(同样的卡片网格 +
 右侧详情面板容器、同样的 ToolCard 组件、同样的模型应用流),共同
@@ -672,9 +664,9 @@ rewrite to Tauri + Rust architecture」)在同一个 Tauri 桌面二进制里
 其他三个界面在池子下方(消费者)**的非对称布局,是 trade dress 的
 一部分,不是偶然排版。
 
-**后续扩展 —— 智能路由与账号管理。** 这套架构后来增加了**智能路由 /
-Smart Router**和**账号管理 / Account Management**两个页面。**多模型编排路由 /
-Orchestration Router**是智能路由页面内的一个视图。以下里程碑单独记录这些后续
+**后续扩展 —— 智能接入与账号管理。** 这套架构后来增加了**智能接入 /
+Smart Router**(原名**智能路由**)和**账号管理 / Account Management**两个页面。**多模型编排路由 /
+Orchestration Router**是智能接入页面内的一个视图。以下里程碑单独记录这些后续
 扩展;§5 与 [NOTICE](NOTICE) 中的原始四界面组合仍指前述四个界面。
 下表日期按 Git 提交者时间戳的 **UTC+08:00** 日期记录,作为源码历史证据。
 
@@ -702,14 +694,16 @@ Orchestration Router**是智能路由页面内的一个视图。以下里程碑�
 
 **后续页面的关系:**
 
-- **智能路由 ↔ 共享模型配置。** 页面选择并排列候选模型,复用模型中心的
-  模型编辑器,通过可选择的 `smart-router` 模型提供统一的本地 OpenAI /
-  Anthropic 兼容端点。枢纽、可拖动的编号卡片和连接路径共同展示候选顺序
-  与当前请求路由。
-- **智能路由内的多模型编排路由视图。** 预览复用路由枢纽与模型卡片组件,枢纽位于
-  主模型旁边或上方,辅助模型卡片排列在主模型下方。切换视图保留智能路由
+- **账号管理、模型中心和远程获取的免费模型 → 智能接入。** 三类来源提供
+  已存账号与候选模型。页面选择并排列候选项,复用模型中心的模型编辑器。
+  枢纽、可拖动的编号卡片和连接路径共同展示候选顺序与当前请求路由。
+- **智能接入 → 应用管理、AI 助手和我的 AI 项目。** 三个页面都可选择
+  `smart-router` 模型,使用其本地 OpenAI / Anthropic 兼容代理端点。
+  通过模型中心直接选择模型的方式仍与路由接入并行。
+- **智能接入内的多模型编排路由视图。** 预览复用路由枢纽与模型卡片组件,枢纽位于
+  主模型旁边或上方,辅助模型卡片排列在主模型下方。切换视图保留智能接入
   已存配置;该预览没有独立的路由后端。
-- **账号管理 ↔ 应用管理。** 两者共享已存账号状态与 `useManagedAccounts.ts`
+- **账号管理 → 应用管理。** 两者共享已存账号状态与 `useManagedAccounts.ts`
   生命周期。独立页面将多家厂商账号汇总在可排序卡片网格中,展示身份、套餐
   与额度,提供刷新 / 删除操作,并在右侧厂商目录中添加账号。额度刷新保持为
   显式操作;应用账号仍由应用管理页面执行。
@@ -965,7 +959,7 @@ store」这个产品形态成为行业标准的过程的一部分。**执行精�
 
 ---
 
-*Last updated / 最后更新: 2026-07-07*
+*Last updated / 最后更新: 2026-10-17*
 *This policy is non-binding promotional language; the MIT LICENSE
 file governs current (v5.x) code use, and the NOTICE file is the formal trade-dress
 declaration. This document tells the story behind both.*
