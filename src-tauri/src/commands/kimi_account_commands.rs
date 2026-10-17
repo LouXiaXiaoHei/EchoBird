@@ -1,4 +1,7 @@
 use crate::services::kimi_accounts::{self, Account, LoginStart, Region};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_kimi_accounts() -> Result<Vec<Account>, String> {
@@ -26,5 +29,9 @@ pub async fn switch_kimi_account(account_id: String) -> Result<Account, String> 
 }
 #[tauri::command]
 pub async fn delete_kimi_account(account_id: String) -> Result<(), String> {
-    kimi_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Kimi,
+        &account_id,
+        kimi_accounts::delete(&account_id).await,
+    )
 }

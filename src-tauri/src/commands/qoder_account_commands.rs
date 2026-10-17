@@ -1,4 +1,7 @@
 use crate::services::qoder_accounts::{self, Account, Edition, LoginStart};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_qoder_accounts(edition: Edition) -> Result<Vec<Account>, String> {
@@ -32,5 +35,12 @@ pub async fn claim_qoder_daily_credits(
 }
 #[tauri::command]
 pub async fn delete_qoder_account(edition: Edition, account_id: String) -> Result<(), String> {
-    qoder_accounts::delete_account(edition, &account_id).await
+    finish_account_deletion(
+        match edition {
+            Edition::Qoder => AccountProvider::Qoder,
+            Edition::QoderCn => AccountProvider::QoderCn,
+        },
+        &account_id,
+        qoder_accounts::delete_account(edition, &account_id).await,
+    )
 }

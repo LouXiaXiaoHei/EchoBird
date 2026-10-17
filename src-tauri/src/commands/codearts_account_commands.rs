@@ -1,4 +1,7 @@
 use crate::services::codearts_accounts::{self, Account, LoginStart};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_codearts_accounts() -> Result<Vec<Account>, String> {
@@ -30,7 +33,11 @@ pub async fn switch_codearts_account(account_id: String) -> Result<Account, Stri
 }
 #[tauri::command]
 pub async fn delete_codearts_account(account_id: String) -> Result<(), String> {
-    codearts_accounts::delete_account(&account_id).await
+    finish_account_deletion(
+        AccountProvider::CodeArts,
+        &account_id,
+        codearts_accounts::delete_account(&account_id).await,
+    )
 }
 #[tauri::command]
 pub async fn claim_codearts_credits(account_id: String) -> Result<Account, String> {

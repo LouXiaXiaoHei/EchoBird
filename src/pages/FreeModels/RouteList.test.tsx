@@ -791,6 +791,29 @@ describe('Smart Router list layout and candidate pause', () => {
     noModelWrites();
   });
 
+  it('drops account routes cleaned by deletion on another page when returning, without passive writes', async () => {
+    paused = ['two'];
+    await open();
+    await layout('list');
+    expect(context.customModels.map((model) => model.id)).toEqual(['one', 'two', 'three']);
+    await act(async () => useNavigationStore.setState({ activePage: 'accounts' }));
+    // Successful account deletion commits the route cleanup in the backend.
+    models = models.filter((model) => model.internalId !== 'two');
+    order = order.filter((id) => id !== 'two');
+    paused = [];
+    vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([]);
+    await act(async () => useNavigationStore.setState({ activePage: 'freeModels' }));
+    expect(context.customModels.map((model) => model.id)).toEqual(['one', 'three']);
+    expect([...context.selectedIds]).toEqual(['one', 'three']);
+    expect(context.pausedIds.has('two')).toBe(false);
+    expect(rows()).toHaveLength(2);
+    expect(api.removeSmartRouterCandidate).not.toHaveBeenCalled();
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    noModelWrites();
+  });
+
   it('opens the existing editor for the intended model without saving, removing or dragging', async () => {
     await open();
     await layout('list');

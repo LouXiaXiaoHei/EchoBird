@@ -7,6 +7,9 @@ use crate::services::antigravity_accounts::{
 use crate::services::codex_accounts::{self, CodexAccountSummary};
 use crate::services::tool_config_manager::{self, ApplyResult, ModelInfo};
 use crate::services::tool_manager;
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_antigravity_accounts() -> Result<Vec<AntigravityAccount>, String> {
@@ -37,7 +40,11 @@ pub async fn switch_antigravity_account(account_id: String) -> Result<Antigravit
 
 #[tauri::command]
 pub async fn delete_antigravity_account(account_id: String) -> Result<(), String> {
-    antigravity_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Antigravity,
+        &account_id,
+        antigravity_accounts::delete(&account_id).await,
+    )
 }
 
 #[tauri::command]
@@ -291,7 +298,11 @@ pub async fn refresh_codex_account_quota(
 
 #[tauri::command]
 pub fn delete_codex_account(account_id: String) -> Result<(), String> {
-    codex_accounts::delete_account(&account_id)
+    finish_account_deletion(
+        AccountProvider::Codex,
+        &account_id,
+        codex_accounts::delete_account(&account_id),
+    )
 }
 
 /// Apply a model config to a user-authored project's models.json.
@@ -680,7 +691,11 @@ pub async fn refresh_claude_code_account_quota(
 
 #[tauri::command]
 pub async fn delete_claude_code_account(account_id: String) -> Result<(), String> {
-    crate::services::claude_code_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::ClaudeCode,
+        &account_id,
+        crate::services::claude_code_accounts::delete(&account_id).await,
+    )
 }
 
 use crate::services::workbuddy_accounts::{
@@ -719,7 +734,11 @@ pub async fn refresh_opendesign_account(account_id: String) -> Result<OpenDesign
 }
 #[tauri::command]
 pub async fn delete_opendesign_account(account_id: String) -> Result<(), String> {
-    opendesign_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::OpenDesign,
+        &account_id,
+        opendesign_accounts::delete(&account_id).await,
+    )
 }
 
 #[tauri::command]
@@ -748,7 +767,11 @@ pub async fn refresh_zcode_account_quota(account_id: String) -> Result<ZCodeAcco
 }
 #[tauri::command]
 pub async fn delete_zcode_account(account_id: String) -> Result<(), String> {
-    zcode_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Zcode,
+        &account_id,
+        zcode_accounts::delete(&account_id).await,
+    )
 }
 
 #[tauri::command]
@@ -802,7 +825,14 @@ pub async fn delete_workbuddy_account(
     edition: WorkBuddyEdition,
     account_id: String,
 ) -> Result<(), String> {
-    workbuddy_accounts::delete(edition, &account_id).await
+    finish_account_deletion(
+        match edition {
+            WorkBuddyEdition::Cn => AccountProvider::WorkBuddy,
+            WorkBuddyEdition::Ai => AccountProvider::WorkBuddyAi,
+        },
+        &account_id,
+        workbuddy_accounts::delete(edition, &account_id).await,
+    )
 }
 
 use crate::services::trae_accounts::{self, Account as TraeAccount, Edition as TraeEdition};
@@ -851,7 +881,14 @@ pub async fn claim_trae_daily_credits(
 
 #[tauri::command]
 pub async fn delete_trae_account(edition: TraeEdition, account_id: String) -> Result<(), String> {
-    trae_accounts::delete_account(edition, &account_id).await
+    finish_account_deletion(
+        match edition {
+            TraeEdition::Trae => AccountProvider::Trae,
+            TraeEdition::Traecn => AccountProvider::Traecn,
+        },
+        &account_id,
+        trae_accounts::delete_account(edition, &account_id).await,
+    )
 }
 
 #[tauri::command]
@@ -918,7 +955,11 @@ pub async fn switch_grok_account(
 }
 #[tauri::command]
 pub async fn delete_grok_account(account_id: String) -> Result<(), String> {
-    crate::services::grok_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Grok,
+        &account_id,
+        crate::services::grok_accounts::delete(&account_id).await,
+    )
 }
 #[tauri::command]
 pub async fn refresh_grok_account(
@@ -1066,5 +1107,9 @@ pub async fn refresh_kiro_account_quota(
 }
 #[tauri::command]
 pub async fn delete_kiro_account(edition: KiroEdition, account_id: String) -> Result<(), String> {
-    kiro_accounts::delete_account(edition, &account_id).await
+    finish_account_deletion(
+        AccountProvider::Kiro,
+        &account_id,
+        kiro_accounts::delete_account(edition, &account_id).await,
+    )
 }

@@ -205,6 +205,20 @@ pub async fn validate_source(source: &AccountSource) -> Result<(), String> {
     validate_saved_source(source, &list_accounts(source.provider).await?)
 }
 
+pub(crate) fn finish_account_deletion(
+    provider: AccountProvider,
+    account_id: &str,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    result?;
+    super::smart_router::remove_account_candidates(&AccountSource {
+        provider,
+        account_id: account_id.into(),
+    })?;
+    super::smart_router::forget_account_authentication(provider, account_id);
+    Ok(())
+}
+
 fn validate_saved_source(
     source: &AccountSource,
     saved: &[SavedAccountOption],
@@ -490,6 +504,18 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::json;
+
+    #[test]
+    fn failed_account_deletion_does_not_start_route_cleanup() {
+        assert_eq!(
+            finish_account_deletion(
+                AccountProvider::CodeArts,
+                "fixture",
+                Err("accountError.write".into())
+            ),
+            Err("accountError.write".into())
+        );
+    }
 
     #[test]
     fn preparation_credentials_bind_only_the_saved_metadata_accounts() {

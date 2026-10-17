@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod account_cleanup_tests;
 mod runtime;
 mod server;
 
@@ -412,6 +414,62 @@ pub fn remove_candidate(internal_id: &str) -> Result<PublicConfig, String> {
         return Err(format!("Smart Router candidate not found: {internal_id}"));
     }
     Ok(config)
+}
+
+fn remove_account_candidates_at(
+    path: &Path,
+    models: &[ModelConfig],
+    source: &crate::models::model::AccountSource,
+    mut delete_model: impl FnMut(&str),
+) -> Result<Option<Vec<String>>, String> {
+    let content = match fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut config: StoredConfig =
+        serde_json::from_slice(&content).map_err(|error| error.to_string())?;
+    let removed: HashSet<_> = models
+        .iter()
+        .filter(|model| model.account_source.as_ref() == Some(source))
+        .filter(|model| config.candidate_ids.contains(&model.internal_id))
+        .map(|model| model.internal_id.as_str())
+        .collect();
+    if removed.is_empty() {
+        return Ok(None);
+    }
+    config
+        .candidate_ids
+        .retain(|id| !removed.contains(id.as_str()));
+    config
+        .disabled_candidate_ids
+        .retain(|id| !removed.contains(id.as_str()));
+    save_config_at(path, &config)?;
+    for model in models {
+        if removed.contains(model.internal_id.as_str()) && router_owns_model(model) {
+            delete_model(&model.internal_id);
+        }
+    }
+    Ok(Some(config.candidate_ids))
+}
+
+pub(crate) fn remove_account_candidates(
+    source: &crate::models::model::AccountSource,
+) -> Result<(), String> {
+    let _guard = config_lock()
+        .lock()
+        .map_err(|_| "smart router config lock poisoned".to_string())?;
+    if let Some(remaining) = remove_account_candidates_at(
+        &config_path(),
+        &model_manager::get_user_models(),
+        source,
+        |id| {
+            model_manager::delete_model(id);
+        },
+    )? {
+        server::retain_candidate_memory(&remaining);
+    }
+    Ok(())
 }
 
 pub(crate) fn forget_candidate_memory(internal_id: &str) {

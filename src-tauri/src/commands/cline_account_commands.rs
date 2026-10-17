@@ -1,4 +1,7 @@
 use crate::services::cline_accounts::{self, Account, LoginStart};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_cline_accounts() -> Result<Vec<Account>, String> {
@@ -22,7 +25,11 @@ pub async fn refresh_cline_account(account_id: String) -> Result<Account, String
 }
 #[tauri::command]
 pub async fn delete_cline_account(account_id: String) -> Result<(), String> {
-    cline_accounts::delete_account(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Cline,
+        &account_id,
+        cline_accounts::delete_account(&account_id).await,
+    )
 }
 #[tauri::command]
 pub async fn switch_cline_account(account_id: String, tool_id: String) -> Result<Account, String> {

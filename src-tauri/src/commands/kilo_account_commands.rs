@@ -1,4 +1,7 @@
 use crate::services::kilo_accounts::{self, Account, LoginStart};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_kilo_accounts() -> Result<Vec<Account>, String> {
@@ -32,7 +35,11 @@ pub async fn refresh_kilo_account(account_id: String) -> Result<Account, String>
 
 #[tauri::command]
 pub async fn delete_kilo_account(account_id: String) -> Result<(), String> {
-    kilo_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Kilo,
+        &account_id,
+        kilo_accounts::delete(&account_id).await,
+    )
 }
 
 #[tauri::command]

@@ -1,4 +1,7 @@
 use crate::services::copilot_accounts::{self, Account, LoginStart};
+use crate::{
+    models::model::AccountProvider, services::account_model_sources::finish_account_deletion,
+};
 
 #[tauri::command]
 pub async fn list_copilot_accounts(tool_id: Option<String>) -> Result<Vec<Account>, String> {
@@ -40,5 +43,9 @@ pub async fn refresh_copilot_account(account_id: String) -> Result<Account, Stri
 
 #[tauri::command]
 pub async fn delete_copilot_account(account_id: String) -> Result<(), String> {
-    copilot_accounts::delete(&account_id).await
+    finish_account_deletion(
+        AccountProvider::Copilot,
+        &account_id,
+        copilot_accounts::delete(&account_id).await,
+    )
 }
