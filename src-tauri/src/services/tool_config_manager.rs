@@ -351,7 +351,16 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         "codex" | "chatgptdesktop" => return apply_codex(tool_id, &model_info),
 
         // Claude Desktop 3P profile (Anthropic-native providers only)
-        "claudedesktop" => return apply_claudedesktop(&model_info),
+        "claudedesktop" => {
+            let mut result = apply_claudedesktop(&model_info);
+            if result.success {
+                if let Err(message) = super::claude_desktop_history::prepare_if_stopped().await {
+                    result.success = false;
+                    result.message = message;
+                }
+            }
+            return result;
+        }
         "claudescience" => return claudescience::apply(&model_info),
 
         // Claude Code — same model-id-rewrite proxy path as Claude Desktop,
@@ -436,7 +445,14 @@ pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
         return restore_codex_to_official(tool_id, &codex_config_path.join("config.toml"));
     }
     if tool_id == "claudedesktop" {
-        return restore_claudedesktop_to_official();
+        let mut result = restore_claudedesktop_to_official();
+        if result.success {
+            if let Err(message) = super::claude_desktop_history::prepare_if_stopped().await {
+                result.success = false;
+                result.message = message;
+            }
+        }
+        return result;
     }
     if tool_id == "claudecode" {
         return restore_claudecode_to_official();

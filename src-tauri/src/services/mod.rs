@@ -16,6 +16,7 @@ pub mod bundled_assets;
 pub mod claude_code_accounts;
 pub mod claude_code_oauth;
 pub mod claude_desktop_accounts;
+pub(crate) mod claude_desktop_history;
 pub mod cline_accounts;
 pub mod cline_native;
 pub mod codearts_accounts;

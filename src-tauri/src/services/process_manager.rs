@@ -253,6 +253,9 @@ impl ProcessManager {
 
         // Merge for both official and third-party launches, after desktop
         // shutdown and before choosing the native/Store/CLI launch route.
+        if tool_id == "claudedesktop" && restart {
+            crate::services::claude_desktop_history::prepare(None).await?;
+        }
         if matches!(tool_id, "codex" | "chatgptdesktop") {
             if let Some(codex_dir) = crate::services::codex_runtime::default_codex_dir() {
                 crate::services::codex_session_merge::merge_codex_history(&codex_dir);

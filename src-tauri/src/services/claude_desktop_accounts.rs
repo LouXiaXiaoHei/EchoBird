@@ -664,6 +664,12 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
         return Err("accountError.quitClaudeDesktop".into());
     }
+    super::claude_desktop_history::prepare(Some(
+        dir.join("claude-code-sessions")
+            .join(&saved.account_uuid)
+            .join(&saved.organization_uuid),
+    ))
+    .await?;
     restore(
         &mut cookie_db(&dir, true)?,
         &dir.join("config.json"),
