@@ -737,7 +737,9 @@ it('renders MiniMax categorized credits without changing selection or fetching q
   expect(text).toContain('1,100');
   expect(text).toContain('400');
   expect(text).not.toContain('1,500');
-  expect(text).not.toContain('<svg');
+  expect(text.match(/lucide-gift/g)).toHaveLength(1);
+  expect(text).toMatch(/aria-label="agent.grantedCredits">.*?lucide-gift.*?<\/svg>400<\/span>/);
+  expect(text).toContain('aria-label="agent.minimaxPurchasedCredits">1,100</span>');
   expect(row.findByType(AccountSectionRewardButton).props.claimed).toBe(false);
   expect(renderer.root.findAllByType(QuotaCountdown).map((item) => item.props.resetAt)).toEqual([
     purchasedExpiry,

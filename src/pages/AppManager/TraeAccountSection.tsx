@@ -1,4 +1,5 @@
 import React from 'react';
+import { Gift } from 'lucide-react';
 import { useAppManager } from './context';
 import { useI18n } from '../../hooks/useI18n';
 import { useUsageClock } from '../../hooks/useUsageClock';
@@ -158,7 +159,8 @@ export const TraeAccountSection: React.FC = () => {
                               className={`flex items-baseline gap-1 ${rewardNextExpiryAt != null ? 'min-w-min flex-auto' : 'flex-shrink-0'}`}
                               aria-label={t('agent.rewardCredits')}
                             >
-                              <span className="flex-shrink-0">
+                              <span className="flex flex-shrink-0 items-center gap-0.5">
+                                <Gift size={10} aria-hidden="true" />
                                 {credits(account.rewardRemaining)}
                               </span>
                               {rewardNextExpiryAt != null && (

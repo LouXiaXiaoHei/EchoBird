@@ -1,4 +1,4 @@
-import { ArrowLeftRight } from 'lucide-react';
+import { ArrowLeftRight, Gift } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
 import { useUsageClock } from '../../hooks/useUsageClock';
 import { useAppManager } from './context';
@@ -98,7 +98,17 @@ export function MinimaxAccountSection({ showDivider = true }: { showDivider?: bo
                   ) : minimaxCreditBuckets(account.quota).length ? (
                     minimaxCreditBuckets(account.quota).map((bucket) => (
                       <span key={bucket.label} className="flex flex-shrink-0 items-baseline gap-1">
-                        <span aria-label={t(bucket.label)}>
+                        <span
+                          className={
+                            bucket.label === 'agent.grantedCredits' && bucket.remaining != null
+                              ? 'inline-flex items-center gap-0.5'
+                              : undefined
+                          }
+                          aria-label={t(bucket.label)}
+                        >
+                          {bucket.label === 'agent.grantedCredits' && bucket.remaining != null && (
+                            <Gift size={10} aria-hidden="true" />
+                          )}
                           {bucket.remaining == null
                             ? t('model.noUsageData')
                             : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(

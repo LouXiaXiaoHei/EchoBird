@@ -98,8 +98,10 @@ describe('TRAE account rows', () => {
     expect(unclaimed).toMatch(/aria-label="agent.baseCredits"><span[^>]*>75<\/span>/);
     expect(unclaimed).toContain('aria-label="agent.purchasedCredits">12</span>');
     expect(unclaimed).toContain('>agent.dailyCreditsUnclaimed</span>');
-    expect(unclaimed).toMatch(/aria-label="agent.rewardCredits"><span[^>]*>20<\/span>/);
-    expect(unclaimed.match(/lucide-gift/g)).toHaveLength(1);
+    expect(unclaimed).toMatch(
+      /aria-label="agent.rewardCredits"><span[^>]*>.*?lucide-gift.*?<\/svg>20<\/span>/
+    );
+    expect(unclaimed.match(/lucide-gift/g)).toHaveLength(2);
     const claimed = fixture([
       {
         ...saved,
@@ -113,7 +115,7 @@ describe('TRAE account rows', () => {
     ]).html();
     expect(claimed).not.toContain('agent.dailyCreditsUnclaimed');
     expect(claimed).toContain('aria-label="agent.rewardCredits"');
-    expect(claimed).not.toContain('lucide-gift');
+    expect(claimed.match(/lucide-gift/g)).toHaveLength(1);
     expect(claimed).toContain('0</span>');
     expect(fixture([{ ...saved, rewardEnabled: null }]).html()).not.toContain(
       'agent.dailyCreditsUnclaimed'
@@ -139,7 +141,7 @@ describe('TRAE account rows', () => {
     expect(html.match(/4600/g)).toHaveLength(1);
     expect(html).not.toContain('agent.baseCredits');
     expect(html).not.toContain('>—</span>');
-    expect(html).not.toContain('lucide-gift');
+    expect(html.match(/lucide-gift/g)).toHaveLength(1);
     expect(html).toContain('aria-label="agent.dailyCreditsClaimed Saved"');
   });
 
