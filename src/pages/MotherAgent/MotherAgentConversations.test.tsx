@@ -30,6 +30,7 @@ vi.mock('../../hooks/useI18n', () => ({
 }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled }) }));
 
 const confirm = vi.fn();
 const showToast = vi.fn();
@@ -46,6 +47,7 @@ let renderer: ReactTestRenderer | undefined;
 let agentEvent: (event: AgentEvent) => void;
 let parasiteEvent: (event: ParasiteEvent) => void;
 let stored: Map<string, string>;
+let routerEnabled = true;
 
 function Harness() {
   const result = useMotherAgent();
@@ -99,6 +101,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-12T09:00:00Z'));
   vi.resetAllMocks();
+  routerEnabled = true;
   confirm.mockResolvedValue(true);
   stored = new Map([['echobird_agent_model', model.internalId]]);
   vi.stubGlobal('localStorage', {
@@ -380,6 +383,108 @@ describe('Mother Agent reasoning workflow', () => {
     expect(api.sendAgentMessage).toHaveBeenCalledOnce();
     await send('Explicit retry');
     expect(vi.mocked(api.sendAgentMessage).mock.lastCall?.[0].reasoning_effort).toBe('max');
+  });
+});
+
+describe('Mother Agent smart router availability', () => {
+  const router: ModelConfig = {
+    ...model,
+    internalId: 'smart-router',
+    name: 'Auto Router',
+    baseUrl: 'http://127.0.0.1:53683/v1',
+  };
+
+  async function toggleRouter(enabled: boolean) {
+    routerEnabled = enabled;
+    await act(async () => {
+      renderer!.update(
+        <MotherAgentProvider>
+          <Harness />
+        </MotherAgentProvider>
+      );
+    });
+  }
+
+  beforeEach(() => {
+    vi.mocked(api.getModels).mockResolvedValue([model, router]);
+  });
+
+  it('hides a disabled router on entry and clears its remembered selection without choosing another model', async () => {
+    routerEnabled = false;
+    stored.set('echobird_agent_model', router.internalId);
+    await mount();
+    expect(state.models).toEqual([model]);
+    expect(state.agentModel).toBeNull();
+    expect(stored.has('echobird_agent_model')).toBe(false);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+    await send('Do not use the disabled router');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(state.chatOutput).toContainEqual({
+      type: 'error',
+      text: '',
+      i18nKey: 'error.noModelSelected',
+    });
+  });
+
+  it('updates the cached list immediately, preserves other selections, and does not restore a disabled selection', async () => {
+    await mount();
+    expect(state.models).toEqual([model, router]);
+    const reads = vi.mocked(api.getModels).mock.calls.length;
+    await toggleRouter(false);
+    expect(state.models).toEqual([model]);
+    expect(state.agentModel).toBe(model.internalId);
+    expect(api.getModels).toHaveBeenCalledTimes(reads);
+    await toggleRouter(true);
+    expect(state.models).toEqual([model, router]);
+    act(() => state.setAgentModel(router.internalId));
+    await toggleRouter(false);
+    expect(state.agentModel).toBeNull();
+    await toggleRouter(true);
+    expect(state.models).toEqual([model, router]);
+    expect(state.agentModel).toBeNull();
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteSendMessage).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('keeps a late model-list response filtered after the router is disabled', async () => {
+    const pending = deferred<ModelConfig[]>();
+    vi.mocked(api.getModels).mockReturnValueOnce(pending.promise);
+    await mount();
+    await toggleRouter(false);
+    await act(async () => pending.resolve([model, router]));
+    expect(state.models).toEqual([model]);
+    expect(state.agentModel).toBe(model.internalId);
+    act(() => useNavigationStore.setState({ activePage: 'apps' }));
+    act(() => useNavigationStore.setState({ activePage: 'mother' }));
+    expect(state.models).toEqual([model]);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserves the active conversation and request when disabling the router, and blocks the next router turn', async () => {
+    stored.set('echobird_agent_model', router.internalId);
+    await mount();
+    await send('Existing router turn');
+    const request = { ...vi.mocked(api.sendAgentMessage).mock.lastCall![0] };
+    const conversation = state.activeConversationId;
+    const transcript = state.chatOutput;
+    await toggleRouter(false);
+    expect(state.models).toEqual([model]);
+    expect(state.agentModel).toBeNull();
+    expect(state.isProcessing).toBe(true);
+    expect(state.activeConversationId).toBe(conversation);
+    expect(state.chatOutput).toEqual(transcript);
+    expect(vi.mocked(api.sendAgentMessage).mock.lastCall![0]).toEqual(request);
+    expect(api.abortAgent).not.toHaveBeenCalled();
+    expect(api.resetAgent).not.toHaveBeenCalled();
+    expect(api.parasiteAbort).not.toHaveBeenCalled();
+    expect(api.resetConversationContext).not.toHaveBeenCalled();
+    emitAgent({ type: 'done', conversation_id: activeSession() });
+    await send('Choose an available model first');
+    expect(api.sendAgentMessage).toHaveBeenCalledOnce();
   });
 });
 

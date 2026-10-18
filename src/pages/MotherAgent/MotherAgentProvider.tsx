@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
 import type { ModelConfig, AgentEvent, ParasiteEvent, ReasoningEffort } from '../../api/types';
@@ -10,6 +10,7 @@ import type { ChatMessage } from './types';
 import { MotherAgentContext } from './context';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useFreeModels } from '../FreeModels/provider';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { getReasoningLevels, loadReasoningPreferences, REASONING_STORAGE_KEY } from './reasoning';
@@ -35,7 +36,12 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const { t, locale } = useI18n(); // locale for agent hint; t for error messages
   const confirm = useConfirm();
   const { showToast } = useToast();
-  const [models, setModels] = useState<ModelConfig[]>([]);
+  const { routerEnabled } = useFreeModels();
+  const [savedModels, setModels] = useState<ModelConfig[]>([]);
+  const models = useMemo(
+    () => savedModels.filter((model) => model.internalId !== 'smart-router' || routerEnabled),
+    [savedModels, routerEnabled]
+  );
   const [agentModel, setAgentModelRaw] = useState<string | null>(() =>
     localStorage.getItem('echobird_agent_model')
   );
@@ -44,6 +50,13 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     if (v) localStorage.setItem('echobird_agent_model', v);
     else localStorage.removeItem('echobird_agent_model');
   }, []);
+  useEffect(() => {
+    if (!routerEnabled && agentModel === 'smart-router') {
+      // Drop the saved selection when the shared router switch makes it unavailable.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setAgentModel(null);
+    }
+  }, [routerEnabled, agentModel, setAgentModel]);
   const [chatInput, setChatInput] = useState('');
   const runningRef = useRef<{
     sessionKey: string;

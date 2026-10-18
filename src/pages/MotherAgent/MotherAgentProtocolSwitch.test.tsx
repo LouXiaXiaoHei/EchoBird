@@ -35,6 +35,7 @@ vi.mock('../../hooks/useI18n', () => ({
 }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: true }) }));
 
 const confirm = vi.fn();
 const showToast = vi.fn();
