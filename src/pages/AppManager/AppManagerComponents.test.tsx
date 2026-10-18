@@ -591,11 +591,10 @@ describe('PageAwareHint', () => {
   };
 
   it.each(['claudedesktop', 'claudecode'])(
-    'shows the keep-running reminder only for %s',
+    'shows the app reorder hint for %s API models',
     async (toolId) => {
       const markup = await renderHint(toolId);
-      expect(markup).toContain('hint.devInvite');
-      expect(markup).not.toContain('hint.responsesRequired');
+      expect(markup).toContain('hint.appReorder');
     }
   );
 
@@ -604,22 +603,22 @@ describe('PageAwareHint', () => {
     async (toolId) => {
       const markup = await renderHint(toolId);
       expect(markup).toContain('hint.responsesRequired');
-      expect(markup).not.toContain('hint.devInvite');
+      expect(markup).not.toContain('hint.appReorder');
     }
   );
 
-  it('hides the proxy reminder when a Claude Code account is selected', async () => {
+  it('shows the app reorder hint when a Claude Code account is selected', async () => {
     const markup = await renderHint('claudecode', 'saved-account');
-    expect(markup).not.toContain('hint.devInvite');
+    expect(markup).toContain('hint.appReorder');
   });
-  it('hides the proxy reminder when a Claude Desktop account is selected', async () => {
-    expect(await renderHint('claudedesktop', 'saved-account')).not.toContain('hint.devInvite');
+  it('shows the app reorder hint when a Claude Desktop account is selected', async () => {
+    const markup = await renderHint('claudedesktop', 'saved-account');
+    expect(markup).toContain('hint.appReorder');
   });
 
-  it('shows neither tool-specific reminder for other tools', async () => {
+  it('shows the app reorder hint for other tools', async () => {
     const markup = await renderHint('test-tool');
-    expect(markup).not.toContain('hint.devInvite');
-    expect(markup).not.toContain('hint.responsesRequired');
+    expect(markup).toContain('hint.appReorder');
   });
 });
 
@@ -675,15 +674,14 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search control', (client) => 
   );
 });
 
-describe.each(['claudedesktop', 'claudecode'])('%s routing controls', (client) => {
+describe.each(['claudedesktop', 'claudecode'])('%s model controls', (client) => {
   it.each([
-    { relay: false, selectedAccount: null },
-    { relay: true, selectedAccount: null },
-    { relay: false, selectedAccount: 'saved-account' },
-    { relay: true, selectedAccount: 'saved-account' },
+    { selectedAccount: null, pending: false },
+    { selectedAccount: 'saved-account', pending: false },
+    { selectedAccount: null, pending: true },
   ])(
-    'keeps API Router visible regardless of account selection: %j',
-    async ({ relay, selectedAccount }) => {
+    'keeps 1M and removes API Router regardless of account selection: %j',
+    async ({ selectedAccount, pending }) => {
       const { AppManagerPanel } = await import('./AppManagerComponents');
       const { ModelNexusContext } = await import('../ModelNexus/context');
       const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
@@ -714,10 +712,11 @@ describe.each(['claudedesktop', 'claudecode'])('%s routing controls', (client) =
         selectedToolData: { ...tool, id: client },
         toolModelConfig: {},
         userModels: [],
-        claudeDesktopRelayMode: relay,
-        claudeCodeRelayMode: relay,
         claudeDesktop1mMode: true,
         claude1mMode: true,
+        claudeDesktopWebSearch: false,
+        claudeCodeWebSearch: false,
+        isLaunching: pending,
         claudeCodeAccounts: accounts,
         claudeDesktopAccounts: accounts,
       } as unknown as AppManagerContextType;
@@ -730,13 +729,13 @@ describe.each(['claudedesktop', 'claudecode'])('%s routing controls', (client) =
           </ModelNexusContext.Provider>
         </ConfirmDialogProvider>
       );
-      expect(markup).toContain(`aria-checked="${relay}" aria-label="agent.codexRelayLabel"`);
-      if (client === 'claudedesktop' || relay) {
-        expect(markup).toMatch(/aria-checked="true" aria-label="1M"/);
-        expect(markup).toContain('agent.claude1mHint');
-      } else {
-        expect(markup).not.toContain('aria-label="1M"');
-      }
+      expect(markup).not.toContain('agent.codexRelayLabel');
+      expect(markup).not.toContain('agent.codexRelayHint');
+      expect(markup).toMatch(/aria-checked="true" aria-label="1M"/);
+      expect(markup).toContain('agent.claude1mHint');
+      expect(markup).toMatch(/aria-checked="false" aria-label="agent.codexWebSearchLabel"/);
+      const search = markup.match(/<button[^>]*aria-label="agent.codexWebSearchLabel"[^>]*>/)?.[0];
+      expect(search?.includes('disabled=""')).toBe(pending);
       if (client === 'claudedesktop') expect(markup).toContain('Anthropic Official');
       if (selectedAccount) expect(markup).toContain('<div role="radio" aria-checked="true"');
     }

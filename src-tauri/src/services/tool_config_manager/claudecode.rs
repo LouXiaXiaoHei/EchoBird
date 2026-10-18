@@ -3,7 +3,7 @@
 #[cfg(test)]
 use super::write_json_file;
 use super::{echobird_dir, read_json_file, ApplyResult, ModelInfo};
-use crate::services::{anthropic_proxy, native_account_files};
+use crate::services::native_account_files;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{fs, path::Path, path::PathBuf};
@@ -24,15 +24,14 @@ pub(super) fn normalize_model_info_for_tool(tool_id: &str, mut model_info: Model
     model_info
 }
 
-// Model-tier env vars Claude Code consults. Bridge mode clears them so Claude
-// Code falls back to its built-in claude-* ids (the proxy rewrites them);
-// relay mode pins supported tiers to the real upstream model. Hoisted to module
+// Model-tier env vars Claude Code consults. Pin supported tiers to the real
+// upstream model. Hoisted to module
 // scope so the set is lockable by tests — the apply path writes to
 // ~/.claude/settings.json via dirs::home_dir(), which isn't injectable.
 //
 // `ANTHROPIC_SMALL_FAST_MODEL` is deliberately NOT here — Claude Code
 // deprecated it in favor of `ANTHROPIC_DEFAULT_HAIKU_MODEL` (still pinned).
-// `CLAUDE_CODE_SUBAGENT_MODEL` IS here so relay mode pins subagents to the
+// `CLAUDE_CODE_SUBAGENT_MODEL` IS here so applies pin subagents to the
 // upstream model too (otherwise subagents fall back to claude-* ids and
 // bypass the third-party router, breaking the "全量" write-in).
 // https://code.claude.com/docs/en/model-config
@@ -109,6 +108,103 @@ fn managed_env(env: &Map<String, Value>) -> Map<String, Value> {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WebSearchPolicy {
+    permissions_existed: bool,
+    deny_existed: bool,
+    original_positions: Vec<usize>,
+    applied_denied: bool,
+    applied_deny_existed: bool,
+}
+
+fn web_search_denials(config: &Value) -> Result<Vec<Value>, String> {
+    let Some(permissions) = config.get("permissions") else {
+        return Ok(Vec::new());
+    };
+    if permissions.is_object() {
+        match permissions.get("deny") {
+            None => return Ok(Vec::new()),
+            Some(Value::Array(rules)) if rules.iter().all(Value::is_string) => {
+                return Ok(rules.clone())
+            }
+            _ => {}
+        }
+    }
+    Err("Claude Code's search permission settings are invalid. Nothing was changed.".into())
+}
+
+impl WebSearchPolicy {
+    fn write_rules(&self, config: &mut Value, rules: Vec<Value>) {
+        if !rules.is_empty() || self.deny_existed {
+            let permissions = config
+                .as_object_mut()
+                .unwrap()
+                .entry("permissions")
+                .or_insert_with(|| serde_json::json!({}));
+            permissions["deny"] = Value::Array(rules);
+        } else if let Some(permissions) =
+            config.get_mut("permissions").and_then(Value::as_object_mut)
+        {
+            permissions.remove("deny");
+        }
+        if !self.permissions_existed
+            && config
+                .get("permissions")
+                .and_then(Value::as_object)
+                .is_some_and(Map::is_empty)
+        {
+            config.as_object_mut().unwrap().remove("permissions");
+        }
+    }
+
+    fn apply(config: &mut Value, enabled: bool, previous: Option<Self>) -> Result<Self, String> {
+        let mut rules = web_search_denials(config)?;
+        let positions: Vec<_> = rules
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| (rule == "WebSearch").then_some(index))
+            .collect();
+        let deny_existed = config.pointer("/permissions/deny").is_some();
+        let mut policy = previous
+            .filter(|policy| {
+                policy.applied_denied != positions.is_empty()
+                    && policy.applied_deny_existed == deny_existed
+            })
+            .unwrap_or_else(|| Self {
+                permissions_existed: config.get("permissions").is_some(),
+                deny_existed,
+                original_positions: positions,
+                applied_denied: false,
+                applied_deny_existed: deny_existed,
+            });
+        rules.retain(|rule| rule != "WebSearch");
+        if !enabled {
+            rules.push(Value::String("WebSearch".into()));
+        }
+        policy.write_rules(config, rules);
+        policy.applied_denied = !enabled;
+        policy.applied_deny_existed = config.pointer("/permissions/deny").is_some();
+        Ok(policy)
+    }
+
+    fn restore(&self, config: &mut Value) {
+        let Ok(mut rules) = web_search_denials(config) else {
+            return;
+        };
+        if rules.iter().any(|rule| rule == "WebSearch") != self.applied_denied
+            || config.pointer("/permissions/deny").is_some() != self.applied_deny_existed
+        {
+            return;
+        }
+        rules.retain(|rule| rule != "WebSearch");
+        for index in &self.original_positions {
+            rules.insert((*index).min(rules.len()), Value::String("WebSearch".into()));
+        }
+        self.write_rules(config, rules);
+    }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ManagedSettings {
     version: u8,
     path: PathBuf,
@@ -116,6 +212,8 @@ struct ManagedSettings {
     env_existed: bool,
     original_env: Map<String, Value>,
     applied_env: Map<String, Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web_search: Option<WebSearchPolicy>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     relay: Map<String, Value>,
 }
@@ -202,11 +300,10 @@ fn config_error(message: impl Into<String>) -> ApplyResult {
     }
 }
 
-/// Value written to a `CLAUDECODE_MODEL_VARS` entry in relay mode. Appends
+/// Value written to a `CLAUDECODE_MODEL_VARS` entry. Appends
 /// `[1m]` only when the user opted in (`one_m`) AND `var` is in the 1M-capable
 /// tier; `ANTHROPIC_DEFAULT_HAIKU_MODEL` / `CLAUDE_CODE_SUBAGENT_MODEL` always
-/// return the bare id. Bridge mode never calls this — it removes the vars
-/// instead of writing them, so the `relay` flag is the caller's responsibility.
+/// return the bare id.
 fn claudecode_env_model_id(real_id: &str, var: &str, one_m: bool) -> String {
     if one_m && CLAUDECODE_MODEL_VARS_1M.contains(&var) {
         format!("{}[1m]", real_id)
@@ -223,24 +320,8 @@ fn is_fable_model(model: &str) -> bool {
         .starts_with("claude-fable-")
 }
 
-/// Claude Code 3P config. Mirrors `apply_claudedesktop` but targets Claude
-/// Code's env-var config (~/.claude/settings.json) instead of Desktop's
-/// profile JSON. Two routing modes, picked by `model_info.relay_mode`:
-///
-/// • Bridge (default): point ANTHROPIC_BASE_URL at our local Anthropic proxy
-///   (127.0.0.1:<port>/claudecode) and write NO model id, so Claude Code
-///   sends its built-in claude-* ids and the proxy rewrites every request to
-///   the real upstream model (read fresh from ~/.echobird/claudecode.json).
-///   This is the "first-class citizen" path — strict upstreams never see a
-///   claude-* name they'd reject, matching how Claude Desktop already works.
-///
-/// • Relay (relay_mode = true): write the real upstream URL + key + model id
-///   straight into settings.json so Claude Code talks to the upstream
-///   directly, bypassing the proxy. For relay stations that natively serve
-///   Anthropic Messages and map the ids themselves. (≈ the legacy full-write.)
-///
-/// The relay side-channel (~/.echobird/claudecode.json) is written in BOTH
-/// modes so `read_claudecode` can round-trip the active model back to the UI.
+/// Connect Claude Code directly to the selected Anthropic endpoint, preserving
+/// saved model identity and original settings for configuration reads/restore.
 pub(super) fn apply_claudecode(model_info: &ModelInfo) -> ApplyResult {
     let config_dir = match crate::services::claude_code_accounts::config_dir() {
         Ok(dir) => dir,
@@ -288,12 +369,11 @@ fn apply_claudecode_with_environment(
         .map(str::trim)
         .filter(|u| !u.is_empty())
         .map(|u| {
-            // Trim a trailing '/' and a trailing '/v1' so relay mode (where
-            // Claude Code's SDK appends '/v1/messages' to ANTHROPIC_BASE_URL)
+            // Trim a trailing '/' and a trailing '/v1' so
+            // Claude Code's SDK appending '/v1/messages' to ANTHROPIC_BASE_URL
             // can't produce a doubled '/v1/v1/messages'. normalize already does
             // this for base_url; do it here too so the anthropic_url branch is
-            // equally safe. Bridge mode is immune either way (the proxy
-            // recomposes the path), but this keeps both modes consistent.
+            // equally safe.
             let u = u.trim_end_matches('/');
             u.strip_suffix("/v1")
                 .unwrap_or(u)
@@ -335,9 +415,6 @@ fn apply_claudecode_with_environment(
         .filter(|s| !s.is_empty())
         .unwrap_or("")
         .to_string();
-
-    let relay_mode = model_info.relay_mode.unwrap_or(false);
-    let proxy_base = format!("http://127.0.0.1:{}/claudecode", anthropic_proxy::port());
 
     let (previous_raw, mut config) = match read_object(settings_path) {
         Ok(value) => value,
@@ -394,6 +471,7 @@ fn apply_claudecode_with_environment(
             env_existed,
             original_env: managed_env(&original_env),
             applied_env: managed_env(env),
+            web_search: None,
             relay: if legacy_relay {
                 relay_fields(&previous_relay)
             } else {
@@ -444,7 +522,7 @@ fn apply_claudecode_with_environment(
 
     // Gateways may not return server classifier verdicts. Preserve explicit
     // user values and track our default separately so official restore can
-    // remove it, including after repeated applies or relay/bridge switches.
+    // remove it, including after repeated applies.
     let auto_mode_inserted = !env.contains_key(AUTO_MODE_SERVER);
     let auto_mode_managed = auto_mode_inserted
         || (env.get(AUTO_MODE_SERVER).and_then(|v| v.as_str()) == Some("0")
@@ -454,79 +532,71 @@ fn apply_claudecode_with_environment(
     env.entry(AUTO_MODE_SERVER.to_string())
         .or_insert_with(|| serde_json::json!("0"));
 
-    // Both modes authenticate via ANTHROPIC_AUTH_TOKEN (Bearer), so always drop
+    // Authenticate via ANTHROPIC_AUTH_TOKEN (Bearer), so always drop
     // any ANTHROPIC_API_KEY (x-api-key) the user may have left in settings.json —
     // a stale real key would otherwise conflict. We *remove* the key rather than
     // write an empty string (the old generic mapping could only set "", not
     // delete) so settings.json stays clean.
     env.remove("ANTHROPIC_API_KEY");
 
-    if relay_mode {
-        env.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            serde_json::Value::String(anthropic_url.clone()),
-        );
-        env.insert(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            serde_json::Value::String(api_key.clone()),
-        );
-        let one_m = model_info.one_m_context.unwrap_or(false);
-        for var in CLAUDECODE_MODEL_VARS {
-            if var == "ANTHROPIC_DEFAULT_FABLE_MODEL" && !is_fable_model(&real_model_id) {
-                let previous = Some(&previous_profile_relay).filter(|relay| {
-                    relay["fableTierManaged"] != false
-                        && relay["autoModeServerSettingsPath"]
-                            .as_str()
-                            .is_some_and(|path| std::path::Path::new(path) == settings_path)
-                });
-                let stale = env
-                    .get(var)
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|model| {
-                        let model = model.strip_suffix("[1m]").unwrap_or(model);
-                        previous.as_ref().is_some_and(|relay| {
-                            relay["actualModel"].as_str().is_some_and(|previous| {
-                                let previous = previous.strip_suffix("[1m]").unwrap_or(previous);
-                                model == previous && !is_fable_model(previous)
-                            })
+    env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        serde_json::Value::String(anthropic_url.clone()),
+    );
+    env.insert(
+        "ANTHROPIC_AUTH_TOKEN".to_string(),
+        serde_json::Value::String(api_key.clone()),
+    );
+    let one_m = model_info.one_m_context.unwrap_or(false);
+    for var in CLAUDECODE_MODEL_VARS {
+        if var == "ANTHROPIC_DEFAULT_FABLE_MODEL" && !is_fable_model(&real_model_id) {
+            let previous = Some(&previous_profile_relay).filter(|relay| {
+                relay["fableTierManaged"] != false
+                    && relay["autoModeServerSettingsPath"]
+                        .as_str()
+                        .is_some_and(|path| std::path::Path::new(path) == settings_path)
+            });
+            let stale = env
+                .get(var)
+                .and_then(|value| value.as_str())
+                .is_some_and(|model| {
+                    let model = model.strip_suffix("[1m]").unwrap_or(model);
+                    previous.as_ref().is_some_and(|relay| {
+                        relay["actualModel"].as_str().is_some_and(|previous| {
+                            let previous = previous.strip_suffix("[1m]").unwrap_or(previous);
+                            model == previous && !is_fable_model(previous)
                         })
-                    });
-                if stale {
-                    env.remove(var);
-                }
-                continue;
+                    })
+                });
+            if stale {
+                env.remove(var);
             }
-            env.insert(
-                var.to_string(),
-                serde_json::Value::String(claudecode_env_model_id(&real_model_id, var, one_m)),
-            );
+            continue;
         }
-    } else {
         env.insert(
-            "ANTHROPIC_BASE_URL".to_string(),
-            serde_json::Value::String(proxy_base),
+            var.to_string(),
+            serde_json::Value::String(claudecode_env_model_id(&real_model_id, var, one_m)),
         );
-        env.insert(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            serde_json::Value::String("echobird-local-proxy".to_string()),
-        );
-        for var in CLAUDECODE_MODEL_VARS {
-            env.remove(var);
-        }
     }
 
     saved.applied_env = managed_env(env);
+    if let Some(enabled) = model_info.web_search {
+        saved.web_search =
+            match WebSearchPolicy::apply(&mut config, enabled, saved.web_search.take()) {
+                Ok(policy) => Some(policy),
+                Err(message) => return config_error(message),
+            };
+    }
     saved.relay.clear();
 
-    // Relay side-channel — real upstream, read fresh by anthropic_proxy on
-    // every /claudecode/v1/messages request and by read_claudecode for the UI.
+    // Save actual identity and original settings for configuration reads/restore.
     let relay = serde_json::json!({
         "baseUrl": anthropic_url,
         "apiKey": api_key,
         "actualModel": real_model_id,
         "modelName": model_info.name.as_deref().unwrap_or(real_model_id.as_str()),
-        "relayMode": relay_mode,
-        "fableTierManaged": relay_mode && is_fable_model(&real_model_id),
+        "relayMode": true,
+        "fableTierManaged": is_fable_model(&real_model_id),
         "autoModeServerSettingsPath": auto_mode_managed.then(|| settings_path.to_string_lossy()),
         "managedSettings": saved,
         "otherSettings": profiles,
@@ -707,6 +777,9 @@ fn restore_claudecode_at(
             } else {
                 restore_legacy_env(env, &relay, settings_path);
             }
+        }
+        if let Some(policy) = saved.as_ref().and_then(|saved| saved.web_search.as_ref()) {
+            policy.restore(&mut config);
         }
         let next_settings = if settings_raw.is_none()
             || (saved.as_ref().is_some_and(|saved| !saved.settings_existed)
@@ -968,6 +1041,44 @@ mod tests {
     }
 
     #[test]
+    fn code_direct_models_ignore_legacy_routing_flags_and_keep_one_m() {
+        let dir = std::env::temp_dir().join(format!("code-direct-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("settings.json");
+        let relay = dir.join("relay.json");
+        for legacy_mode in [None, Some(false), Some(true)] {
+            for one_m in [false, true] {
+                let mut info = claudecode_model_info(legacy_mode);
+                info.one_m_context = Some(one_m);
+                assert!(apply_claudecode_at(&info, &path, &relay).success);
+                let settings = read_json_file(&path).unwrap();
+                assert_eq!(
+                    settings["env"]["ANTHROPIC_BASE_URL"],
+                    "https://api.example.com"
+                );
+                assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "test-key");
+                assert_eq!(
+                    settings["env"]["ANTHROPIC_MODEL"],
+                    if one_m {
+                        "mimo-v2.5-pro[1m]"
+                    } else {
+                        "mimo-v2.5-pro"
+                    }
+                );
+                assert_eq!(
+                    settings["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+                    "mimo-v2.5-pro"
+                );
+                assert_eq!(read_json_file(&relay).unwrap()["relayMode"], true);
+                assert_eq!(
+                    read_claudecode_at(&path, &relay).unwrap().model.as_deref(),
+                    Some("mimo-v2.5-pro")
+                );
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn relay_models_only_set_the_fable_tier_for_fable() {
         let dir = std::env::temp_dir().join(format!("claude-fable-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
@@ -1002,13 +1113,6 @@ mod tests {
                     }
                 }
                 assert_eq!(env["KEEP"], "yes");
-                info.relay_mode = Some(false);
-                assert!(apply_claudecode_at(&info, &path, &relay).success);
-                let bridged = read_json_file(&path).unwrap();
-                for var in CLAUDECODE_MODEL_VARS {
-                    assert!(bridged["env"].get(var).is_none());
-                }
-                assert_eq!(bridged["env"]["KEEP"], "yes");
             }
         }
         fs::remove_dir_all(dir).unwrap();

@@ -227,8 +227,7 @@ const zhHans: Partial<Translations> = {
   'settings.easterEgg': '彩蛋',
   'settings.launchAtStartup': '开机启动',
   'closeDialog.title': '窗口关闭方式',
-  'closeDialog.hint':
-    '注意：如果 Claude 桌面端 / Claude Code 正在通过 EchoBird 转发模型请求，退出会导致无法使用。',
+  'closeDialog.hint': '注意：如果正在使用 EchoBird 的智能接入，退出会导致应用无法使用。',
   'btn.addModel': '添加模型',
   'btn.save': '保存',
   'btn.close': '关闭',
@@ -388,12 +387,9 @@ const zhHans: Partial<Translations> = {
   'aiDesktop.installHint': '选择应用后，点击“获取应用”。',
   'aiDesktop.emptyDesktop': '暂无已安装应用，可切换到“商店”添加应用。',
   'aiDesktop.emptyInstall': '所有应用均已安装。',
-  'agent.codexRelayLabel': 'API Router',
   'agent.codexWebSearchLabel': 'Web Search',
   'agent.codexWebSearchHint':
     '部分第三方模型 web_search 需要二次开通或另外计费（仔细阅读你购买模型的官方文档，确认是否支持及如何开通 web_search 能力）',
-  'agent.codexRelayHint':
-    '由 API 中转站或 API Router 提供的数据转发方案，第三方模型开启则全量接入，但可能会被 Claude 判定为“外乡人”。',
   'agent.claude1mHint':
     '开启后向模型 id 追加 [1m] 以使用 1M 上下文。请仔细阅读你购买模型的官方文档，确认是否支持「模型id+[1m]」约定。',
   'agent.installViaMother': 'AI 自动安装',
@@ -425,10 +421,9 @@ const zhHans: Partial<Translations> = {
   'store.ready': '✓ 就绪',
   'key.encrypted': '已全局加密，任何环境改变 API Key 将自毁',
   'key.destroyed': '检测到环境已改变，API Key 已自毁，请重新输入',
-  'hint.devInvite':
-    'Claude 桌面端 / Claude Code 切换模型时，第三方模型如果不开启 API Router，则会通过 EchoBird 转发模型请求，请保持 EchoBird 运行。',
   'hint.responsesRequired':
     'ChatGPT / Codex CLI 切换模型时，第三方模型必须支持 Responses 才能成功接入。',
+  'hint.appReorder': '长按拖动应用图标，可调整排列顺序。',
   'hint.myProjects':
     '给你 Vibe Coding 的应用或游戏切换模型，参考黑白棋和 AI 翻译的 models.json 或复制它到你的项目。',
   'mother.selectModel': '选择模型',

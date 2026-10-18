@@ -350,10 +350,8 @@ export type TKey =
   | 'agent.configWarning'
   | 'agent.installViaMother'
   | 'agent.restore'
-  | 'agent.codexRelayLabel'
   | 'agent.codexWebSearchLabel'
   | 'agent.codexWebSearchHint'
-  | 'agent.codexRelayHint'
   | 'agent.claude1mHint'
   // Tool categories
   | 'toolCat.all'
@@ -426,9 +424,9 @@ export type TKey =
   // API Key encryption status
   | 'key.encrypted'
   | 'key.destroyed'
-  // Developer invite hint
-  | 'hint.devInvite'
+  // App hints
   | 'hint.responsesRequired'
+  | 'hint.appReorder'
   // Mother Agent
   | 'mother.selectModel'
   | 'mother.reasoning.title'

@@ -142,21 +142,16 @@ export interface ApplyModelInput {
   apiKey: string;
   model: string;
   protocol?: string;
-  /** Claude Desktop / Claude Code only. Connect directly to the selected
-   * Anthropic-compatible relay instead of EchoBird's model-id router. */
-  relayMode?: boolean;
-  /** Codex CLI / ChatGPT desktop: enable live web search on model apply. */
+  /** Codex / ChatGPT / Claude: allow web search on model apply. */
   webSearch?: boolean;
   /**
-   * Claude Code relay-only. When true (and `relayMode` is on), append `[1m]`
+   * Claude Code: when true, append `[1m]`
    * to the model id written to the 1M-capable env vars (`ANTHROPIC_MODEL` /
    * `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL`) so
    * Claude Code budgets the 1M context window. Claude Code strips the suffix
    * before sending the id upstream, so the provider still sees the bare id.
    * `ANTHROPIC_DEFAULT_HAIKU_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` never
-   * get the suffix — no 1M concept. No effect in bridge mode (bridge writes
-   * no model id — CC uses its built-in claude-* ids, which already budget the
-   * full window). Claude Desktop uses this as prefer1m in either routing mode.
+   * get the suffix — no 1M concept. Claude Desktop uses this as prefer1m.
    * Other tools ignore this field.
    */
   oneMContext?: boolean;

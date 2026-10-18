@@ -924,28 +924,21 @@ export const AppManagerPanel: React.FC = () => {
     userModels,
     toolModelConfig,
     handleSelectModel,
-    claudeDesktopRelayMode,
-    setClaudeDesktopRelayMode,
-    claudeCodeRelayMode,
-    setClaudeCodeRelayMode,
     claudeDesktop1mMode,
     setClaudeDesktop1mMode,
     claude1mMode,
     setClaude1mMode,
     codexWebSearch,
     setCodexWebSearch,
+    claudeDesktopWebSearch,
+    claudeCodeWebSearch,
+    setClaudeWebSearch,
     isLaunching,
   } = useAppManager();
 
-  // API Router ("relay-mode") toggle: shown for Claude Desktop AND Claude Code
-  // (each binds its own relay flag).
   const isClaudeDesktopApp = selectedTool === 'claudedesktop';
   const isClaudeCodeApp = selectedTool === 'claudecode';
-  // Relay is shown for Claude Desktop + Claude Code, each binding its own flag.
-  const showRelayToggle = isClaudeDesktopApp || isClaudeCodeApp;
-  const relayModeValue = isClaudeDesktopApp ? claudeDesktopRelayMode : claudeCodeRelayMode;
-  const setRelayModeValue = isClaudeDesktopApp ? setClaudeDesktopRelayMode : setClaudeCodeRelayMode;
-  const show1mToggle = isClaudeDesktopApp || (isClaudeCodeApp && claudeCodeRelayMode);
+  const show1mToggle = isClaudeDesktopApp || isClaudeCodeApp;
   const showCodexAccounts = selectedTool === 'codex' || selectedTool === 'chatgptdesktop';
   const selectedToolProtocols = selectedToolData?.apiProtocol || ['openai', 'anthropic'];
   const hasVisibleModels = userModels.some(
@@ -954,16 +947,32 @@ export const AppManagerPanel: React.FC = () => {
       (model.internalId !== 'smart-router' || smartRouterEnabled)
   );
 
-  const showWebSearchToggle = showCodexAccounts;
-  const routingControls = (showRelayToggle || show1mToggle || showWebSearchToggle) && (
+  const showWebSearchToggle = showCodexAccounts || isClaudeDesktopApp || isClaudeCodeApp;
+  const webSearchValue = isClaudeDesktopApp
+    ? claudeDesktopWebSearch
+    : isClaudeCodeApp
+      ? claudeCodeWebSearch
+      : toolModelConfig[selectedTool ?? ''] === 'smart-router'
+        ? false
+        : codexWebSearch;
+  const routingControls = (show1mToggle || showWebSearchToggle) && (
     <div className="px-3 flex items-center gap-2">
-      {showRelayToggle && (
+      {showWebSearchToggle && (
         <RoutingToggle
-          key="relay"
-          label={t('agent.codexRelayLabel')}
-          hint={t('agent.codexRelayHint')}
-          checked={relayModeValue}
-          onChange={setRelayModeValue}
+          key="web-search"
+          label={t('agent.codexWebSearchLabel')}
+          hint={t('agent.codexWebSearchHint')}
+          checked={webSearchValue}
+          disabled={
+            isLaunching ||
+            (showCodexAccounts && toolModelConfig[selectedTool ?? ''] === 'smart-router')
+          }
+          onChange={
+            showCodexAccounts
+              ? setCodexWebSearch
+              : (value) =>
+                  setClaudeWebSearch(isClaudeDesktopApp ? 'claudedesktop' : 'claudecode', value)
+          }
         />
       )}
       {show1mToggle && (
@@ -973,16 +982,7 @@ export const AppManagerPanel: React.FC = () => {
           hint={t('agent.claude1mHint')}
           checked={isClaudeDesktopApp ? claudeDesktop1mMode : claude1mMode}
           onChange={isClaudeDesktopApp ? setClaudeDesktop1mMode : setClaude1mMode}
-        />
-      )}
-      {showWebSearchToggle && (
-        <RoutingToggle
-          key="web-search"
-          label={t('agent.codexWebSearchLabel')}
-          hint={t('agent.codexWebSearchHint')}
-          checked={toolModelConfig[selectedTool ?? ''] === 'smart-router' ? false : codexWebSearch}
-          disabled={isLaunching || toolModelConfig[selectedTool ?? ''] === 'smart-router'}
-          onChange={setCodexWebSearch}
+          disabled={isLaunching}
         />
       )}
     </div>
@@ -1089,15 +1089,10 @@ export const AppManagerPanel: React.FC = () => {
                 <WorkBuddyAccountSection showDivider={hasVisibleModels} />
               )}
               {isClaudeCodeApp && (
-                <ClaudeCodeAccountSection
-                  showDivider={hasVisibleModels || showRelayToggle || show1mToggle}
-                />
+                <ClaudeCodeAccountSection showDivider={hasVisibleModels || show1mToggle} />
               )}
               {isClaudeDesktopApp && (
-                <ClaudeCodeAccountSection
-                  desktop
-                  showDivider={hasVisibleModels || showRelayToggle || show1mToggle}
-                />
+                <ClaudeCodeAccountSection desktop showDivider={hasVisibleModels || show1mToggle} />
               )}
               {routingControls}
               <div className="flex-1">
@@ -1408,21 +1403,16 @@ export const AppManagerBottom: React.FC = () => {
 // "应用桌面" and "我的AI项目" without duplicating the rest of the row.
 export const PageAwareHint: React.FC = () => {
   const { t } = useI18n();
-  const { viewMode, selectedTool, claudeCodeAccounts, claudeDesktopAccounts } = useAppManager();
+  const { viewMode, selectedTool } = useAppManager();
   const activePage = useNavigationStore((s) => s.activePage);
   const key =
     activePage === 'myProjects'
       ? 'hint.myProjects'
       : viewMode === 'install'
         ? 'aiDesktop.installHint'
-        : (selectedTool === 'claudecode' && claudeCodeAccounts.selectedId) ||
-            (selectedTool === 'claudedesktop' && claudeDesktopAccounts.selectedId)
-          ? null
-          : selectedTool === 'claudedesktop' || selectedTool === 'claudecode'
-            ? 'hint.devInvite'
-            : selectedTool === 'chatgptdesktop' || selectedTool === 'codex'
-              ? 'hint.responsesRequired'
-              : null;
+        : selectedTool === 'chatgptdesktop' || selectedTool === 'codex'
+          ? 'hint.responsesRequired'
+          : 'hint.appReorder';
   return (
     <div className="flex-1 text-[15px] font-medium text-cyber-accent">{key ? t(key) : null}</div>
   );

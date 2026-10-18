@@ -91,24 +91,17 @@ export interface AppManagerContextType {
   userModels: ModelConfig[];
   codexWebSearch: boolean;
   setCodexWebSearch: (v: boolean) => void;
-  /** Claude Desktop routing toggle. Kept separate from Codex because the
-   *  two apps target different protocols / different relay-station compat. */
-  claudeDesktopRelayMode: boolean;
-  setClaudeDesktopRelayMode: (v: boolean) => void;
-  /** Claude Code routing toggle. Separate flag from Claude Desktop so the two
-   *  Claude apps can point at different upstreams independently (each has its
-   *  own proxy route + relay file on the backend). */
-  claudeCodeRelayMode: boolean;
-  setClaudeCodeRelayMode: (v: boolean) => void;
-  /** Desktop profile prefer1m, independent of API Router. */
+  claudeDesktopWebSearch: boolean;
+  claudeCodeWebSearch: boolean;
+  setClaudeWebSearch: (tool: 'claudedesktop' | 'claudecode', value: boolean) => void;
+  /** Desktop profile prefer1m. */
   claudeDesktop1mMode: boolean;
   setClaudeDesktop1mMode: (v: boolean) => void;
-  /** Claude Code relay-only 1M-context toggle. When on AND API Router is on,
+  /** Claude Code 1M-context toggle. When on,
    *  apply_claudecode appends `[1m]` to the model id (MODEL / OPUS / SONNET / FABLE
    *  env vars only — HAIKU + SUBAGENT stay bare) so Claude Code budgets the
    *  1M window. CC strips the suffix before sending upstream, so the provider
-   *  still sees the bare id. Hidden when API Router is off; no effect in bridge
-   *  mode. */
+   *  still sees the bare id. */
   claude1mMode: boolean;
   setClaude1mMode: (v: boolean) => void;
   // Launch handler

@@ -24,7 +24,15 @@ vi.mock('../ModelNexus/context', () => {
   return { useModelNexus: () => ({ userModels }) };
 });
 vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
-vi.mock('./useClaudeCodeAccounts', () => ({ useClaudeCodeAccounts: () => ({ accounts: [] }) }));
+vi.mock('./useClaudeCodeAccounts', async () => {
+  const { useState } = await import('react');
+  return {
+    useClaudeCodeAccounts: () => {
+      const [selectedId, setSelectedId] = useState<string | null>(null);
+      return { accounts: [], selectedId, setSelectedId };
+    },
+  };
+});
 vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
 vi.mock('./useDeepSeekAccounts', () => ({ useDeepSeekAccounts: () => ({ accounts: [] }) }));
 vi.mock('../../api/tauri', () => ({
@@ -221,6 +229,236 @@ describe('Claude Desktop account apply', () => {
     expect(context.isLaunching).toBe(false);
     expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
     expect(api.startTool).not.toHaveBeenCalled();
+  });
+});
+
+describe.each(['claudedesktop', 'claudecode'] as const)('%s direct API configuration', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    storage = new Map([
+      ['echobird_claudedesktop_relay_mode', 'false'],
+      ['echobird_claudecode_relay_mode', 'false'],
+    ]);
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      ['claudedesktop', 'claudecode'].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['anthropic'],
+      }))
+    );
+    vi.mocked(api.listClaudeDesktopAccounts).mockResolvedValue([]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'claude-fixture',
+        name: 'Actual name',
+        modelId: 'actual-model',
+        baseUrl: '',
+        anthropicUrl: 'https://provider.example/anthropic',
+        apiKey: 'fixture-key',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  async function mount() {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+    act(() => {
+      context.handleSelectModel(tool, 'claude-fixture');
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+  }
+  it('ignores old routing preferences without applying on navigation or selection', async () => {
+    await mount();
+    await act(async () =>
+      context.setSelectedTool(tool === 'claudecode' ? 'claudedesktop' : 'claudecode')
+    );
+    act(() => context.setViewMode('install'));
+    act(() => context.setViewMode('desktop'));
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.startClaudeDesktopLogin).not.toHaveBeenCalled();
+    expect(api.refreshClaudeDesktopAccount).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+    expect(storage.get('echobird_claudedesktop_relay_mode')).toBe('false');
+    expect(storage.get('echobird_claudecode_relay_mode')).toBe('false');
+    await act(async () => context.setSelectedTool(tool));
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledExactlyOnceWith(tool, {
+      id: 'claude-fixture',
+      name: 'Actual name',
+      model: 'actual-model',
+      baseUrl: 'https://provider.example/anthropic',
+      apiKey: 'fixture-key',
+      protocol: 'anthropic',
+      oneMContext: false,
+      webSearch: true,
+    });
+  });
+  it('keeps 1M independent per client and reports explicit apply failures', async () => {
+    await mount();
+    const setOneM =
+      tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode;
+    await act(async () => setOneM(true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ oneMContext: true })
+    );
+    expect(tool === 'claudedesktop' ? context.claude1mMode : context.claudeDesktop1mMode).toBe(
+      false
+    );
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'Apply failed',
+    });
+    await act(async () => setOneM(false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ oneMContext: false })
+    );
+    expect(context.applyError).toBe('Apply failed');
+  });
+  it('persists a separate search preference and retains it on 1M changes and reentry', async () => {
+    await mount();
+    await act(async () => context.setClaudeWebSearch(tool, false));
+    expect(api.applyModelToTool).toHaveBeenCalledExactlyOnceWith(
+      tool,
+      expect.objectContaining({ webSearch: false })
+    );
+    expect(storage.get(`echobird_${tool}_web_search`)).toBe('false');
+    expect(
+      tool === 'claudedesktop' ? context.claudeCodeWebSearch : context.claudeDesktopWebSearch
+    ).toBe(true);
+    await act(async () =>
+      (tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode)(true)
+    );
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ oneMContext: true, webSearch: false })
+    );
+    act(() => renderer.unmount());
+    vi.mocked(api.applyModelToTool).mockClear();
+    await mount();
+    expect(
+      tool === 'claudedesktop' ? context.claudeDesktopWebSearch : context.claudeCodeWebSearch
+    ).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+  });
+  it('blocks repeated search changes and apply while pending, and reports failure', async () => {
+    await mount();
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+    );
+    act(() => context.setClaudeWebSearch(tool, false));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setClaudeWebSearch(tool, true));
+    await act(async () => context.handleLaunch());
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(storage.get(`echobird_${tool}_web_search`)).toBe('false');
+    await act(async () => finish({ success: false, message: 'Search update failed' }));
+    expect(context.isLaunching).toBe(false);
+    expect(context.applyError).toBe('Search update failed');
+  });
+  it('blocks search, repeated 1M changes and apply while a 1M update is pending', async () => {
+    await mount();
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+    );
+    act(() =>
+      (tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode)(true)
+    );
+    expect(context.isLaunching).toBe(true);
+    act(() => {
+      context.setClaudeWebSearch(tool, false);
+      (tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode)(false);
+    });
+    await act(async () => context.handleLaunch());
+    expect(api.applyModelToTool).toHaveBeenCalledExactlyOnceWith(
+      tool,
+      expect.objectContaining({ oneMContext: true, webSearch: true })
+    );
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    expect(
+      tool === 'claudedesktop' ? context.claudeDesktopWebSearch : context.claudeCodeWebSearch
+    ).toBe(true);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => finish({ success: false, message: '1M update failed' }));
+    expect(context.isLaunching).toBe(false);
+    expect(context.applyError).toBe('1M update failed');
+  });
+  it.each(['uninstalled', 'missing-model'])(
+    'does not write native preference settings for %s',
+    async (reason) => {
+      await mount();
+      act(() => {
+        if (reason === 'uninstalled')
+          useToolsStore
+            .getState()
+            .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }]);
+        else context.handleSelectModel(tool, '');
+      });
+      await act(async () => context.setClaudeWebSearch(tool, false));
+      await act(async () =>
+        (tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode)(true)
+      );
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    }
+  );
+  it('does not apply API preferences while an official account is selected', async () => {
+    await mount();
+    act(() => {
+      if (tool === 'claudedesktop') context.claudeDesktopAccounts.select('saved-account');
+      else context.claudeCodeAccounts.setSelectedId('saved-account');
+    });
+    await act(async () => context.setClaudeWebSearch(tool, false));
+    await act(async () =>
+      (tool === 'claudedesktop' ? context.setClaudeDesktop1mMode : context.setClaude1mMode)(true)
+    );
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
   });
 });
 

@@ -117,23 +117,20 @@ pub struct ModelInfo {
     pub protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_model: Option<String>,
-    /// Claude Desktop / Claude Code only. Connect directly to the selected
-    /// Anthropic-compatible relay instead of EchoBird's model-id router.
+    /// Accepted for compatibility with older callers; Claude apps always connect directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_mode: Option<bool>,
-    /// Codex CLI / ChatGPT desktop. None keeps the provider default.
+    /// Codex / ChatGPT / Claude. None preserves the existing search policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
-    /// Claude Code relay-only. When `Some(true)` AND `relay_mode` is on,
+    /// Claude Code: when `Some(true)`,
     /// append `[1m]` to the 1M-capable env vars (`ANTHROPIC_MODEL` /
     /// `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL`)
     /// written to ~/.claude/settings.json so Claude Code budgets the 1M
     /// context window. Claude Code strips the suffix before sending the id
     /// upstream, so the provider still sees the bare id. `HAIKU` and
     /// `CLAUDE_CODE_SUBAGENT_MODEL` never get the suffix — no 1M concept.
-    /// No effect in bridge mode (bridge writes no model id — CC uses its
-    /// built-in claude-* ids, which already budget the full window).
-    /// Only consumed by `apply_claudecode`; other tools ignore it.
+    /// Claude Desktop uses this as its profile prefer1m setting. Other tools ignore it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_m_context: Option<bool>,
 }

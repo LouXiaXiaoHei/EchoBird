@@ -244,7 +244,7 @@ const en: Translations = {
   // Close Dialog
   'closeDialog.title': 'CLOSE BEHAVIOR',
   'closeDialog.hint':
-    'Note: If Claude Desktop / Claude Code is routing model requests through EchoBird, quitting will make it unusable.',
+    'Note: If you are using EchoBird Smart Router, quitting will prevent connected apps from working.',
   // Buttons
   'btn.addModel': 'ADD MODEL',
   'btn.save': 'Save',
@@ -421,12 +421,9 @@ const en: Translations = {
   'agent.deleteAccountConfirm':
     'Delete the saved snapshot for {email}? This does not sign out the current app.',
   'agent.configWarning': 'Configuration warning',
-  'agent.codexRelayLabel': 'API Router',
   'agent.codexWebSearchLabel': 'Web Search',
   'agent.codexWebSearchHint':
     'Some third-party models require web_search to be separately enabled or billed. (Carefully read the official documentation of the model you purchased to confirm whether web_search is supported and how to enable it.)',
-  'agent.codexRelayHint':
-    'A data-forwarding scheme provided by an API relay or API Router. Enabling it for a third-party model gives direct, full integration, but Claude may treat it as an "outsider".',
   'agent.claude1mHint':
     'When on, appends [1m] to the model id to enable the 1M context window. Carefully read the official docs of the model you purchased to confirm whether it supports the "model id + [1m]" convention.',
   'agent.installViaMother': 'AI Auto-Install',
@@ -461,13 +458,12 @@ const en: Translations = {
   'store.remove': 'REMOVE',
   'store.ver': 'ver',
   'store.ready': '✓ Ready',
-  // API Key encryption + developer hint
+  // API Key encryption + model compatibility hint
   'key.encrypted': 'Encrypted globally — API Key will self-destruct if environment changes',
   'key.destroyed': 'Environment change detected — API Key has self-destructed, please re-enter',
-  'hint.devInvite':
-    'When switching Claude Desktop / Claude Code to a third-party model without API Router, keep EchoBird running to forward model requests.',
   'hint.responsesRequired':
     'Third-party models must support Responses to connect successfully with ChatGPT / Codex CLI.',
+  'hint.appReorder': 'Press and hold, then drag app icons to change their order.',
   'hint.myProjects':
     "Swap the model on your vibe-coded app or game — reference Reversi's and AI Translator's models.json, or just copy it to your project.",
   // Mother Agent

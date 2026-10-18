@@ -62,6 +62,83 @@ fn model(relay: bool) -> ModelInfo {
 }
 
 #[test]
+fn web_search_settings_toggle_and_restore_only_the_owned_tool_rule() {
+    for original in [
+        json!({"env":{"KEEP":"yes"}}),
+        json!({"permissions":{}}),
+        json!({"permissions":{"deny":[]}}),
+        json!({"permissions":{"allow":["WebSearch"],"ask":["Bash"],"deny":["Read(secret)","WebSearch","WebSearch","Edit(secret)"]}}),
+    ] {
+        let fixture = Fixture::new();
+        write_json_file(&fixture.settings, &original).unwrap();
+        for enabled in [false, false, true, false] {
+            let mut info = model(true);
+            info.web_search = Some(enabled);
+            assert!(apply_claudecode_at(&info, &fixture.settings, &fixture.relay).success);
+            let current = read_json_file(&fixture.settings).unwrap();
+            let denied = current["permissions"]["deny"]
+                .as_array()
+                .is_some_and(|rules| rules.contains(&json!("WebSearch")));
+            assert_eq!(denied, !enabled);
+            assert_eq!(
+                current["permissions"]["allow"],
+                original["permissions"]["allow"]
+            );
+            assert_eq!(
+                current["permissions"]["ask"],
+                original["permissions"]["ask"]
+            );
+        }
+        assert!(fixture.restore().success);
+        assert_eq!(read_json_file(&fixture.settings).unwrap(), original);
+    }
+}
+
+#[test]
+fn web_search_restore_preserves_new_denials_and_user_removal() {
+    for user_removes_search in [false, true] {
+        let fixture = Fixture::new();
+        write_json_file(
+            &fixture.settings,
+            &json!({"permissions":{"deny":["Read(secret)"]}}),
+        )
+        .unwrap();
+        let mut info = model(true);
+        info.web_search = Some(false);
+        assert!(apply_claudecode_at(&info, &fixture.settings, &fixture.relay).success);
+        let mut current = read_json_file(&fixture.settings).unwrap();
+        let deny = current["permissions"]["deny"].as_array_mut().unwrap();
+        assert!(deny.contains(&json!("WebSearch")));
+        deny.push(json!("Bash(rm *)"));
+        if user_removes_search {
+            deny.retain(|rule| rule != "WebSearch");
+        }
+        write_json_file(&fixture.settings, &current).unwrap();
+        assert!(fixture.restore().success);
+        assert_eq!(
+            read_json_file(&fixture.settings).unwrap(),
+            json!({"permissions":{"deny":["Read(secret)","Bash(rm *)"]}})
+        );
+    }
+}
+
+#[test]
+fn web_search_invalid_permissions_are_not_overwritten() {
+    for original in [
+        json!({"permissions":[]}),
+        json!({"permissions":{"deny":"keep"}}),
+    ] {
+        let fixture = Fixture::new();
+        write_json_file(&fixture.settings, &original).unwrap();
+        let mut info = model(true);
+        info.web_search = Some(false);
+        assert!(!apply_claudecode_at(&info, &fixture.settings, &fixture.relay).success);
+        assert_eq!(read_json_file(&fixture.settings).unwrap(), original);
+        assert!(!fixture.relay.exists());
+    }
+}
+
+#[test]
 fn managed_config_restores_original_models_keys_and_enabled_cloud_switches() {
     let fixture = Fixture::new();
     let original = json!({"permissions":{"allow":["Read"]},"env":{
@@ -561,7 +638,7 @@ fn managed_config_retains_each_profile_original_when_the_other_profile_is_restor
                 .unwrap()
                 .model
                 .as_deref(),
-            Some("fixture-model")
+            Some("first-model")
         );
         let order = if first_restore == "first" {
             [&first, &second]

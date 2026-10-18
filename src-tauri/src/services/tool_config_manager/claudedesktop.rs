@@ -1,7 +1,6 @@
 //! Model configuration for claudedesktop.
 
 use super::{echobird_dir, read_json_file, write_json_file, ApplyResult, ModelInfo};
-use crate::services::anthropic_proxy;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -131,6 +130,25 @@ fn profile_meta(path: &Path, apply: bool) -> Result<serde_json::Value, String> {
     Ok(meta)
 }
 
+fn desktop_model_id(real_id: &str) -> &str {
+    let id = real_id.trim();
+    let model = id.rsplit('/').next().unwrap_or(id).to_ascii_lowercase();
+    if ["claude", "opus", "sonnet", "fable", "haiku"]
+        .iter()
+        .any(|prefix| {
+            model == *prefix
+                || model
+                    .strip_prefix(*prefix)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                    .is_some_and(|version| !version.is_empty())
+        })
+    {
+        id
+    } else {
+        "claude-opus"
+    }
+}
+
 pub(super) fn apply_claudedesktop(model_info: &ModelInfo) -> ApplyResult {
     let paths = match resolve_claudedesktop_paths() {
         Some(p) => p,
@@ -184,8 +202,7 @@ fn apply_claudedesktop_at(
     // local LLM proxies (llama.cpp / vllm / sglang under our unified
     // proxy) don't require an API key, so an empty user-supplied key
     // is legitimate when the upstream is loopback. Substitute a
-    // non-empty sentinel so anthropic_proxy still has something to
-    // forward as Bearer / x-api-key (the local server ignores it).
+    // non-empty sentinel for Desktop's gateway authentication field.
     let raw_api_key = model_info.api_key.as_deref().unwrap_or("");
     let is_local_provider =
         anthropic_url.contains("127.0.0.1") || anthropic_url.contains("localhost");
@@ -208,6 +225,40 @@ fn apply_claudedesktop_at(
         .or(model_info.name.as_deref())
         .filter(|s| !s.is_empty())
         .unwrap_or("");
+
+    let profile_path = paths
+        .lib_dir
+        .join(format!("{CLAUDE_DESKTOP_PROFILE_ID}.json"));
+    let mut profile = match read_config_object(&profile_path) {
+        Ok(profile) => profile,
+        Err(message) => {
+            return ApplyResult {
+                success: false,
+                message,
+            }
+        }
+    };
+    if let Some(enabled) = model_info.web_search {
+        let disabled = profile
+            .as_object_mut()
+            .unwrap()
+            .entry("disabledBuiltinTools")
+            .or_insert_with(|| serde_json::json!([]));
+        let Some(tools) = disabled
+            .as_array_mut()
+            .filter(|tools| tools.iter().all(serde_json::Value::is_string))
+        else {
+            return ApplyResult {
+                success: false,
+                message: "Claude Desktop's disabled tools setting is invalid. Nothing was changed."
+                    .into(),
+            };
+        };
+        tools.retain(|tool| tool != "WebSearch");
+        if !enabled {
+            tools.push(serde_json::json!("WebSearch"));
+        }
+    }
 
     let meta_path = paths.lib_dir.join("_meta.json");
     let meta = match profile_meta(&meta_path, true) {
@@ -243,72 +294,25 @@ fn apply_claudedesktop_at(
 
     let _ = fs::create_dir_all(&paths.lib_dir);
 
-    // Two routing modes, picked by `model_info.relay_mode`:
-    //
-    // • Bridge (default): Desktop's gateway hits our local Anthropic
-    //   proxy on `127.0.0.1:ANTHROPIC_PROXY_PORT/v1/messages`. The proxy
-    //   reads the real upstream URL, API key, and model id fresh from
-    //   ~/.echobird/claudedesktop.json on every request, rewrites the
-    //   Anthropic-only model id (Desktop hardcodes claude-sonnet-4-*
-    //   etc.) to whatever the EchoBird user actually picked, and
-    //   forwards. The `inferenceGatewayApiKey` is a non-empty sentinel
-    //   — Desktop refuses an empty value but the proxy ignores what
-    //   Desktop sends here, using the real key from the relay file.
-    //
-    // • Relay (relay_mode = true): Desktop's gateway hits the upstream
-    //   directly. We write the real URL + real API key into the
-    //   profile JSON; the proxy is bypassed for /v1/messages. Used
-    //   for relay stations (cc-vibe.com etc.) that natively serve
-    //   Anthropic Messages and do their own model-id mapping. Caveat:
-    //   model-id rewrite is lost, so the upstream sees whatever id
-    //   Desktop chose (claude-sonnet-4-*, …) — fine for stations that
-    //   accept those, broken for raw Chat-only providers.
-    let proxy_base = format!("http://127.0.0.1:{}", anthropic_proxy::port());
-    let relay_mode = model_info.relay_mode.unwrap_or(false);
-    let (gateway_base_url, gateway_api_key) = if relay_mode {
-        (anthropic_url.clone(), api_key.clone())
-    } else {
-        (proxy_base.clone(), "echobird-local-proxy".to_string())
-    };
-
-    let profile_path = paths
-        .lib_dir
-        .join(format!("{}.json", CLAUDE_DESKTOP_PROFILE_ID));
     // Profile body — Desktop's gateway reads these on launch. The profile's
     // display name is NOT a field of this object; it belongs in _meta.json
     // entries[].name (Desktop's profile picker reads it from there).
     //
-    // `inferenceModels` populates Desktop's in-app model picker directly
-    // and, crucially, BYPASSES Desktop's `/v1/models` discovery probe.
-    // Without this field, Desktop 1.7.x falls back to GET /v1/models on
-    // our gateway (which we don't implement) and surfaces a
-    // "Gateway returned an error" banner on every fresh install. We
-    // write a single entry whose `name` is the id Desktop sends on
-    // `/v1/messages`. In bridge mode that's the canonical claude-* id
-    // (messages_handler rewrites it to the real upstream model); in relay
-    // mode Desktop hits the upstream directly with no rewrite, so `name`
-    // must instead carry the real upstream id (computed below). `labelOverride` is
-    // the upstream model id (`real_model_id`, source = model_info.model
-    // with fallback to model_info.name) — NOT the user's editable card
-    // display name, which can be anything ("deepseek你好" etc.) and
-    // would surface garbage in Desktop's picker.
-    // Bridge mode rewrites the id downstream, so the canonical claude-opus-5-5
-    // is correct (and clears Desktop's Claude-name filter). Relay mode bypasses
-    // the proxy — Desktop talks to the upstream directly — so the real upstream
-    // id (e.g. "fable-5") must be sent as-is, or the station receives a model
-    // name it never advertised. Fall back to the canonical id when no real id
-    // is known, so we never emit an empty name.
-    let base_model_id = if relay_mode && !real_model_id.is_empty() {
-        real_model_id
-    } else {
-        "claude-opus-5-5"
-    };
-    // Offer the 1M variant in both routing modes. prefer1m selects it by default
-    // without changing the model ID or adding a [1m] suffix.
+    // Populate the picker explicitly without requiring the upstream to
+    // implement Desktop's `/v1/models` discovery probe.
+    // `name` is sent directly upstream: retain Claude-like IDs, otherwise use
+    // the provider's Claude alias. Save the actual model independently.
+    let base_model_id = desktop_model_id(real_model_id);
+    let display_name = model_info
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(real_model_id);
+    // prefer1m selects the 1M variant without decorating the model ID.
     // We deliberately do NOT set `anthropicFamilyTier` / `isFamilyDefault`.
     // They were added to try to make the 1M variant the default, which turned
     // out to be an unfixable Desktop-side bug. Worse, hardcoding a tier
-    // mislabels the model in relay mode: there the name is the real upstream id
+    // mislabels models: the name may be the real upstream id
     // (e.g. a Sonnet model), so tagging it "opus" makes Desktop's opus alias
     // resolve to a Sonnet model. The tier alias is optional — Desktop keeps the
     // model usable without it.
@@ -319,7 +323,7 @@ fn apply_claudedesktop_at(
     );
     model_entry.insert(
         "labelOverride".to_string(),
-        serde_json::Value::String(real_model_id.to_string()),
+        serde_json::Value::String(display_name.to_string()),
     );
     model_entry.insert("supports1m".to_string(), serde_json::Value::Bool(true));
     model_entry.insert(
@@ -327,11 +331,11 @@ fn apply_claudedesktop_at(
         serde_json::Value::Bool(model_info.one_m_context.unwrap_or(false)),
     );
     let model_entry = serde_json::Value::Object(model_entry);
-    let profile = serde_json::json!({
+    let updates = serde_json::json!({
         "disableDeploymentModeChooser": true,
-        "inferenceGatewayApiKey": gateway_api_key,
+        "inferenceGatewayApiKey": api_key,
         "inferenceGatewayAuthScheme": "bearer",
-        "inferenceGatewayBaseUrl": gateway_base_url,
+        "inferenceGatewayBaseUrl": anthropic_url,
         "inferenceModels": [model_entry],
         "inferenceProvider": "gateway",
         // Claude Desktop 3P mode derives the built-in web_fetch egress policy
@@ -340,6 +344,10 @@ fn apply_claudedesktop_at(
         // lets web_fetch fetch any URL the user asks Claude to fetch.
         "coworkEgressAllowedHosts": ["*"],
     });
+    profile
+        .as_object_mut()
+        .unwrap()
+        .extend(updates.as_object().unwrap().clone());
     if let Err(e) = write_json_file(&profile_path, &profile) {
         return ApplyResult {
             success: false,
@@ -357,19 +365,13 @@ fn apply_claudedesktop_at(
         };
     }
 
-    // Relay — the real upstream config that anthropic_proxy reads on
-    // every /v1/messages request. Updates here take effect on the next
-    // request without restarting anything.
-    // Relay file always reflects the real upstream config (even in Relay
-    // mode where the proxy is bypassed for the network path), so `read_
-    // claudedesktop` can round-trip the active model back to the UI
-    // and so future debug tooling has a consistent source of truth.
+    // Preserve actual identity for configuration reads and official restore.
     let relay = serde_json::json!({
         "baseUrl": anthropic_url,
         "apiKey": api_key,
         "actualModel": real_model_id,
         "modelName": model_info.name.as_deref().unwrap_or(real_model_id),
-        "relayMode": relay_mode,
+        "relayMode": true,
     });
     if let Err(e) = write_json_file(relay_path, &relay) {
         return ApplyResult {
@@ -453,11 +455,7 @@ fn restore_claudedesktop_files(
 }
 
 pub(super) fn read_claudedesktop() -> Option<ModelInfo> {
-    // Source of truth is the relay file, NOT Claude Desktop's profile
-    // JSON. The profile only holds the proxy URL (127.0.0.1:53682) and
-    // a sentinel key; the real upstream URL / key / model id live in
-    // ~/.echobird/claudedesktop.json so apply_claudedesktop can update
-    // them without touching Desktop's config and triggering a restart.
+    // Saved state retains the actual model even when Desktop uses an alias.
     let relay_path = echobird_dir().join("claudedesktop.json");
     let relay = read_json_file(&relay_path)?;
 
@@ -473,8 +471,14 @@ pub(super) fn read_claudedesktop() -> Option<ModelInfo> {
         .map(String::from);
 
     Some(ModelInfo {
-        name: None,
-        model: None,
+        name: relay
+            .get("modelName")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        model: relay
+            .get("actualModel")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         base_url: None,
         api_key,
         anthropic_url: Some(anthropic_url),
@@ -579,6 +583,118 @@ mod tests {
     }
 
     #[test]
+    fn desktop_direct_models_automatically_choose_client_id_and_keep_real_identity() {
+        let dir = std::env::temp_dir().join(format!("desktop-direct-{}", uuid::Uuid::new_v4()));
+        let paths = claudedesktop_paths_at(&dir);
+        let relay_path = dir.join("saved.json");
+        for (model, expected) in [
+            ("claude-opus-5-5", "claude-opus-5-5"),
+            ("anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5"),
+            ("vendor/Haiku-5", "vendor/Haiku-5"),
+            ("  vendor/Claude-opus-5-5  ", "vendor/Claude-opus-5-5"),
+            ("OPUS-5.5", "OPUS-5.5"),
+            ("fable-5-1", "fable-5-1"),
+            ("sonnet", "sonnet"),
+            ("deepseek-flash", "claude-opus"),
+            ("vendor/mimo-pro", "claude-opus"),
+            ("my-claude-model", "claude-opus"),
+            ("opuslike-model", "claude-opus"),
+            ("sonnet-", "claude-opus"),
+        ] {
+            for legacy_mode in [None, Some(false), Some(true)] {
+                for one_m in [false, true] {
+                    let info: ModelInfo = serde_json::from_value(json!({
+                        "name": "Actual model display name",
+                        "model": model,
+                        "baseUrl": "https://upstream.example/anthropic",
+                        "apiKey": "fixture-key",
+                        "relayMode": legacy_mode,
+                        "oneMContext": one_m
+                    }))
+                    .unwrap();
+                    let result = apply_claudedesktop_at(&info, &paths, &relay_path);
+                    assert!(result.success, "{}", result.message);
+                    let profile = read_json_file(
+                        &paths
+                            .lib_dir
+                            .join(format!("{CLAUDE_DESKTOP_PROFILE_ID}.json")),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        profile["inferenceGatewayBaseUrl"],
+                        "https://upstream.example/anthropic"
+                    );
+                    assert_eq!(profile["inferenceGatewayApiKey"], "fixture-key");
+                    assert_eq!(profile["inferenceModels"][0]["name"], expected);
+                    assert_eq!(
+                        profile["inferenceModels"][0]["labelOverride"],
+                        "Actual model display name"
+                    );
+                    assert_eq!(profile["inferenceModels"][0]["prefer1m"], one_m);
+                    let saved = read_json_file(&relay_path).unwrap();
+                    assert_eq!(saved["actualModel"], model);
+                    assert_eq!(saved["relayMode"], true);
+                }
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_web_search_switch_preserves_other_profile_fields_and_tools() {
+        let dir = std::env::temp_dir().join(format!("desktop-search-{}", uuid::Uuid::new_v4()));
+        let paths = claudedesktop_paths_at(&dir);
+        let relay = dir.join("saved.json");
+        let profile = paths
+            .lib_dir
+            .join(format!("{CLAUDE_DESKTOP_PROFILE_ID}.json"));
+        write_json_file(
+            &profile,
+            &json!({"disabledBuiltinTools":["Bash","WebSearch"],"custom":{"keep":true}}),
+        )
+        .unwrap();
+        for enabled in [false, false, true, false, true] {
+            let info: ModelInfo = serde_json::from_value(json!({
+                "model":"claude-opus-5-5","baseUrl":"https://provider.example", "apiKey":"fixture", "webSearch":enabled
+            })).unwrap();
+            assert!(apply_claudedesktop_at(&info, &paths, &relay).success);
+            let saved = read_json_file(&profile).unwrap();
+            assert_eq!(saved["custom"], json!({"keep":true}));
+            assert_eq!(
+                saved["disabledBuiltinTools"],
+                if enabled {
+                    json!(["Bash"])
+                } else {
+                    json!(["Bash", "WebSearch"])
+                }
+            );
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_invalid_tool_policy_does_not_partially_enable_third_party_mode() {
+        let dir =
+            std::env::temp_dir().join(format!("desktop-search-invalid-{}", uuid::Uuid::new_v4()));
+        let paths = claudedesktop_paths_at(&dir);
+        let relay = dir.join("saved.json");
+        let profile = paths
+            .lib_dir
+            .join(format!("{CLAUDE_DESKTOP_PROFILE_ID}.json"));
+        let original = json!({"disabledBuiltinTools":"user-config"});
+        write_json_file(&profile, &original).unwrap();
+        let info: ModelInfo = serde_json::from_value(json!({
+            "model":"claude-opus-5-5","baseUrl":"https://provider.example", "apiKey":"fixture", "webSearch":false
+        })).unwrap();
+        assert!(!apply_claudedesktop_at(&info, &paths, &relay).success);
+        assert_eq!(read_json_file(&profile).unwrap(), original);
+        assert!(!paths.cfg_official.exists());
+        assert!(!paths.cfg_threep.exists());
+        assert!(!relay.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn switches_desktop_models_and_restores_official_without_changing_cli_or_user_settings() {
         let dir =
             std::env::temp_dir().join(format!("echobird-claude-desktop-{}", uuid::Uuid::new_v4()));
@@ -615,17 +731,10 @@ mod tests {
             let profile = read_json_file(&profile_path).unwrap();
             assert_eq!(profile["inferenceModels"][0]["labelOverride"], model);
             assert_eq!(profile["inferenceModels"][0]["prefer1m"], relay_mode);
-            assert_eq!(
-                profile["inferenceModels"][0]["name"],
-                if relay_mode { model } else { "claude-opus-5-5" }
-            );
+            assert_eq!(profile["inferenceModels"][0]["name"], "claude-opus");
             assert_eq!(
                 profile["inferenceGatewayBaseUrl"],
-                if relay_mode {
-                    "https://example.test/anthropic".to_string()
-                } else {
-                    format!("http://127.0.0.1:{}", anthropic_proxy::port())
-                }
+                "https://example.test/anthropic"
             );
             assert_eq!(read_json_file(&relay_path).unwrap()["actualModel"], model);
             assert_eq!(

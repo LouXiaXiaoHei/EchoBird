@@ -216,36 +216,21 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     setAgreedConfigPolicyRaw(v);
     writeBool('echobird_appmgr_apply_config', v);
   };
-  // Claude Desktop's own routing toggle. When ON, apply_claudedesktop writes
-  // the real upstream URL + api key into the Desktop profile JSON so
-  // Desktop's gateway talks straight to the relay station. Default OFF:
-  // Desktop talks to our anthropic_proxy which does model-id rewrite
-  // and protocol translation.
-  const [claudeDesktopRelayMode, setClaudeDesktopRelayModeRaw] = useState<boolean>(() =>
-    readBool('echobird_claudedesktop_relay_mode', false)
-  );
   const [codexWebSearch, setCodexWebSearchRaw] = useState<boolean>(() =>
     readBool('echobird_codex_web_search', true)
   );
-  // Claude Code routing toggle. When ON, apply_claudecode writes the real
-  // upstream URL + key + model id straight into ~/.claude/settings.json so
-  // Claude Code talks to the relay station directly. Default OFF: settings.json
-  // points ANTHROPIC_BASE_URL at our anthropic_proxy (/claudecode route, no
-  // model id), which rewrites whatever claude-* id Claude Code sends to the
-  // real upstream model — the same first-class path as Claude Desktop. Kept
-  // separate from claudeDesktopRelayMode (own backend relay file) so a user
-  // can run Claude Code and Claude Desktop on different providers.
-  const [claudeCodeRelayMode, setClaudeCodeRelayModeRaw] = useState<boolean>(() =>
-    readBool('echobird_claudecode_relay_mode', false)
+  const [claudeDesktopWebSearch, setClaudeDesktopWebSearch] = useState<boolean>(() =>
+    readBool('echobird_claudedesktop_web_search', true)
   );
-  // Claude Code relay-only 1M-context toggle. When on AND API Router is on,
+  const [claudeCodeWebSearch, setClaudeCodeWebSearch] = useState<boolean>(() =>
+    readBool('echobird_claudecode_web_search', true)
+  );
+  // Claude Code 1M-context toggle. When on,
   // apply_claudecode appends `[1m]` to the model id (MODEL / OPUS / SONNET / FABLE env
   // vars only — HAIKU + SUBAGENT stay bare) so Claude Code budgets the 1M
   // window. CC strips the suffix before sending upstream, so the provider
-  // still sees the bare id. No effect in bridge mode — bridge writes no model
-  // id (CC uses built-in claude-* ids, already full-window). Default off: only
-  // opt in when the relay's upstream is a real Claude Sonnet 5 / Opus 4.8-class
-  // model that supports 1M. Persisted under a NEW localStorage key
+  // still sees the bare id. Default off: only opt in for an upstream model
+  // that supports 1M. Persisted under its own localStorage key
   // (echobird_claudecode_1m_mode) — deliberately not reusing the v5.3.8
   // echobird_claude_1m_mode key, which shared semantics with Claude Desktop.
   const [claude1mMode, setClaude1mModeRaw] = useState<boolean>(() =>
@@ -552,13 +537,9 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   };
 
   // Apply model config to backend (internalized from App.tsx).
-  // `relayOverride` lets callers (most importantly setClaudeDesktopRelayMode)
-  // bypass the captured claudeDesktopRelayMode value when re-applying after
-  // a toggle flip — React would otherwise stale-close on the old value.
   const applyModelConfig = async (
     toolId: string,
     internalId: string,
-    relayOverride?: boolean,
     oneMOverride?: boolean,
     webSearchOverride?: boolean
   ): Promise<true | string | false> => {
@@ -594,22 +575,13 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       `[AppManager] Applying model to ${toolId}: protocol=${selectedProtocol}, url=${apiUrl}`
     );
 
-    // Claude apps honor the relay-mode toggle from the right panel.
-    // Codex CLI and ChatGPT now always connect directly to the selected
-    // provider's Responses endpoint, so they need no routing flags.
+    // Claude apps connect directly to the selected Anthropic endpoint.
     const isClaudeDesktopApp = toolId === 'claudedesktop';
     const isClaudeCodeApp = toolId === 'claudecode';
     const isClaudeApp = isClaudeDesktopApp || isClaudeCodeApp;
-    // Relay is Claude-only. Claude Code rides the same model-id-rewrite proxy as
-    // Claude Desktop (relay ON = direct, OFF = our proxy/bridge), with its own
-    // claudeCodeRelayMode flag + backend relay file.
-    const isRelayCapableApp = isClaudeApp;
-    const currentRelayMode = isClaudeDesktopApp ? claudeDesktopRelayMode : claudeCodeRelayMode;
-    const effectiveRelay = isClaudeApp ? (relayOverride ?? currentRelayMode) : false;
-    // Desktop controls prefer1m in either routing mode; Code remains relay-only.
     const effective1m = isClaudeDesktopApp
       ? (oneMOverride ?? claudeDesktop1mMode)
-      : isClaudeCodeApp && effectiveRelay && (oneMOverride ?? claude1mMode);
+      : isClaudeCodeApp && (oneMOverride ?? claude1mMode);
 
     try {
       const result = await api.applyModelToTool(toolId, {
@@ -619,8 +591,14 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         apiKey: model.apiKey,
         model: model.modelId || '',
         protocol: selectedProtocol,
-        ...(isRelayCapableApp ? { relayMode: effectiveRelay } : {}),
-        ...(isClaudeApp ? { oneMContext: effective1m } : {}),
+        ...(isClaudeApp
+          ? {
+              oneMContext: effective1m,
+              webSearch:
+                webSearchOverride ??
+                (isClaudeDesktopApp ? claudeDesktopWebSearch : claudeCodeWebSearch),
+            }
+          : {}),
         ...(['codex', 'chatgptdesktop'].includes(toolId)
           ? {
               webSearch:
@@ -668,7 +646,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (!modelId || isOfficialModelSentinel(modelId)) return;
     setIsLaunching(true);
     setApplyError(null);
-    void applyModelConfig(selectedTool, modelId, undefined, undefined, value)
+    void applyModelConfig(selectedTool, modelId, undefined, value)
       .then((result) => {
         if (result !== true)
           setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
@@ -676,90 +654,51 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       .finally(() => setIsLaunching(false));
   };
 
-  // Claude Desktop relay-mode setter. Re-applies on toggle flip so the
-  // user sees an immediate effect (profile JSON gets rewritten with the
-  // new gateway URL + key on the next /v1/messages request, no Desktop
-  // restart required after the first 3p activation).
-  const setClaudeDesktopRelayMode = useCallback(
-    (v: boolean) => {
-      setClaudeDesktopRelayModeRaw(v);
-      writeBool('echobird_claudedesktop_relay_mode', v);
-      const pendingInternalId = toolModelConfig['claudedesktop'];
-      if (!pendingInternalId || isOfficialModelSentinel(pendingInternalId)) return;
-      void applyModelConfig('claudedesktop', pendingInternalId, v).then((result) => {
-        if (result !== true) {
+  const setClaudeWebSearch = (tool: 'claudedesktop' | 'claudecode', value: boolean) => {
+    if (isLaunching || selectedTool !== tool) return;
+    const desktop = tool === 'claudedesktop';
+    (desktop ? setClaudeDesktopWebSearch : setClaudeCodeWebSearch)(value);
+    writeBool(`echobird_${tool}_web_search`, value);
+    if (
+      !selectedToolData?.installed ||
+      (desktop ? claudeDesktopAccounts.selectedId : claudeCodeAccounts.selectedId)
+    )
+      return;
+    const modelId = toolModelConfig[tool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(tool, modelId, undefined, value)
+      .then((result) => {
+        if (result !== true)
           setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
-        }
-      });
-    },
-    // (applyModelConfig stays excluded — it's recreated every render.)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolModelConfig, t, userModels, claudeDesktop1mMode]
-  );
+      })
+      .finally(() => setIsLaunching(false));
+  };
 
-  // Claude Code relay-mode setter — mirrors setClaudeDesktopRelayMode but
-  // scoped to the claudecode tool (own localStorage key + own backend relay
-  // file). Re-applies on flip so settings.json is rewritten immediately.
-  const setClaudeCodeRelayMode = useCallback(
-    (v: boolean) => {
-      setClaudeCodeRelayModeRaw(v);
-      writeBool('echobird_claudecode_relay_mode', v);
-      const pendingInternalId = toolModelConfig['claudecode'];
-      if (!pendingInternalId || isOfficialModelSentinel(pendingInternalId)) return;
-      void applyModelConfig('claudecode', pendingInternalId, v).then((result) => {
-        if (result !== true) {
+  const setClaudeOneM = (tool: 'claudedesktop' | 'claudecode', value: boolean) => {
+    if (isLaunching || selectedTool !== tool) return;
+    const desktop = tool === 'claudedesktop';
+    (desktop ? setClaudeDesktop1mModeRaw : setClaude1mModeRaw)(value);
+    writeBool(`echobird_${tool}_1m_mode`, value);
+    if (
+      !selectedToolData?.installed ||
+      (desktop ? claudeDesktopAccounts.selectedId : claudeCodeAccounts.selectedId)
+    )
+      return;
+    const modelId = toolModelConfig[tool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(tool, modelId, value)
+      .then((result) => {
+        if (result !== true)
           setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
-        }
-      });
-    },
-    // claude1mMode is a real dep: re-applying claudecode after a relay flip
-    // reads it through applyModelConfig (oneMOverride defaults to it). Without
-    // it here, flipping API Router after the 1M toggle re-writes settings.json
-    // with a STALE 1M flag. (applyModelConfig stays excluded — recreated every
-    // render.)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolModelConfig, t, userModels, claude1mMode]
-  );
-
-  // Claude Code 1M-context toggle (relay-only). Re-applies on flip so the
-  // [1m] suffix lands/strips immediately. Only Claude Code is touched — the
-  // toggle is hidden unless claudeCodeRelayMode is on, and bridge mode writes
-  // no model id so the re-apply is a harmless no-op for [1m] there.
-  const setClaude1mMode = useCallback(
-    (v: boolean) => {
-      setClaude1mModeRaw(v);
-      writeBool('echobird_claudecode_1m_mode', v);
-      const pendingInternalId = toolModelConfig['claudecode'];
-      if (!pendingInternalId || isOfficialModelSentinel(pendingInternalId)) return;
-      void applyModelConfig('claudecode', pendingInternalId, undefined, v).then((result) => {
-        if (result !== true) {
-          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
-        }
-      });
-    },
-    // claudeCodeRelayMode is a real dep: the re-apply reads it through
-    // applyModelConfig (relayOverride=undefined here). Omitting it would
-    // re-write settings.json with a STALE relay flag, silently reverting
-    // the user's API Router setting.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolModelConfig, t, userModels, claudeCodeRelayMode]
-  );
-
-  const setClaudeDesktop1mMode = useCallback(
-    (v: boolean) => {
-      setClaudeDesktop1mModeRaw(v);
-      writeBool('echobird_claudedesktop_1m_mode', v);
-      const pendingInternalId = toolModelConfig['claudedesktop'];
-      if (!pendingInternalId || isOfficialModelSentinel(pendingInternalId)) return;
-      void applyModelConfig('claudedesktop', pendingInternalId, undefined, v).then((result) => {
-        if (result !== true) {
-          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
-        }
-      });
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [toolModelConfig, t, userModels, claudeDesktopRelayMode]
-  );
+      })
+      .finally(() => setIsLaunching(false));
+  };
+  const setClaude1mMode = (value: boolean) => setClaudeOneM('claudecode', value);
+  const setClaudeDesktop1mMode = (value: boolean) => setClaudeOneM('claudedesktop', value);
 
   // Restore = delete the tool's config file. The tool itself regenerates
   // a vendor-default config on next launch, so restore is symmetric with
@@ -1440,10 +1379,9 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         userModels,
         codexWebSearch,
         setCodexWebSearch,
-        claudeDesktopRelayMode,
-        setClaudeDesktopRelayMode,
-        claudeCodeRelayMode,
-        setClaudeCodeRelayMode,
+        claudeDesktopWebSearch,
+        claudeCodeWebSearch,
+        setClaudeWebSearch,
         claudeDesktop1mMode,
         setClaudeDesktop1mMode,
         claude1mMode,
