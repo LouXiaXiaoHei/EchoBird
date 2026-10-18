@@ -13,8 +13,7 @@ files unless told otherwise; they share one schema and the remote wins at
 runtime. Prettier governs the frontend JSON/TS; rustfmt governs `src-tauri/`.
 
 Keep internal development reports, research notes, and integration playbooks
-in the ignored `internal-docs/` directory. `docs/` is the public website;
-`licenses/` contains third-party licenses and attribution notices.
+in the ignored `internal-docs/` directory. `docs/` is the public website.
 
 ## Desktop interaction rules
 
