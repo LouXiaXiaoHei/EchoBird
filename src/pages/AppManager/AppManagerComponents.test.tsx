@@ -590,19 +590,20 @@ describe('PageAwareHint', () => {
     );
   };
 
-  it.each(['claudedesktop', 'claudecode'])(
-    'shows the app reorder hint for %s API models',
-    async (toolId) => {
-      const markup = await renderHint(toolId);
-      expect(markup).toContain('hint.appReorder');
-    }
-  );
+  it.each([
+    ['claudedesktop', 'hint.localHistoryPreserved'],
+    ['claudecode', 'hint.appReorder'],
+  ])('shows the selected app hint for %s API models', async (toolId, hint) => {
+    const markup = await renderHint(toolId);
+    expect(markup).toContain(hint);
+  });
 
   it.each(['chatgptdesktop', 'codex'])(
     'shows the Responses compatibility reminder for %s',
     async (toolId) => {
       const markup = await renderHint(toolId);
       expect(markup).toContain('hint.responsesRequired');
+      expect(markup).toContain('hint.localHistoryPreserved');
       expect(markup).not.toContain('hint.appReorder');
     }
   );
@@ -611,9 +612,9 @@ describe('PageAwareHint', () => {
     const markup = await renderHint('claudecode', 'saved-account');
     expect(markup).toContain('hint.appReorder');
   });
-  it('shows the app reorder hint when a Claude Desktop account is selected', async () => {
+  it('shows the local history hint when a Claude Desktop account is selected', async () => {
     const markup = await renderHint('claudedesktop', 'saved-account');
-    expect(markup).toContain('hint.appReorder');
+    expect(markup).toContain('hint.localHistoryPreserved');
   });
 
   it('shows the app reorder hint for other tools', async () => {

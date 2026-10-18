@@ -1414,9 +1414,19 @@ export const PageAwareHint: React.FC = () => {
         ? 'aiDesktop.installHint'
         : selectedTool === 'chatgptdesktop' || selectedTool === 'codex'
           ? 'hint.responsesRequired'
-          : 'hint.appReorder';
+          : ['claudedesktop', 'workbuddy', 'workbuddyai'].includes(selectedTool ?? '')
+            ? 'hint.localHistoryPreserved'
+            : 'hint.appReorder';
   return (
-    <div className="flex-1 text-[15px] font-medium text-cyber-accent">{key ? t(key) : null}</div>
+    <div className="flex-1 text-[15px] font-medium text-cyber-accent">
+      {t(key)}
+      {key === 'hint.responsesRequired' && (
+        <>
+          <br />
+          {t('hint.localHistoryPreserved')}
+        </>
+      )}
+    </div>
   );
 };
 

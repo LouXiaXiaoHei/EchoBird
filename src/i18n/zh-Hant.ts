@@ -460,6 +460,7 @@ const zhHant: Partial<Translations> = {
   'key.destroyed': '偵測到環境已變動，API Key 已自毀，請重新輸入',
   'hint.responsesRequired':
     'ChatGPT / Codex CLI 切換模型時，第三方模型必須支援 Responses 才能成功接入。',
+  'hint.localHistoryPreserved': '切換帳號或模型，本機對話記錄自動保留。',
   'hint.appReorder': '長按拖動應用程式圖示，可調整排列順序。',
   'hint.myProjects':
     '給你 Vibe Coding 的應用或遊戲切換模型，參考黑白棋和 AI 翻譯的 models.json 或複製它到你的專案。',

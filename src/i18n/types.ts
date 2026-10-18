@@ -426,6 +426,7 @@ export type TKey =
   | 'key.destroyed'
   // App hints
   | 'hint.responsesRequired'
+  | 'hint.localHistoryPreserved'
   | 'hint.appReorder'
   // Mother Agent
   | 'mother.selectModel'

@@ -481,6 +481,8 @@ const ja: Partial<Translations> = {
   'key.destroyed': '環境の変化を検出。API キーが自動消去されました。再度入力してください',
   'hint.responsesRequired':
     'ChatGPT / Codex CLI に接続するには、サードパーティモデルが Responses をサポートしている必要があります。',
+  'hint.localHistoryPreserved':
+    'アカウントやモデルを切り替えても、ローカルの会話履歴は自動で保持されます。',
   'hint.appReorder': 'アプリのアイコンを長押ししてドラッグすると並べ替えられます。',
   'hint.myProjects':
     'Vibe Coding したアプリ / ゲームのモデルを切り替え。リバーシ / AI 翻訳 の models.json を参考にするか、あなたのプロジェクトにコピーしてください。',
