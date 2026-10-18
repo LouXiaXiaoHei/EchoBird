@@ -282,7 +282,7 @@ const ja: Partial<Translations> = {
   'btn.save': '保存',
   'btn.close': '閉じる',
   'btn.refresh': '更新',
-  'btn.editPaths': 'スキャンパスのカスタマイズ',
+  'btn.editPaths': 'カスタマイズ',
   'btn.cancel': 'キャンセル',
   'btn.delete': '削除',
   'btn.edit': '編集',

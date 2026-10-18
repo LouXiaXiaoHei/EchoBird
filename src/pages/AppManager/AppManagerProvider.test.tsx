@@ -14,7 +14,8 @@ vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('../../utils/platform', () => ({ IS_WINDOWS: false }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn().mockResolvedValue('/fixture') }));
 vi.mock('../../hooks/useI18n', () => {
-  const t = (key: string) => key;
+  const t = (key: string) =>
+    key === 'accountError.format' ? 'Localized configuration format error' : key;
   return { useI18n: () => ({ t, locale: 'en' }) };
 });
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => async () => true }));
@@ -34,7 +35,9 @@ vi.mock('./useClaudeCodeAccounts', async () => {
   };
 });
 vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
-vi.mock('./useDeepSeekAccounts', () => ({ useDeepSeekAccounts: () => ({ accounts: [] }) }));
+vi.mock('./useDeepSeekAccounts', () => ({
+  useDeepSeekAccounts: () => ({ accounts: [], select: vi.fn() }),
+}));
 vi.mock('../../api/tauri', () => ({
   listOpenDesignAccounts: vi.fn().mockResolvedValue([]),
   startOpenDesignLogin: vi.fn(),
@@ -1395,6 +1398,70 @@ describe('VS Code API model workflow', () => {
     expect(context.isLaunching).toBe(false);
     expect(context.detectedTools.find((tool) => tool.id === 'vscode')?.activeModel).toBe('before');
     expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+  });
+
+  it('translates DSH Auto Router configuration failures and only launches after a successful retry', async () => {
+    useToolsStore.getState().setDetectedTools([
+      {
+        id: 'dsh',
+        name: 'DeepSeek Harness',
+        category: 'Desktop',
+        installed: true,
+        activeModel: 'before',
+        apiProtocol: ['anthropic', 'openai'],
+        noCwdPrompt: true,
+      },
+    ]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'smart-router',
+        name: 'Auto Router',
+        modelId: 'auto',
+        baseUrl: 'http://127.0.0.1:53683/v1',
+        anthropicUrl: 'http://127.0.0.1:53683',
+        apiKey: 'router-fixture-key',
+      },
+    ]);
+    await mount();
+    act(() => {
+      context.setSelectedTool('dsh');
+      context.handleSelectModel('dsh', 'smart-router');
+    });
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(context.applyError).toBeNull();
+
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'accountError.format',
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.applyError).toBe('Localized configuration format error');
+    expect(context.isLaunching).toBe(false);
+    expect(context.detectedTools.find((tool) => tool.id === 'dsh')?.activeModel).toBe('before');
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      'dsh',
+      expect.objectContaining({
+        model: 'auto',
+        baseUrl: 'http://127.0.0.1:53683',
+        protocol: 'anthropic',
+        apiKey: 'router-fixture-key',
+      })
+    );
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith('dsh', undefined, undefined);
+    const applyOrder = vi.mocked(api.applyModelToTool).mock.invocationCallOrder;
+    expect(applyOrder[applyOrder.length - 1]).toBeLessThan(
+      vi.mocked(api.startTool).mock.invocationCallOrder[0]
+    );
     expect(openDialog).not.toHaveBeenCalled();
   });
 

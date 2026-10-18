@@ -269,7 +269,7 @@ const zhHant: Partial<Translations> = {
   'btn.save': '儲存',
   'btn.close': '關閉',
   'btn.refresh': '重新整理',
-  'btn.editPaths': '自訂掃描路徑',
+  'btn.editPaths': '自訂',
   'btn.cancel': '取消',
   'btn.delete': '刪除',
   'btn.edit': '編輯',

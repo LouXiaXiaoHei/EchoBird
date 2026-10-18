@@ -52,6 +52,8 @@ rusty-leveldb = "4.0.1"
 # YAML read-merge-write for DeepSeek Harness (`~/.dsh/settings.yaml` +
 # `.credentials.yaml`). serde_yaml is archived; this is the maintained fork.
 serde_yaml_ng = "0.10"
+# Tokenize DSH's !!js tags without changing quoted strings or evaluating them.
+yaml-rust2 = { version = "0.11", default-features = false }
 
 # Logging
 log = "0.4"

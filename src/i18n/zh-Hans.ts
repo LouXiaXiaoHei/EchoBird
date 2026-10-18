@@ -232,7 +232,7 @@ const zhHans: Partial<Translations> = {
   'btn.save': '保存',
   'btn.close': '关闭',
   'btn.refresh': '刷新',
-  'btn.editPaths': '自定义扫描路径',
+  'btn.editPaths': '自定义',
   'btn.cancel': '取消',
   'btn.delete': '删除',
   'btn.edit': '编辑',

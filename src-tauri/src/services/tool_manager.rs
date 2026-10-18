@@ -3236,6 +3236,72 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn desktop_registry_aliases_resolve_supported_clients_and_reject_dsh_wrappers() {
+        use std::{collections::HashMap, sync::Arc};
+        let root = std::env::temp_dir().join(format!("desktop-aliases-{}", uuid::Uuid::new_v4()));
+        for (catalog, display_name, executable, supported) in [
+            (
+                include_str!("../../../tools/traecn/paths.json"),
+                "TRAE CN (User)",
+                "Trae CN/Trae CN.exe",
+                true,
+            ),
+            (
+                include_str!("../../../tools/dsh/paths.json"),
+                "DSH Desktop 0.11.1",
+                "DSH Desktop/DSH Desktop.exe",
+                false,
+            ),
+            (
+                include_str!("../../../tools/dsh/paths.json"),
+                "DeepSeek Harness 0.2.1",
+                "DeepSeek Harness/DeepSeek Harness.exe",
+                true,
+            ),
+        ] {
+            let mut definition: PathsConfig = serde_json::from_str(catalog).unwrap();
+            let exe = root.join(executable);
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::write(&exe, b"fixture").unwrap();
+            definition.paths.win32 = Some(vec![root
+                .join("missing-default.exe")
+                .to_string_lossy()
+                .into_owned()]);
+            let snapshot = Arc::new(super::DiscoverySnapshot {
+                registry: Arc::new(vec![HashMap::from([
+                    ("DisplayName".into(), display_name.into()),
+                    ("DisplayIcon".into(), format!("\"{}\",0", exe.display())),
+                    ("InstallLocation".into(), String::new()),
+                ])]),
+                msix: None,
+            });
+            super::SCAN_DISCOVERY
+                .scope(snapshot, async {
+                    let expected = supported.then(|| exe.to_string_lossy().into_owned());
+                    assert_eq!(
+                        super::detect_tool(&definition).await,
+                        expected,
+                        "{display_name}"
+                    );
+                    assert_eq!(super::find_tool_executable(&definition, true), expected);
+                    if display_name.starts_with("TRAE") {
+                        let mut international: PathsConfig =
+                            serde_json::from_str(include_str!("../../../tools/trae/paths.json"))
+                                .unwrap();
+                        international.paths.win32 = definition.paths.win32.clone();
+                        assert!(super::detect_tool(&international).await.is_none());
+                    }
+                    fs::remove_file(&exe).unwrap();
+                    assert!(super::detect_tool(&definition).await.is_none());
+                    assert!(super::find_tool_executable(&definition, true).is_none());
+                })
+                .await;
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn trae_bundle_detection_uses_native_metadata_and_rejects_leftover_data() {
         let root = std::env::temp_dir().join(format!("trae-bundle-{}", uuid::Uuid::new_v4()));

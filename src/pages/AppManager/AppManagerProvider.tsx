@@ -627,7 +627,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         return true;
       } else {
         console.error('[AppManager] Failed to apply model:', result?.message);
-        return result?.message || false;
+        const message = result?.message;
+        return message?.startsWith('accountError.') ? accountError(message, t) : message || false;
       }
     } catch (error) {
       console.error('[AppManager] Error applying model to tool:', error);

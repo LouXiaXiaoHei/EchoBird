@@ -20,7 +20,7 @@
         "linux": ["/usr/share/trae-cn/trae-cn", "/usr/bin/trae-cn"]
     },
     "installHints": {
-        "windowsDisplayNames": ["Trae CN", "Trae-CN"],
+        "windowsDisplayNames": ["Trae CN", "Trae-CN", "Trae CN (User)", "Trae-CN (User)"],
         "macosAppName": "Trae CN",
         "linuxDesktopNames": ["Trae CN", "trae-cn"]
     }

@@ -250,7 +250,7 @@ const en: Translations = {
   'btn.save': 'Save',
   'btn.close': 'Close',
   'btn.refresh': 'REFRESH',
-  'btn.editPaths': 'Custom scan paths',
+  'btn.editPaths': 'Customize',
   'btn.cancel': 'CANCEL',
   'btn.delete': 'DELETE',
   'btn.edit': 'EDIT',

@@ -30,7 +30,7 @@
         ]
     },
     "identity_guard": {
-        "description": "This entry launches the official DeepSeek Harness desktop app (DeepSeek Harness.exe / DeepSeek Harness.app). The npm package @deepseek-ai/dsh and dsh web are the separate CLI/web launch path and must not satisfy this desktop installation request."
+        "description": "This entry launches the official DeepSeek Harness desktop app (DeepSeek Harness.exe / DeepSeek Harness.app). DSH Desktop.exe belongs to independent community wrappers, such as dataelement/dsh-desktop, with separate data directories and profiles; it must not satisfy this official desktop installation request. The npm package @deepseek-ai/dsh and dsh web are the separate CLI/web launch path and must not satisfy this desktop installation request."
     },
     "network_requirements": {
         "test_urls": [

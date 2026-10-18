@@ -70,14 +70,16 @@ export const AppManagerTitleActions: React.FC = () => {
     <div className="ml-auto flex-shrink-0 flex items-center gap-3">
       {/* Custom scan paths — opens ~/.echobird/tool-paths.json so users can
           register install locations EchoBird's bundled defaults missed.
-          Icon buttons share the refresh button's chrome and height. */}
+          Shares the refresh button's chrome and height. */}
       <PageActionButton
         icon={Settings}
         onClick={() => {
           void api.openToolPathsConfig().catch(() => {});
         }}
         aria-label={t('btn.editPaths')}
-      />
+      >
+        {t('btn.editPaths')}
+      </PageActionButton>
       <ViewModeTabs
         value={viewMode}
         onChange={setViewMode}
