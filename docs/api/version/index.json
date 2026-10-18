@@ -1,5 +1,5 @@
 {
-  "version": "6.0.0",
+  "version": "6.0.1",
   "releaseDate": "2026-10-18",
   "releaseNotes": "6.0.1 改善了 Claude 桌面端 Code 页的本地对话记录保留。\n\n- 切换 Claude 账号或第三方 API 模型时，自动汇总 Claude 桌面端 Code 与本机 Claude Code 的对话记录，按时间显示并可继续原会话。\n- 保留原始聊天正文及归档、删除状态，更新已有会话索引前自动备份。\n- 应用桌面为 Claude 桌面端、ChatGPT / Codex CLI、WorkBuddy 国内版及海外版增加本地对话记录保留提示。\n- ChatGPT / Codex CLI 同时保留第三方模型需支持 Responses 的接入提示。",
   "releaseNotesI18n": {
