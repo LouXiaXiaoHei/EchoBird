@@ -352,6 +352,11 @@
             box-shadow: 0 14px 38px rgba(0, 0, 0, 0.28);
         }
 
+        .btn-primary .download-ext {
+            font-size: 12px;
+            opacity: 0.55;
+        }
+
         .btn-primary:hover {
             transform: translateY(-2px);
             background: #fff7df;
@@ -1677,9 +1682,10 @@
         <!-- Two parallel install paths in one row: pkg download OR copyable one-liner.
              Only the OS-matching command row is shown (set in JS). -->
         <div class="cta-row" id="installCmd">
-            <a href="https://github.com/edison7009/EchoBird/releases/latest" class="btn btn-primary">
+            <a href="#download" class="btn btn-primary" id="heroDownload">
                 <i class="fa-solid fa-download"></i>
                 <span data-i18n="hero.btn.download">获取 EchoBird</span>
+                <span class="download-ext" hidden></span>
             </a>
             <span class="cta-or" data-i18n="hero.or">或</span>
             <div class="install-cmd-row" data-os="windows" style="display:none">
@@ -2164,25 +2170,43 @@
             updateShowcase();
         })();
 
-        // Command-line install hint — show only the row matching the visitor's OS.
+        // Download button and command-line install hint share the visitor's OS.
         // navigator.userAgentData (modern) is preferred; fallback to userAgent string
         // for Safari and older browsers.
         (function () {
             const wrap = document.getElementById('installCmd');
             if (!wrap) return;
-            const ua = navigator.userAgent || '';
-            let os = 'unix';                                        // default: macOS/Linux
-            if (/Windows/i.test(ua)) os = 'windows';
-            else if (/Mac OS X|Macintosh/i.test(ua)) os = 'unix';
-            else if (/Linux/i.test(ua)) os = 'unix';
+            const platform = navigator.userAgentData?.platform || navigator.userAgent || '';
+            const isWindows = /Windows/i.test(platform);
+            const isMac = /Mac OS X|Macintosh|macOS/i.test(platform);
+            const isLinux = /Linux/i.test(platform);
+            const os = isWindows ? 'windows' : 'unix';
+            const download = isWindows
+                ? { route: 'windows', name: 'Windows', icon: 'windows', extension: '.exe' }
+                : isMac
+                    ? { route: 'macos-arm', name: 'macOS', icon: 'apple', extension: '.dmg' }
+                    : isLinux
+                        ? { route: 'linux-deb', name: 'Linux', icon: 'linux', extension: '.deb' }
+                        : null;
+            const downloadButton = document.getElementById('heroDownload');
+            if (downloadButton && download) {
+                downloadButton.href = `/download/${download.route}`;
+                downloadButton.querySelector('i').className = `fa-brands fa-${download.icon}`;
+                const label = downloadButton.querySelector('[data-i18n]');
+                label.removeAttribute('data-i18n');
+                label.textContent = download.name;
+                const extension = downloadButton.querySelector('.download-ext');
+                extension.textContent = download.extension;
+                extension.hidden = false;
+            }
             // Tighten the unix label so Mac users see "macOS" and Linux users see "Linux"
             const unixLabel = document.getElementById('unixLabel');
             if (unixLabel) {
-                if (/Mac OS X|Macintosh/i.test(ua)) unixLabel.textContent = 'macOS';
-                else if (/Linux/i.test(ua))         unixLabel.textContent = 'Linux';
+                if (isMac) unixLabel.textContent = 'macOS';
+                else if (isLinux) unixLabel.textContent = 'Linux';
             }
             // Show the macOS Gatekeeper hint only for macOS visitors.
-            if (/Mac OS X|Macintosh/i.test(ua)) {
+            if (isMac) {
                 const macosHint = document.getElementById('macosHint');
                 if (macosHint) macosHint.style.display = 'inline';
             }

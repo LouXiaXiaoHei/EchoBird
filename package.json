@@ -10,7 +10,7 @@
     "dev": "npm run tools:sync && cargo tauri dev",
     "build": "cargo tauri build",
     "preview": "vite preview",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests && node --test scripts/tests/website_download.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 45",
     "lint:fix": "eslint . --ext ts,tsx --fix",
