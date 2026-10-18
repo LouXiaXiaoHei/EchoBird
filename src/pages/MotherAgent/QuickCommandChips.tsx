@@ -59,7 +59,7 @@ export function QuickCommandChips() {
           // can't reach from here; setting the shared input value is enough —
           // the text appears and the user takes it from there.
           onClick={() => setChatInput(label)}
-          className="min-w-0 grow px-3 py-1.5 text-xs rounded-lg bg-cyber-surface/60 border border-cyber-border text-cyber-text-secondary hover:bg-cyber-elevated/70 hover:text-cyber-text hover:border-cyber-text-muted/50 transition-colors"
+          className="min-w-0 grow px-3 py-1.5 text-xs rounded-lg bg-cyber-surface/60 text-cyber-text-secondary hover:bg-cyber-elevated/70 hover:text-cyber-text transition-colors"
         >
           {label}
         </button>

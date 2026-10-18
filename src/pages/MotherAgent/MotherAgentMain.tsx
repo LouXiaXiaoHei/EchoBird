@@ -64,11 +64,11 @@ export function MotherAgentMain() {
     [models]
   );
 
-  // Estimated UTF-8 byte footprint of the current chat — drives the ring
-  // around the "?" hint so users can see how close they are to the
+  // Estimated UTF-8 byte footprint of the current chat — shown in the
+  // "?" hint so users can see how close they are to the
   // agent_loop trim threshold (MAX_CONTEXT_BYTES in echobird_core).
   // estimateContextBytes re-encodes the whole transcript; recomputing it on
-  // every streamed token is O(n^2) and only drives a coarse visual ring, so
+  // every streamed token is O(n^2) and only updates a coarse usage estimate, so
   // debounce it (recompute ~300ms after updates settle) instead of per-token.
   const [contextBytes, setContextBytes] = useState(0);
   useEffect(() => {
@@ -325,7 +325,7 @@ export function MotherAgentMain() {
 
       {/* Rich input area — Claude-style elevated rounded card */}
       <div className="flex-shrink-0 mt-1 mb-1">
-        <div className="bg-cyber-elevated/75 rounded-2xl p-2.5 border border-cyber-border">
+        <div className="bg-cyber-elevated/75 rounded-2xl p-2.5">
           <textarea
             ref={chatInputRef}
             value={chatInput}
@@ -401,7 +401,7 @@ export function MotherAgentMain() {
             {isProcessing ? (
               <button
                 onClick={() => abortAgent()}
-                className="w-8 h-8 rounded-lg flex items-center justify-center bg-red-500/20 hover:bg-red-500/30 transition-colors"
+                className="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center bg-red-500/20 hover:bg-red-500/30 transition-colors"
               >
                 <Square size={14} fill="#f87171" className="text-red-400" />
               </button>
@@ -409,7 +409,7 @@ export function MotherAgentMain() {
               <button
                 onClick={handleChatSend}
                 disabled={!chatInput.trim()}
-                className="w-8 h-8 rounded-lg flex items-center justify-center bg-cyber-accent hover:brightness-110 transition-all disabled:opacity-20"
+                className="w-8 h-8 shrink-0 rounded-lg flex items-center justify-center bg-cyber-accent hover:brightness-110 transition-all disabled:opacity-20"
               >
                 <ArrowUp size={18} strokeWidth={2.5} className="text-cyber-bg" />
               </button>
@@ -434,7 +434,7 @@ const MA_CONTEXT_MAX_BYTES = 300_000;
 
 // Rough UTF-8 byte estimate of what gets serialized into the LLM payload.
 // Doesn't have to match Rust's tally exactly — it just needs to grow at the
-// right rate so the ring is a useful "how full am I" indicator. Per message
+// right rate so the hint gives a useful usage estimate. Per message
 // we add a constant envelope (~50–130 bytes) to cover role/content wrapper
 // + tool_use_id/name overhead on the Rust side.
 function estimateContextBytes(messages: readonly ChatMessage[]): number {
@@ -454,60 +454,6 @@ function estimateContextBytes(messages: readonly ChatMessage[]): number {
     }
   }
   return total;
-}
-
-// ===== Context Usage Ring =====
-// Concentric SVG ring rendered around the "?" glyph. Fills as the estimated
-// payload approaches MA_CONTEXT_MAX_BYTES; transitions to amber then red to
-// telegraph "older messages will start dropping soon".
-
-interface ContextRingProps {
-  ratio: number;
-  children: React.ReactNode;
-}
-
-function ContextRing({ ratio, children }: ContextRingProps) {
-  const clamped = Math.min(1, Math.max(0, ratio));
-  const radius = 9;
-  const circumference = 2 * Math.PI * radius;
-  const dashOffset = circumference * (1 - clamped);
-
-  // Stop colors match the industry-standard context-usage palette
-  // (Cursor / ChatGPT / Claude): cyan accent → amber → red as the
-  // payload fills toward the trim threshold.
-  const strokeClass =
-    clamped < 0.7
-      ? 'stroke-cyber-accent'
-      : clamped < 0.9
-        ? 'stroke-cyber-warning'
-        : 'stroke-cyber-error';
-
-  return (
-    <span className="relative inline-flex h-5 w-5 items-center justify-center">
-      <svg aria-hidden="true" viewBox="0 0 20 20" className="absolute inset-0 -rotate-90">
-        <circle
-          cx="10"
-          cy="10"
-          r={radius}
-          fill="none"
-          strokeWidth="1.5"
-          className="stroke-cyber-border/40"
-        />
-        <circle
-          cx="10"
-          cy="10"
-          r={radius}
-          fill="none"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={dashOffset}
-          className={`${strokeClass} transition-all duration-300`}
-        />
-      </svg>
-      <span className="relative">{children}</span>
-    </span>
-  );
 }
 
 // ===== Parasite Hint =====
@@ -538,12 +484,12 @@ function ParasiteHint({ ccInstalled, contextBytes, contextMaxBytes }: ParasiteHi
   const ariaLabel = `${baseTip} ${usageLine}`;
 
   return (
-    <span className="group relative inline-flex items-center">
+    <span className="group relative inline-flex h-8 shrink-0 items-center cursor-default">
       <span
         aria-label={ariaLabel}
-        className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-cyber-elevated font-sans text-xs font-medium leading-none text-cyber-text-secondary cursor-help select-none hover:bg-cyber-accent/15 hover:text-cyber-accent transition-colors"
+        className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-cyber-elevated font-sans text-xs font-medium leading-none text-cyber-text-secondary select-none hover:bg-cyber-accent/15 hover:text-cyber-accent transition-colors"
       >
-        <ContextRing ratio={ratio}>?</ContextRing>
+        ?
       </span>
       <span
         role="tooltip"

@@ -1,6 +1,6 @@
 // RemoteModelSelector — Minimal model dropdown for Mother Agent
 // Text + arrow, no background/border, hover shows soft bg, dropdown opens upward
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { ChevronDown, Loader2, Check, Waypoints } from 'lucide-react';
 
 export interface ModelOption {
@@ -43,7 +43,26 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
   extras,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [menuBounds, setMenuBounds] = useState({ maxWidth: 200, maxHeight: 480 });
   const containerRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    const resizeMenu = () => {
+      const anchor = containerRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const boundary = containerRef.current?.closest('.overflow-hidden')?.getBoundingClientRect();
+      const left = Math.max(0, boundary?.left ?? 0) + 8;
+      const top = Math.max(0, boundary?.top ?? 0) + 8;
+      setMenuBounds({
+        maxWidth: Math.max(0, Math.min(anchor.right, window.innerWidth - 8) - left),
+        maxHeight: Math.max(0, Math.min(480, anchor.top - top - 4)),
+      });
+    };
+    resizeMenu();
+    window.addEventListener('resize', resizeMenu);
+    return () => window.removeEventListener('resize', resizeMenu);
+  }, [isOpen]);
 
   // Close on click outside
   useEffect(() => {
@@ -76,10 +95,10 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
 
   // Tailwind JIT-friendly static class strings (Mother Agent secondary accent)
   const triggerClass =
-    'flex items-center gap-1.5 pl-2 pr-0 py-1 text-xs font-mono text-cyber-text transition-colors rounded hover:bg-cyber-elevated disabled:cursor-default';
+    'flex h-8 max-w-full items-center gap-1.5 px-2 py-1 text-xs font-mono text-cyber-text transition-colors rounded hover:bg-cyber-elevated disabled:cursor-default';
   const spinClass = 'animate-spin text-cyber-text/70';
   const selectedItemClass = 'text-cyber-text bg-cyber-text/10';
-  const unselectedItemClass = 'text-cyber-text hover:bg-cyber-elevated hover:text-cyber-text';
+  const unselectedItemClass = 'text-cyber-text hover:bg-cyber-text/10 hover:text-cyber-text';
   const checkClass = 'flex-shrink-0 ml-1 text-cyber-text';
 
   const renderIcon = (option: ModelOption, sizeClass: string, iconSize: number) => {
@@ -100,7 +119,7 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
   };
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className="relative min-w-0">
       {/* Trigger button — icon + text + arrow, no bg/border */}
       <button
         type="button"
@@ -125,8 +144,13 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
       {/* Dropdown — opens upward */}
       {isOpen && (models.length > 0 || (extras && extras.length > 0)) && (
         <div
-          className="absolute bottom-full mb-1 right-0 min-w-[200px] max-w-[300px] max-h-60 overflow-y-auto
-                    bg-cyber-elevated border border-cyber-border rounded-lg shadow-2xl
+          style={{
+            minWidth: Math.min(200, menuBounds.maxWidth),
+            maxWidth: menuBounds.maxWidth,
+            maxHeight: menuBounds.maxHeight,
+          }}
+          className="absolute bottom-full mb-1 right-0 w-max overflow-y-auto
+                    bg-cyber-elevated rounded-lg shadow-2xl
                     animate-in fade-in slide-in-from-bottom-2 duration-150
                     z-50"
         >
@@ -143,7 +167,7 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
                                 ${model.id === currentModelId ? selectedItemClass : unselectedItemClass}`}
             >
               {renderIcon(model, 'w-4 h-4', 16)}
-              <span className="truncate flex-1">{model.name}</span>
+              <span className="min-w-0 flex-1 whitespace-normal break-words">{model.name}</span>
               {model.id === currentModelId && <Check size={12} className={checkClass} />}
             </div>
           ))}
@@ -180,7 +204,7 @@ export const RemoteModelSelector: React.FC<RemoteModelSelectorProps> = ({
                 className={`${rowBase} ${rowState}`}
               >
                 {renderIcon(extra, 'w-4 h-4', 16)}
-                <span className="truncate flex-1">{extra.name}</span>
+                <span className="min-w-0 flex-1 whitespace-normal break-words">{extra.name}</span>
                 {extra.disabled && extra.disabledLabel && (
                   <span className="flex-shrink-0 text-[10px] text-cyber-text-muted">
                     {extra.disabledLabel}

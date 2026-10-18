@@ -612,7 +612,7 @@ export const LocalServerMain: React.FC = () => {
         <div className="flex gap-1.5 w-full">
           <button
             onClick={handleDownloadEngine}
-            className="flex-1 py-3 font-bold text-base tracking-[0.3em] font-mono transition-colors flex items-center justify-center gap-2 rounded-lg border outline-none bg-cyber-accent text-white border-cyber-accent hover:bg-cyber-accent-secondary hover:border-cyber-accent-secondary shadow-lg shadow-cyber-accent/30"
+            className="flex-1 py-[calc(0.75rem_-_1px)] font-bold text-base tracking-[0.3em] font-mono transition-colors flex items-center justify-center gap-2 rounded-lg border outline-none bg-cyber-accent text-white border-cyber-accent hover:bg-cyber-accent-secondary hover:border-cyber-accent-secondary shadow-lg shadow-cyber-accent/30"
           >
             <Download className="w-4 h-4" />
             {engineStatus === 'error'
