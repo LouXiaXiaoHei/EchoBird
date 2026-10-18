@@ -76,20 +76,13 @@ export const ToolCallCard = memo(function ToolCallCard({
       <Check size={11} className="text-cyber-text-muted" />
     );
 
-  // Border stays neutral across all statuses — the red ✕ icon already
-  // marks failures. Tinted borders looked peachy/orange against the warm
-  // dark surface, which read as visual noise in long tool-call sequences.
-  const borderColor = 'border-cyber-border/40';
-
   const truncatedOutput =
     output && output.length > OUTPUT_PREVIEW_LIMIT
       ? output.slice(0, OUTPUT_PREVIEW_LIMIT) + '\n…\n[truncated]'
       : output;
 
   return (
-    <div
-      className={`mb-3 border ${borderColor} rounded-md bg-cyber-surface/60 text-[12px] font-mono`}
-    >
+    <div className="mb-3 rounded-md bg-cyber-surface/60 text-[12px] font-mono">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
