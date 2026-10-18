@@ -374,7 +374,7 @@ export const LocalServerMain: React.FC = () => {
   };
 
   useEffect(() => {
-    if (autoFollowRef.current && logsEndRef.current) {
+    if (logs.length > 0 && autoFollowRef.current && logsEndRef.current) {
       logsEndRef.current.scrollIntoView({ behavior: 'auto' });
     }
   }, [logs]);

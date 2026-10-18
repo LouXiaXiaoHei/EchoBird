@@ -504,6 +504,54 @@ describe('Local model page navigation', () => {
     });
     expect(JSON.stringify(renderer.toJSON())).not.toContain('store.ready');
   });
+  it('keeps the empty welcome content at the top and follows only real logs', async () => {
+    vi.useFakeTimers();
+    visibility.visible = true;
+    vi.mocked(api.getLlmServerInfo).mockResolvedValue({
+      running: false,
+      port: 11434,
+      modelName: '',
+      apiKey: '',
+    });
+    vi.mocked(api.getLlmServerLogs).mockResolvedValue([]);
+    const scrollIntoView = vi.fn();
+    const logContainer = { scrollTop: 0, scrollHeight: 600, clientHeight: 200 };
+    await act(async () => {
+      renderer = create(
+        <LocalServerProvider>
+          <Harness main panel={false} />
+        </LocalServerProvider>,
+        {
+          createNodeMock: (element) => (element.props.onScroll ? logContainer : { scrollIntoView }),
+        }
+      );
+    });
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    vi.mocked(api.getLlmServerLogs).mockResolvedValue(['first log']);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ behavior: 'auto' });
+
+    const logArea = renderer.root.find(
+      (node) => node.type === 'div' && typeof node.props.onScroll === 'function'
+    );
+    act(() => logArea.props.onScroll());
+    vi.mocked(api.getLlmServerLogs).mockResolvedValue(['first log', 'second log']);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    const followButton = renderer.root.find(
+      (node) => node.type === 'button' && node.props.className.includes('absolute bottom-3 right-3')
+    );
+    act(() => followButton.props.onClick());
+    expect(scrollIntoView).toHaveBeenLastCalledWith({ behavior: 'smooth' });
+    expect(api.startLlmServer).not.toHaveBeenCalled();
+    expect(api.installLocalEngine).not.toHaveBeenCalled();
+  });
+
   it('pauses a mounted log view off-page and ignores its late response', async () => {
     vi.useFakeTimers();
     visibility.visible = true;
