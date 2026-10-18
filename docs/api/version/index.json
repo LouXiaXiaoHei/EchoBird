@@ -1,5 +1,5 @@
 {
-  "version": "5.9.9",
+  "version": "6.0.0",
   "releaseDate": "2026-10-18",
   "releaseNotes": "6.0.0 改善了 DeepSeek Harness 配置兼容性、Windows 应用识别和自定义入口。\n\n- 修复部分合法 DeepSeek Harness 配置导致模型或账号切换失败的问题，保留其他插件配置、表达式和凭据。\n- 修复模型配置失败时直接显示 accountError.format 等内部错误标识的问题。\n- 改善 Windows 下 TRAE CN 用户级安装的识别，支持通过注册信息定位自定义安装目录。\n- 应用桌面的齿轮按钮增加「自定义」文字，便于配置自定义路径和可执行文件名。\n- 关闭智能路由后，母体聊天不再显示或保留该模型选项；调整 Pi 图标留白。",
   "releaseNotesI18n": {
