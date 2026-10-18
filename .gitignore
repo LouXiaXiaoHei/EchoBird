@@ -1,5 +1,7 @@
 # Internal development docs (local only)
 internal-docs/
+# Internal reports previously placed in the public site root.
+/docs/*.md
 PROGRESS_HANDOFF.md
 FRONTEND_QUALITY.md
 SECURITY_AUDIT.md
