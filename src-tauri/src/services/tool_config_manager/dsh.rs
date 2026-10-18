@@ -139,7 +139,9 @@ fn settings_patch_id(entry: &Value) -> Option<&str> {
         "agent-default-model" => "@deepseek-ai/dsh-agent-default-model",
         _ => return Some(id),
     };
-    if yaml_get(entry, "name").is_some_and(|value| value.as_str() != Some(name)) {
+    if yaml_get(entry, "name").is_some_and(|value| {
+        !value.is_null() && value.as_str() != Some("") && value.as_str() != Some(name)
+    }) {
         return None;
     }
     Some(id)
@@ -665,6 +667,23 @@ mod tests {
         assert_eq!(read_at(&dir).unwrap().model.as_deref(), Some("test-model"));
         assert_eq!(profile(&dir).unwrap()[2], original[2]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn empty_patch_names_do_not_hide_existing_model_configuration() {
+        for name in ["''", "null"] {
+            let dir = fixture();
+            fs::write(profile_at(&dir), format!("- id: llm-pi-ai\n  name: {name}\n  config:\n    providers:\n      echobird: {{baseURL: 'https://example.com/v1'}}\n- id: agent-default-model\n  name: {name}\n  config: {{provider: echobird, model: existing}}\n")).unwrap();
+            assert_eq!(read_at(&dir).unwrap().model.as_deref(), Some("existing"));
+            let original = profile(&dir).unwrap();
+            apply_at(&dir, &model()).unwrap();
+            let saved = profile(&dir).unwrap();
+            assert_eq!(saved.as_sequence().unwrap().len(), 2);
+            assert_eq!(saved[0]["name"], original[0]["name"]);
+            assert_eq!(saved[1]["name"], original[1]["name"]);
+            assert_eq!(read_at(&dir).unwrap().model.as_deref(), Some("test-model"));
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]
