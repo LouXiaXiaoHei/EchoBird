@@ -374,9 +374,17 @@
       "name": "Agnes AI",
       "url": "https://platform.agnes-ai.com/",
       "baseUrl": "https://apihub.agnes-ai.com/v1",
-      "anthropicUrl": "",
-      "modelId": "agnes-2.0-flash",
+      "anthropicUrl": "https://apihub.agnes-ai.com",
+      "modelId": "agnes-2.5-flash",
       "region": "global"
+    },
+    {
+      "name": "ModelScope",
+      "url": "https://modelscope.cn/",
+      "baseUrl": "https://api-inference.modelscope.cn/v1",
+      "anthropicUrl": "https://api-inference.modelscope.cn",
+      "modelId": "",
+      "region": "cn"
     },
     {
       "name": "火山引擎",
