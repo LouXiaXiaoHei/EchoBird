@@ -48,7 +48,9 @@ fn codex_compact_limit_for(context_window: u64) -> u64 {
 }
 
 fn codex_web_search_mode(base_url: &str, enabled: Option<bool>) -> &'static str {
-    if crate::services::smart_router::is_router_url(base_url) {
+    if crate::services::smart_router::is_router_url(base_url)
+        || codex_catalog::is_step_plan_url(base_url)
+    {
         return "disabled";
     }
     if enabled.unwrap_or_else(|| {
@@ -916,10 +918,52 @@ mod tests {
         for tool in ["codex", "chatgptdesktop"] {
             for (base_url, model, expected_base, context, effort) in [
                 (
+                    "https://api.stepfun.com/step_plan/v1",
+                    "step-5-preview",
+                    "https://api.stepfun.com/step_plan/v1",
+                    1_000_000,
+                    "medium",
+                ),
+                (
+                    "https://api.stepfun.com/step_plan/v1/",
+                    "step-3.7-flash",
+                    "https://api.stepfun.com/step_plan/v1",
+                    256_000,
+                    "medium",
+                ),
+                (
+                    "https://api.stepfun.com/step_plan/v1",
+                    "step-3.5-flash",
+                    "https://api.stepfun.com/step_plan/v1",
+                    256_000,
+                    "medium",
+                ),
+                (
+                    "https://api.minimax.io/v1",
+                    "MiniMax-M3.1-Flash",
+                    "https://api.minimax.io/v1",
+                    524_288,
+                    "max",
+                ),
+                (
+                    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    "deepseek-v4.1-flash-1017",
+                    "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                    1_000_000,
+                    "medium",
+                ),
+                (
                     "https://api.deepseek.com",
                     "deepseek-flash",
                     "https://api.deepseek.com",
                     1_048_576,
+                    "high",
+                ),
+                (
+                    "https://api.deepseek.com",
+                    "deepseek-v5-flash",
+                    "https://api.deepseek.com",
+                    DEFAULT_CODEX_CONTEXT_WINDOW,
                     "high",
                 ),
                 (
@@ -1002,7 +1046,8 @@ mod tests {
             ] {
                 let info: ModelInfo = serde_json::from_value(serde_json::json!({
                     "name": "Custom name", "model": model, "baseUrl": base_url,
-                    "apiKey": "fixture-key", "webSearch": false
+                    "apiKey": "fixture-key",
+                    "webSearch": codex_catalog::is_step_plan_url(base_url)
                 }))
                 .unwrap();
                 let result = apply_codex_at(tool, &info, &codex_dir, &state_dir);
@@ -1025,6 +1070,8 @@ mod tests {
                     codex_compact_limit_for(context).to_string()
                 );
                 assert_eq!(toml_read_top(&config, "model_reasoning_effort"), effort);
+                assert_eq!(toml_read_top(&config, "model"), model);
+                assert_eq!(toml_read_top(&config, "web_search"), "disabled");
                 assert_eq!(
                     toml_read_top(&config, "model_catalog_json"),
                     catalog_path.to_string_lossy().replace('\\', "/")

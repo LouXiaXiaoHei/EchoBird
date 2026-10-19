@@ -23,6 +23,8 @@
 // line, Codex talks to the upstream directly with the real id (its own default
 // catalog applies). If a vendor's model doesn't support the Responses protocol
 // at all, it cannot be used by Codex through EchoBird.
+// Official documentation URLs, review date, and upstream catalog hashes are
+// recorded in assets/codex-catalogs/sources.json for future updates.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -54,6 +56,14 @@ const GLM_CN_MODELS: &str = include_str!("../../assets/codex-catalogs/glm-cn-mod
 const GLM_GLOBAL_MODELS: &str = include_str!("../../assets/codex-catalogs/glm-global-models.json");
 const QWEN_PLAN_MODELS: &str = include_str!("../../assets/codex-catalogs/qwen-plan-models.json");
 const QWEN_PAYG_MODELS: &str = include_str!("../../assets/codex-catalogs/qwen-payg-models.json");
+const STEP_PLAN_MODELS: &str = include_str!("../../assets/codex-catalogs/stepfun-plan-models.json");
+
+pub fn is_step_plan_url(base_url: &str) -> bool {
+    url_matches_domain(base_url, "stepfun.com")
+        && Url::parse(base_url)
+            .ok()
+            .is_some_and(|url| url.path().trim_end_matches('/') == "/step_plan/v1")
+}
 
 /// Match a provider base_url to the bundled capability template that applies.
 /// Domain-only, never by model brand. Returns the template JSON string, or
@@ -98,6 +108,8 @@ pub fn template_for_model(base_url: &str, model_id: &str) -> Option<Value> {
         Some(GLM_CN_MODELS)
     } else if url_matches_domain(base_url, "z.ai") {
         Some(GLM_GLOBAL_MODELS)
+    } else if is_step_plan_url(base_url) {
+        Some(STEP_PLAN_MODELS)
     } else if url_matches_domain(base_url, "maas.qianwenaiapi.com")
         || url_matches_domain(base_url, "maas.aliyuncs.com")
     {
@@ -278,6 +290,7 @@ mod tests {
             GLM_GLOBAL_MODELS,
             QWEN_PLAN_MODELS,
             QWEN_PAYG_MODELS,
+            STEP_PLAN_MODELS,
         ] {
             let catalog: Value = serde_json::from_str(source).unwrap();
             let models = catalog["models"].as_array().unwrap();
@@ -294,6 +307,24 @@ mod tests {
     #[test]
     fn native_catalogs_select_documented_models_in_both_regions() {
         for (base_url, model, context, effort) in [
+            (
+                "https://api.minimax.cn/v1",
+                "MiniMax-M3.1-Flash",
+                524_288,
+                "max",
+            ),
+            (
+                "https://api.minimax.io/v1",
+                "MiniMax-M3.1-Flash",
+                524_288,
+                "max",
+            ),
+            (
+                "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1",
+                "deepseek-v4.1-flash-1017",
+                1_000_000,
+                "medium",
+            ),
             (
                 "https://api.minimax.cn/v1",
                 "MiniMax-M3.1-Flash-Preview",
@@ -425,8 +456,45 @@ mod tests {
     }
 
     #[test]
+    fn step_plan_capabilities_are_model_specific() {
+        for (model, context, modalities) in [
+            ("step-5-preview", 1_000_000, json!(["text", "image"])),
+            ("step-3.7-flash", 256_000, json!(["text", "image"])),
+            ("step-3.5-flash", 256_000, json!(["text"])),
+        ] {
+            let template =
+                template_for_model("https://api.stepfun.com/step_plan/v1/", model).unwrap();
+            let catalog = build_catalog(&template, model, model, context);
+            let entry = &catalog["models"][0];
+            assert_eq!(entry["context_window"], context);
+            assert_eq!(entry["input_modalities"], modalities);
+            assert_eq!(entry["default_reasoning_level"], "medium");
+            assert_eq!(entry["supports_search_tool"], false);
+            assert_eq!(entry["supports_parallel_tool_calls"], false);
+            assert_eq!(entry["apply_patch_tool_type"], "freeform");
+            assert_eq!(
+                entry["supported_reasoning_levels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|level| level["effort"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["low", "medium", "high"]
+            );
+            assert!(entry["base_instructions"].as_str().unwrap().len() > 1000);
+        }
+    }
+
+    #[test]
     fn undocumented_models_and_resellers_do_not_inherit_new_capabilities() {
         for (base_url, model) in [
+            ("https://api.stepfun.com/v1", "step-5-preview"),
+            ("https://api.stepfun.com/step_plan/v1", "step-future"),
+            ("https://reseller.example/step_plan/v1", "step-5-preview"),
+            (
+                "https://api.stepfun.com.evil.test/step_plan/v1",
+                "step-5-preview",
+            ),
             ("https://reseller.example/v1", "glm-5.3"),
             ("https://reseller.example/v1", "mimo-v2.6-pro"),
             ("https://api.z.ai/api/v1", "glm-5-turbo"),

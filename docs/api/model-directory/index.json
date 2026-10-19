@@ -25,7 +25,12 @@
       "baseUrl": "https://api.minimax.io/v1",
       "anthropicUrl": "https://api.minimax.io/anthropic",
       "modelId": "MiniMax-M3",
-      "modelIds": ["MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "MiniMax-M2.7"],
+      "modelIds": [
+        "MiniMax-M3.1-Flash",
+        "MiniMax-M3.1-Flash-Preview",
+        "MiniMax-M3",
+        "MiniMax-M2.7"
+      ],
       "region": "global"
     },
     {
@@ -34,7 +39,12 @@
       "baseUrl": "https://api.minimax.cn/v1",
       "anthropicUrl": "https://api.minimax.cn/anthropic",
       "modelId": "MiniMax-M3",
-      "modelIds": ["MiniMax-M3.1-Flash-Preview", "MiniMax-M3", "MiniMax-M2.7"],
+      "modelIds": [
+        "MiniMax-M3.1-Flash",
+        "MiniMax-M3.1-Flash-Preview",
+        "MiniMax-M3",
+        "MiniMax-M2.7"
+      ],
       "region": "cn"
     },
     {
@@ -218,6 +228,7 @@
         "auto",
         "qwen3.8-flash",
         "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash-1017",
         "glm-5.2",
         "deepseek-v4-pro-0813",
         "qwen3.6-plus",
@@ -248,6 +259,7 @@
         "glm-5.3",
         "glm-5.2",
         "deepseek-v4.1-flash",
+        "deepseek-v4.1-flash-1017",
         "deepseek-v4-pro",
         "deepseek-v4-pro-0813",
         "deepseek-v4-flash-0731",
@@ -317,17 +329,11 @@
     },
     {
       "name": "Stepfun 阶跃星辰",
-      "url": "https://www.stepfun.com",
-      "baseUrl": "https://api.stepfun.com/v1",
-      "anthropicUrl": "https://api.stepfun.com",
+      "url": "https://platform.stepfun.com/step-plan",
+      "baseUrl": "https://api.stepfun.com/step_plan/v1",
+      "anthropicUrl": "https://api.stepfun.com/step_plan",
       "modelId": "step-5-preview",
-      "modelIds": [
-        "step-5-preview",
-        "step-3.7-flash",
-        "step-3.5-flash-2603",
-        "step-3.5-flash",
-        "step-router-v1"
-      ],
+      "modelIds": ["step-5-preview", "step-3.7-flash", "step-3.5-flash"],
       "region": "cn"
     },
     {
