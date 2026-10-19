@@ -1278,7 +1278,7 @@ export function FreeModelsMain() {
       if (pausedIds.has(entry.id)) {
         nextPaths.push({
           id: `paused-through:${entry.id}`,
-          d: `M ${entry.x} ${entry.top - 3} V ${entry.bottom + 3}`,
+          d: `M ${entry.x} ${entry.bottom + 3} V ${entry.top - 3}`,
         });
       }
     });

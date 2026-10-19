@@ -92,7 +92,7 @@ export const LocalServerMain: React.FC = () => {
 
   // Runtime options: vLLM / SGLang only on Linux
   const isLinux = systemInfo ? systemInfo.os === 'linux' : navigator.platform.startsWith('Linux');
-  const isWindows = systemInfo?.os === 'windows';
+  const isWindows = systemInfo ? systemInfo.os === 'windows' : navigator.platform.startsWith('Win');
   // GPU-Full = full layer offload. NVIDIA → CUDA build; macOS llama.cpp is
   // Metal-enabled; other no-GPU hosts → AVX2 CPU build.
   const hasNvidiaGpu = systemInfo ? systemInfo.hasNvidiaGpu : false;

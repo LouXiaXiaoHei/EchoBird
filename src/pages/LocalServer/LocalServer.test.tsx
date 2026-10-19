@@ -120,6 +120,51 @@ describe('Local model page navigation', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['Win32', 'windows', true],
+    ['MacIntel', 'macos', false],
+    ['Linux x86_64', 'linux', false],
+  ] as const)(
+    'keeps the %s welcome controls in place while hardware detection is pending',
+    async (platform, os, windows) => {
+      vi.stubGlobal('navigator', { platform });
+      let resolve!: (info: api.SystemInfo) => void;
+      vi.mocked(api.getSystemInfo).mockReturnValue(
+        new Promise((done) => {
+          resolve = done;
+        })
+      );
+      await open(true);
+      const assertWelcome = () => {
+        const output = JSON.stringify(renderer.toJSON());
+        expect(output.includes('mother.hintDetectCuda')).toBe(windows);
+        expect(output.includes('mother.hintInstallCuda')).toBe(windows);
+        expect(output).toContain(windows ? 'server.tier.minSpec"' : 'server.tier.minSpecAuto"');
+      };
+      assertWelcome();
+      await act(async () => {
+        resolve({ os, arch: 'x86_64', hasNvidiaGpu: false, gpuName: null, gpuVramGb: null });
+      });
+      assertWelcome();
+      expect(api.getSystemInfo).toHaveBeenCalledOnce();
+      expect(api.installLocalEngine).not.toHaveBeenCalled();
+      expect(api.downloadModel).not.toHaveBeenCalled();
+      expect(api.startLlmServer).not.toHaveBeenCalled();
+      expect(confirm).not.toHaveBeenCalled();
+    }
+  );
+
+  it('keeps the Windows welcome controls when hardware detection fails', async () => {
+    vi.stubGlobal('navigator', { platform: 'Win32' });
+    vi.mocked(api.getSystemInfo).mockRejectedValue(new Error('Detection unavailable'));
+    await open(true);
+    const output = JSON.stringify(renderer.toJSON());
+    expect(output).toContain('mother.hintDetectCuda');
+    expect(output).toContain('mother.hintInstallCuda');
+    expect(confirm).not.toHaveBeenCalled();
+    expect(api.installLocalEngine).not.toHaveBeenCalled();
+  });
+
   it('keeps a manually selected llama.cpp runtime on Linux', async () => {
     await open(true);
     expect(context.runtime).toBe('vllm');
