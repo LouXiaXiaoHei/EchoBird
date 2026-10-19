@@ -62,6 +62,7 @@ vi.mock('../../api/tauri', () => ({
   getSmartRouterCandidates: vi.fn(),
   getSmartRouterActivity: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
+  setSmartRouterCandidateEnabled: vi.fn(),
   setSmartRouterCandidates: vi.fn(),
   removeSmartRouterCandidate: vi.fn(),
   getFreeModelDirectory: vi.fn(),
@@ -79,11 +80,13 @@ describe('Remove router candidates by dragging', () => {
   let savedModels: ModelConfig[];
   let savedOrder: string[];
   let enabled: boolean;
+  let paused: string[];
 
   function config() {
     return {
       enabled,
       candidateIds: [...savedOrder],
+      disabledCandidateIds: [...paused],
       usableCandidateCount: savedOrder.length,
       baseUrl: 'http://127.0.0.1:62185/v1',
       modelId: 'smart-router',
@@ -140,6 +143,7 @@ describe('Remove router candidates by dragging', () => {
 
   beforeEach(() => {
     enabled = false;
+    paused = [];
     savedModels = ['one', 'two', 'three'].map((name) => ({
       internalId: `model-${name}`,
       name: `Provider ${name}`,
@@ -180,6 +184,11 @@ describe('Remove router candidates by dragging', () => {
     });
     vi.mocked(api.setSmartRouterEnabled).mockImplementation(async (value) => {
       enabled = value;
+      return config();
+    });
+    vi.mocked(api.setSmartRouterCandidateEnabled).mockImplementation(async (id, value) => {
+      paused = paused.filter((candidate) => candidate !== id);
+      if (!value) paused.push(id);
       return config();
     });
   });
@@ -475,6 +484,62 @@ describe('Remove router candidates by dragging', () => {
       .filter((node) => node.props.className === 'free-model-route-path')
       .map((node) => node.props.d as string);
   }
+
+  it('omits a paused tail and the separate lines inside paused cards', async () => {
+    paused = ['geometry-4', 'geometry-5'];
+    await openGeometry(8);
+    expect(visiblePaths()).toHaveLength(10);
+    expect(visiblePaths()).toContain('M 400 317 V 287');
+    expect(visiblePaths()).toContain('M 400 433 V 403');
+    expect(visiblePaths()).not.toContain('M 600 317 V 287');
+    expect(visiblePaths()).not.toContain('M 400 403 V 317');
+    expect(api.setSmartRouterCandidateEnabled).not.toHaveBeenCalled();
+    expectNoRemoval();
+  });
+
+  it('removes an entirely paused column and its top branch', async () => {
+    paused = ['geometry-2', 'geometry-5'];
+    await openGeometry(8);
+    expect(visiblePaths().some((path) => path.startsWith('M 600 '))).toBe(false);
+    expect(visiblePaths().some((path) => path.startsWith('M 588 '))).toBe(false);
+    expect(visiblePaths()).toContain('M 400 433 V 403');
+    expectNoRemoval();
+  });
+
+  it('keeps a lone off-center enabled card connected to the hub', async () => {
+    paused = Array.from({ length: 7 }, (_, index) => `geometry-${index + 1}`);
+    await openGeometry(8);
+    expect(visiblePaths()).toEqual([
+      'M 400 172 V 158',
+      'M 200 201 V 184 A 12 12 0 0 1 212 172',
+      'M 212 172 H 400',
+    ]);
+    expectNoRemoval();
+  });
+
+  it.each([240, 420, 800])('draws no routes when all cards are paused at %dpx', async (width) => {
+    paused = Array.from({ length: 8 }, (_, index) => `geometry-${index}`);
+    await openGeometry(8, width);
+    expect(visiblePaths()).toEqual([]);
+    expect(renderer.root.findAllByProps({ className: 'free-model-route-arrow' })).toHaveLength(0);
+    expect(api.setSmartRouterCandidateEnabled).not.toHaveBeenCalled();
+    expectNoRemoval();
+  });
+
+  it('trims and restores the column when its last enabled card is toggled', async () => {
+    paused = ['geometry-4', 'geometry-5'];
+    const geometry = await openGeometry(8);
+    await act(async () => context.setCandidateEnabled('geometry-7', false));
+    await geometry.flushFrames();
+    expect(visiblePaths()).not.toContain('M 400 317 V 287');
+    expect(visiblePaths()).not.toContain('M 400 433 V 403');
+    await act(async () => context.setCandidateEnabled('geometry-7', true));
+    await geometry.flushFrames();
+    expect(visiblePaths()).toContain('M 400 317 V 287');
+    expect(visiblePaths()).toContain('M 400 433 V 403');
+    expect(context.pausedIds.has('geometry-4')).toBe(true);
+    expectNoRemoval();
+  });
 
   it('keeps the short activity beam 20px long and remeasures after resizing without account or model changes', async () => {
     enabled = true;

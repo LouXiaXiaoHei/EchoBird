@@ -1255,7 +1255,7 @@ export function FreeModelsMain() {
     const endX = hubBox.left - stageBox.left + hubBox.width / 2;
     const endY = hubBox.bottom - stageBox.top;
 
-    const entries = [...nodeRefs.current].map(([id, node]) => {
+    const allEntries = [...nodeRefs.current].map(([id, node]) => {
       const box = node.getBoundingClientRect();
       return {
         id,
@@ -1264,6 +1264,18 @@ export function FreeModelsMain() {
         bottom: box.bottom - stageBox.top,
       };
     });
+    const lastEnabledTopByColumn = new Map<number, number>();
+    for (const entry of allEntries) {
+      if (pausedIds.has(entry.id)) continue;
+      const column = Math.round(entry.x);
+      lastEnabledTopByColumn.set(
+        column,
+        Math.max(lastEnabledTopByColumn.get(column) ?? entry.top, entry.top)
+      );
+    }
+    const entries = allEntries.filter(
+      (entry) => entry.top <= (lastEnabledTopByColumn.get(Math.round(entry.x)) ?? -Infinity)
+    );
     entries.sort((left, right) => left.top - right.top || left.x - right.x);
 
     const rows: (typeof entries)[] = [];
@@ -1274,17 +1286,10 @@ export function FreeModelsMain() {
     }
 
     const nextPaths: RoutePath[] = [];
-    entries.forEach((entry) => {
-      if (pausedIds.has(entry.id)) {
-        nextPaths.push({
-          id: `paused-through:${entry.id}`,
-          d: `M ${entry.x} ${entry.bottom + 3} V ${entry.top - 3}`,
-        });
-      }
-    });
     const nextActivityPaths: RoutePath[] = [];
     const parentById = new Map<string, (typeof entries)[number]>();
     const firstRow = rows[0];
+    const directToHub = firstRow?.length === 1 && Math.abs(firstRow[0].x - endX) < 1;
     let nextArrow: RouteArrow | null = null;
     let routeBusY: number | null = null;
     let routeLineEndY: number | null = null;
@@ -1292,7 +1297,7 @@ export function FreeModelsMain() {
       const arrowY = endY + HUB_ARROW_GAP;
       const lineEndY = arrowY + HUB_ARROW_HEIGHT + HUB_ARROW_LINE_GAP;
       routeLineEndY = lineEndY;
-      if (firstRow.length === 1) {
+      if (directToHub) {
         const entry = firstRow[0];
         nextPaths.push({
           id: entry.id,
@@ -1350,6 +1355,7 @@ export function FreeModelsMain() {
 
     if (firstRow && routeLineEndY !== null) {
       entries.forEach((entry) => {
+        if (pausedIds.has(entry.id)) return;
         let current = entry;
         let d = `M ${entry.x} ${entry.top - 3}`;
         let parent = parentById.get(current.id);
@@ -1363,7 +1369,7 @@ export function FreeModelsMain() {
           current = parent;
           parent = parentById.get(current.id);
         }
-        if (firstRow.length === 1) {
+        if (directToHub) {
           d += ` V ${routeLineEndY}`;
         } else if (routeBusY !== null) {
           d += ` ${routeBranchToBus(current.x, current.top - 3, routeBusY, endX)} V ${routeLineEndY}`;

@@ -79,9 +79,13 @@
 }
 
 .free-model-route-node.is-paused {
-  opacity: 0.4;
+  background: rgb(var(--bg-surface-rgb));
   filter: grayscale(1);
   animation: none;
+}
+
+.free-model-route-node.is-paused > div {
+  opacity: 0.4;
 }
 
 .free-model-route-row.is-paused {
