@@ -2,6 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { getModelIcon } from './ModelCard';
 
 describe('getModelIcon', () => {
+  it('uses the new Agnes SVG for directory rows and model cards', () => {
+    expect(getModelIcon('Agnes AI', '')).toBe('./icons/models/agnes.svg');
+    expect(getModelIcon('Agnes AI', 'agnes-2.5-flash')).toBe('./icons/models/agnes.svg');
+  });
   it('maps Kilo provider rows and endpoints to the existing tool icon', () => {
     expect(getModelIcon('Kilo AI', '')).toBe('./icons/tools/kilo.png');
     expect(getModelIcon('', 'https://api.kilo.ai/api/gateway')).toBe('./icons/tools/kilo.png');
@@ -32,7 +36,7 @@ describe('getModelIcon', () => {
 
   it('maps free-router provider rows to their supplied icons', () => {
     expect(getModelIcon('Cerebras', '')).toBe('./icons/models/cerebras.svg');
-    expect(getModelIcon('ModelScope (API-Inference)', '')).toBe('./icons/models/modelscope.svg');
+    expect(getModelIcon('ModelScope', '')).toBe('./icons/models/modelscope.svg');
     expect(getModelIcon('Ollama Cloud', '')).toBe('./icons/models/ollama.svg');
     expect(getModelIcon('SambaNova Cloud', '')).toBe('./icons/models/sambanova.svg');
     expect(getModelIcon('Scaleway Generative APIs', '')).toBe('./icons/models/scaleway.svg');

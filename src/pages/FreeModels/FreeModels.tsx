@@ -1486,10 +1486,14 @@ export function FreeModelsMain() {
               className="relative flex items-center justify-center px-3 py-1 text-xs font-mono text-cyber-text-muted transition-colors hover:text-cyber-text disabled:opacity-50"
             >
               <span className={responseTests.isTesting ? 'invisible' : undefined}>
-                {t('btn.pingAll')}
+                [{t('btn.pingAll')}]
               </span>
               {responseTests.isTesting && (
-                <RefreshCw size={12} className="absolute inset-0 m-auto animate-spin" aria-hidden />
+                <RefreshCw
+                  size={12}
+                  className="absolute inset-y-0 right-3 my-auto animate-spin"
+                  aria-hidden
+                />
               )}
             </button>
           </div>
@@ -1689,7 +1693,8 @@ function FreeModelProviderRow({
       return group.baseUrl;
     }
   })();
-  const openDocs = () => shellOpen(group.docsUrl).catch(() => window.open(group.docsUrl, '_blank'));
+  const websiteUrl = group.models[0]?.websiteUrl || group.docsUrl;
+  const openDocs = () => shellOpen(websiteUrl).catch(() => window.open(websiteUrl, '_blank'));
 
   return (
     <div className="relative flex items-stretch rounded overflow-hidden bg-cyber-surface/60">
@@ -1836,7 +1841,7 @@ export function FreeModelsPanel() {
       setNewModelForm({
         name: group.name,
         baseUrl: group.baseUrl,
-        anthropicUrl: '',
+        anthropicUrl: group.models[0]?.anthropicUrl ?? '',
         apiKey: '',
         modelId: modelIds[0] ?? '',
         modelIdOptions: modelIds,

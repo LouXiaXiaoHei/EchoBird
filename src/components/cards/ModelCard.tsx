@@ -99,7 +99,6 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
   for (const [keywords, icon] of iconMap) {
     if (keywords.some((kw) => text.includes(kw))) {
       if (icon === 'kilo') return './icons/tools/kilo.png';
-      if (icon === 'agnes') return './icons/models/agnes.png';
       if (icon === 'ccvibe') return './icons/models/ccvibe.png';
       if (icon === '88api') return './icons/models/88api.png';
       if (icon === 'apimart') return './icons/models/apimart.png';

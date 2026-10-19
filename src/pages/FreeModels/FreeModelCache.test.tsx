@@ -5,13 +5,25 @@ import * as api from '../../api/tauri';
 import type { FreeModelDirectory } from '../../api/freeModels';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { FreeModelsPanel, FreeModelsProvider, useFreeModels } from './FreeModels';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import catalog from '../../../docs/api/free-models/index.json';
 
-const { showToast, confirm } = vi.hoisted(() => ({ showToast: vi.fn(), confirm: vi.fn() }));
+const { showToast, confirm, modelForm } = vi.hoisted(() => ({
+  showToast: vi.fn(),
+  confirm: vi.fn(),
+  modelForm: {
+    setNewModelForm: vi.fn(),
+    setEditingModelId: vi.fn(),
+    setModelModalDestination: vi.fn(),
+    setShowAddModelModal: vi.fn(),
+  },
+}));
+vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }));
 vi.mock('../../components', () => ({ getModelIcon: () => null }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
 vi.mock('../ModelNexus/context', () => ({
-  useModelNexus: () => ({ userModels: [], isLoadingModels: false }),
+  useModelNexus: () => ({ userModels: [], isLoadingModels: false, ...modelForm }),
 }));
 vi.mock('./AccountProxyPanel', () => ({
   AccountProxyPanel: () => null,
@@ -107,6 +119,7 @@ describe('Free model directory cache', () => {
   }
 
   beforeEach(() => {
+    vi.mocked(shellOpen).mockResolvedValue(undefined);
     vi.useFakeTimers();
     vi.stubGlobal('window', { setTimeout });
     vi.stubGlobal('localStorage', { getItem: vi.fn().mockReturnValue(null), setItem: vi.fn() });
@@ -155,6 +168,43 @@ describe('Free model directory cache', () => {
     expect(showToast).not.toHaveBeenCalled();
     expectNoRouterWrites();
   });
+
+  it.each(['agnes', 'modelscope'])(
+    'prefills both %s protocols and opens its website without changing routes',
+    async (providerId) => {
+      const entries = catalog.models.filter((entry) => entry.providerId === providerId);
+      vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue({
+        ...cached,
+        models: entries as FreeModelDirectory['models'],
+      });
+      await open();
+      const entry = entries[0];
+      const buttons = renderer.root.findAllByType('button');
+      const add = buttons.find(
+        (button) => button.props['aria-label'] === `freeModels.addToRouter: ${entry.provider}`
+      )!;
+      await act(async () => add.props.onClick());
+      expect(modelForm.setNewModelForm).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          name: entry.provider,
+          baseUrl: entry.baseUrl,
+          anthropicUrl: entry.anthropicUrl,
+          apiKey: '',
+          modelId: entry.modelId,
+          modelIdOptions: entries.map((model) => model.modelId),
+        })
+      );
+      expect(modelForm.setModelModalDestination).toHaveBeenCalledExactlyOnceWith('freeRouter');
+      expect(modelForm.setShowAddModelModal).toHaveBeenCalledExactlyOnceWith(true);
+      const website = buttons.find(
+        (button) => button.props['aria-label'] === `freeModels.docs: ${entry.provider}`
+      )!;
+      await act(async () => website.props.onClick());
+      expect(shellOpen).toHaveBeenCalledExactlyOnceWith(entry.websiteUrl);
+      expect(api.getFreeModelDirectory).not.toHaveBeenCalled();
+      expectNoRouterWrites();
+    }
+  );
 
   it('downloads only on the fetch action, keeps cached rows while connecting, and restores the new cache on reopening', async () => {
     const download = deferred<FreeModelDirectory>();

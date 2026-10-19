@@ -8,6 +8,8 @@ export interface FreeModelEntry {
   provider: string;
   modelId: string;
   baseUrl: string;
+  anthropicUrl?: string;
+  websiteUrl?: string;
   freeType: FreeModelType;
   freeTier: string;
   rateLimits: string;
