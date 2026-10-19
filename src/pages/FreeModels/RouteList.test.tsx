@@ -67,6 +67,7 @@ vi.mock('@dnd-kit/sortable', async (original) => ({
   }),
 }));
 vi.mock('../../api/models', () => ({
+  finishConnectionTestBatch: vi.fn(),
   getCachedUpstreamModelCatalog: vi.fn(),
   fetchUpstreamModelCatalog: vi.fn(),
 }));
@@ -236,6 +237,7 @@ describe('Smart Router list layout and candidate pause', () => {
       updatedAtMs: 0,
     });
     vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue(null);
+    vi.mocked(modelApi.finishConnectionTestBatch).mockResolvedValue(undefined);
     vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
       {
         source: { provider: 'codex', accountId: 'account-one' },

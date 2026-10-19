@@ -27,6 +27,7 @@ mod codex_keychain;
 #[path = "codex_proxy/mod.rs"]
 pub mod codex_runtime;
 pub mod codex_session_merge;
+pub(crate) mod connection_probe;
 pub mod copilot_accounts;
 pub mod cue_accounts;
 pub mod cursor_accounts;

@@ -44,8 +44,9 @@ pub(crate) async fn test_smart_router_candidate(
     internal_id: String,
     model_id: String,
     request_id: String,
+    batch_id: Option<String>,
 ) -> smart_router::ProbeResult {
-    smart_router::probe_candidate(&internal_id, &model_id, &request_id).await
+    smart_router::probe_candidate(&internal_id, &model_id, &request_id, batch_id.as_deref()).await
 }
 
 #[tauri::command]

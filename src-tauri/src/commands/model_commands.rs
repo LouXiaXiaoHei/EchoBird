@@ -114,8 +114,16 @@ pub async fn test_model(
 
 /// Ping model server
 #[tauri::command]
-pub async fn ping_model(internal_id: String) -> Result<PingResult, String> {
-    Ok(model_manager::ping_model(&internal_id).await)
+pub async fn ping_model(
+    internal_id: String,
+    batch_id: Option<String>,
+) -> Result<PingResult, String> {
+    Ok(model_manager::ping_model(&internal_id, batch_id.as_deref()).await)
+}
+
+#[tauri::command]
+pub fn finish_connection_test_batch(batch_id: String) {
+    crate::services::connection_probe::finish_batch(&batch_id);
 }
 
 /// Check if encrypted key is destroyed

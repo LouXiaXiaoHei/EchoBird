@@ -85,8 +85,12 @@ export async function reorderModels(orderedIds: string[]): Promise<boolean> {
   return invoke('reorder_models', { orderedIds });
 }
 
-export async function pingModel(internalId: string): Promise<PingResult> {
-  return invoke('ping_model', { internalId });
+export async function pingModel(internalId: string, batchId?: string): Promise<PingResult> {
+  return invoke('ping_model', { internalId, batchId });
+}
+
+export async function finishConnectionTestBatch(batchId: string): Promise<void> {
+  return invoke('finish_connection_test_batch', { batchId });
 }
 
 export async function isKeyDestroyed(internalId: string): Promise<boolean> {

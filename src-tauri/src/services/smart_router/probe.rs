@@ -5,7 +5,12 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1000);
+use crate::services::connection_probe;
+
+const PROBE_TIMEOUT: Duration = connection_probe::SAMPLE_TIMEOUT;
+const ROUND_TIMEOUT: Duration = PROBE_TIMEOUT
+    .saturating_mul(connection_probe::SAMPLE_COUNT as u32)
+    .saturating_add(Duration::from_secs(1));
 static PROBES: OnceLock<Mutex<HashMap<String, (CancellationToken, Instant)>>> = OnceLock::new();
 
 #[derive(Debug, Serialize)]
@@ -52,6 +57,7 @@ pub(crate) async fn probe_candidate(
     internal_id: &str,
     model_id: &str,
     request_id: &str,
+    batch_id: Option<&str>,
 ) -> ProbeResult {
     let cancel = cancellation(request_id);
     let _guard = ProbeGuard(request_id);
@@ -74,42 +80,28 @@ pub(crate) async fn probe_candidate(
         } else {
             model.base_url
         };
-        let Ok(client) = reqwest::Client::builder().build() else {
-            return ProbeResult::failure("request_failed");
-        };
-        run_probe(&client, &endpoint, &cancel, PROBE_TIMEOUT).await
+        run_probe(&endpoint, &cancel, ROUND_TIMEOUT, batch_id).await
     };
     tokio::select! {
         biased;
         _ = cancel.cancelled() => ProbeResult::failure("cancelled"),
-        result = tokio::time::timeout(PROBE_TIMEOUT, request) => result.unwrap_or_else(|_| ProbeResult::failure("timeout")),
+        result = tokio::time::timeout(ROUND_TIMEOUT, request) => result.unwrap_or_else(|_| ProbeResult::failure("timeout")),
     }
 }
 
-fn origin(endpoint: &str) -> Option<String> {
-    let url = url::Url::parse(endpoint).ok()?;
-    (matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
-        .then(|| url.origin().ascii_serialization())
-}
-
 async fn run_probe(
-    client: &reqwest::Client,
     endpoint: &str,
     cancel: &CancellationToken,
     timeout: Duration,
+    batch_id: Option<&str>,
 ) -> ProbeResult {
-    let Some(origin) = origin(endpoint) else {
-        return ProbeResult::failure("unavailable");
-    };
-    let started = Instant::now();
     tokio::select! {
         biased;
         _ = cancel.cancelled() => ProbeResult::failure("cancelled"),
-        response = client.head(origin).timeout(timeout).send() => match response {
-            // Any HTTP response proves reachability, matching Model Center's HEAD probe.
-            Ok(_) if started.elapsed() <= timeout => ProbeResult { latency_ms: Some(started.elapsed().as_millis() as u64), error: None },
-            Ok(_) => ProbeResult::failure("timeout"),
-            Err(error) => ProbeResult::failure(if error.is_timeout() { "timeout" } else { "request_failed" }),
+        result = tokio::time::timeout(timeout, connection_probe::measure(endpoint, batch_id)) => match result {
+            Ok(Ok(latency_ms)) => ProbeResult { latency_ms: Some(latency_ms), error: None },
+            Ok(Err(error)) => ProbeResult::failure(error),
+            Err(_) => ProbeResult::failure("timeout"),
         }
     }
 }
@@ -122,6 +114,7 @@ mod tests {
         routing::any,
         Router,
     };
+    use connection_probe::origin;
     use std::sync::Arc;
 
     #[test]
@@ -136,7 +129,8 @@ mod tests {
         );
         assert_eq!(origin("account://echobird"), None);
         assert_eq!(origin("invalid"), None);
-        assert_eq!(PROBE_TIMEOUT, Duration::from_millis(1000));
+        assert_eq!(PROBE_TIMEOUT, Duration::from_secs(3));
+        assert_eq!(ROUND_TIMEOUT, Duration::from_secs(16));
     }
 
     #[tokio::test]
@@ -157,30 +151,25 @@ mod tests {
             listener.local_addr().unwrap()
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
-        let result = run_probe(
-            &client,
-            &endpoint,
-            &CancellationToken::new(),
-            Duration::from_secs(1),
-        )
-        .await;
+        let result = run_probe(&endpoint, &CancellationToken::new(), ROUND_TIMEOUT, None).await;
         assert_eq!(result.error, None);
         assert!((25..1000).contains(&result.latency_ms.unwrap()));
         let token = CancellationToken::new();
         token.cancel();
         assert_eq!(
-            run_probe(&client, &endpoint, &token, PROBE_TIMEOUT)
+            run_probe(&endpoint, &token, PROBE_TIMEOUT, None)
                 .await
                 .error
                 .as_deref(),
             Some("cancelled")
         );
         let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, Method::HEAD);
-        assert_eq!(calls[0].1.path(), "/");
-        assert!(!calls[0].2.contains_key("authorization"));
+        assert_eq!(calls.len(), 5);
+        for call in calls.iter() {
+            assert_eq!(call.0, Method::HEAD);
+            assert_eq!(call.1.path(), "/");
+            assert!(!call.2.contains_key("authorization"));
+        }
         server.abort();
     }
 
@@ -193,24 +182,85 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::new();
         let result = run_probe(
-            &client,
             &endpoint,
             &CancellationToken::new(),
             Duration::from_millis(20),
+            None,
         )
         .await;
         assert_eq!(result.error.as_deref(), Some("timeout"));
         assert_eq!(result.latency_ms, None);
         let token = CancellationToken::new();
-        let request = run_probe(&client, &endpoint, &token, PROBE_TIMEOUT);
+        let request = run_probe(&endpoint, &token, PROBE_TIMEOUT, None);
         let cancel = async {
             tokio::time::sleep(Duration::from_millis(10)).await;
             token.cancel();
         };
         let (result, _) = tokio::join!(request, cancel);
         assert_eq!(result.error.as_deref(), Some("cancelled"));
+        assert_eq!(result.latency_ms, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_later_samples_stops_the_round_without_publishing_a_value() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let captured = calls.clone();
+        let pending = Arc::new(tokio::sync::Notify::new());
+        let captured_pending = pending.clone();
+        let app = Router::new().fallback(any(move || {
+            let index = captured.fetch_add(1, Ordering::SeqCst);
+            let pending = captured_pending.clone();
+            async move {
+                if index == 1 {
+                    pending.notify_one();
+                    std::future::pending::<()>().await;
+                }
+                StatusCode::OK
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let token = CancellationToken::new();
+        let batch = uuid::Uuid::new_v4().to_string();
+        let request = run_probe(&endpoint, &token, ROUND_TIMEOUT, Some(&batch));
+        let cancel = async {
+            tokio::time::timeout(Duration::from_secs(3), pending.notified())
+                .await
+                .unwrap();
+            token.cancel();
+        };
+        let (result, _) = tokio::join!(request, cancel);
+        assert_eq!(result.error.as_deref(), Some("cancelled"));
+        assert_eq!(result.latency_ms, None);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        connection_probe::finish_batch(&batch);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn all_five_slow_responses_finish_before_the_final_latency_timeout_is_reported() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let completed = Arc::new(AtomicUsize::new(0));
+        let captured = completed.clone();
+        let app = Router::new().fallback(any(move || {
+            let completed = captured.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(1300)).await;
+                completed.fetch_add(1, Ordering::SeqCst);
+                StatusCode::OK
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = run_probe(&endpoint, &CancellationToken::new(), ROUND_TIMEOUT, None).await;
+        assert_eq!(completed.load(Ordering::SeqCst), 5);
+        assert_eq!(result.error.as_deref(), Some("timeout"));
         assert_eq!(result.latency_ms, None);
         server.abort();
     }

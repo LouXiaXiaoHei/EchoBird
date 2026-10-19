@@ -28,9 +28,10 @@ export interface SmartRouterProbeResult {
 export async function testSmartRouterCandidate(
   internalId: string,
   modelId: string,
-  requestId: string
+  requestId: string,
+  batchId?: string
 ): Promise<SmartRouterProbeResult> {
-  return invoke('test_smart_router_candidate', { internalId, modelId, requestId });
+  return invoke('test_smart_router_candidate', { internalId, modelId, requestId, batchId });
 }
 
 export async function cancelSmartRouterProbe(requestId: string): Promise<void> {

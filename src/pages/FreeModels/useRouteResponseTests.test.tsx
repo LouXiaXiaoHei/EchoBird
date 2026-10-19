@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from '../../api/smartRouter';
 import type { RouteModelNode } from './provider';
 import { useRouteResponseTests } from './useRouteResponseTests';
+import { finishConnectionTestBatch } from '../../api/models';
+
+vi.mock('../../api/models', () => ({
+  finishConnectionTestBatch: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock('../../api/smartRouter', () => ({
   testSmartRouterCandidate: vi.fn(),
@@ -73,6 +78,7 @@ describe('explicit Smart Router response tests', () => {
       2,
       'account',
       'account-model',
+      expect.any(String),
       expect.any(String)
     );
     await reply(1, { latencyMs: null, error: 'HTTP 401' });
@@ -82,10 +88,16 @@ describe('explicit Smart Router response tests', () => {
     expect(hook.results.account.error).toBe('HTTP 401');
     expect(hook.results.keyless.error).toBe('timeout');
     expect(api.cancelSmartRouterProbe).not.toHaveBeenCalled();
+    const firstBatch = vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3];
+    expect(
+      new Set(vi.mocked(api.testSmartRouterCandidate).mock.calls.map((call) => call[3]))
+    ).toEqual(new Set([firstBatch]));
+    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(firstBatch);
     await act(async () => {
       void hook.test();
     });
     expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(5);
+    expect(vi.mocked(api.testSmartRouterCandidate).mock.calls[3][3]).not.toBe(firstBatch);
     expect(
       new Set(vi.mocked(api.testSmartRouterCandidate).mock.calls.map((call) => call[2])).size
     ).toBe(5);
@@ -100,11 +112,15 @@ describe('explicit Smart Router response tests', () => {
     active = false;
     await render();
     expect(vi.mocked(api.cancelSmartRouterProbe).mock.calls.map((call) => call[0])).toEqual(ids);
+    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(
+      vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3]
+    );
     await reply(0, { latencyMs: 100, error: null });
     await reply(1, { latencyMs: 200, error: null });
     expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(2);
     expect(hook.results).toEqual({});
     expect(hook.isTesting).toBe(false);
+    expect(finishConnectionTestBatch).toHaveBeenCalledTimes(1);
     active = true;
     await render();
     expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(2);
@@ -151,6 +167,37 @@ describe('explicit Smart Router response tests', () => {
     models = models.map((model) => (model.id === 'api' ? { ...model, modelId: 'other' } : model));
     await render();
     expect(hook.results.api).toBeUndefined();
+  });
+
+  it('does not let a cancelled round clean up a newer round or replace its results', async () => {
+    await render();
+    await act(async () => {
+      void hook.test();
+    });
+    const firstBatch = vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3];
+    active = false;
+    await render();
+    active = true;
+    await render();
+    await act(async () => {
+      void hook.test();
+    });
+    const secondBatch = vi.mocked(api.testSmartRouterCandidate).mock.calls[2][3];
+    expect(secondBatch).not.toBe(firstBatch);
+    await reply(0, { latencyMs: 1, error: null });
+    await reply(1, { latencyMs: 1, error: null });
+    expect(hook.results).toEqual({});
+    expect(hook.pendingIds.size).toBe(3);
+    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(firstBatch);
+    await reply(2, { latencyMs: 200, error: null });
+    await reply(3, { latencyMs: 300, error: null });
+    await reply(4, { latencyMs: 400, error: null });
+    expect(hook.results.api.latencyMs).toBe(200);
+    expect(hook.results.account.latencyMs).toBe(300);
+    expect(hook.results.keyless.latencyMs).toBe(400);
+    expect(finishConnectionTestBatch).toHaveBeenLastCalledWith(secondBatch);
+    expect(finishConnectionTestBatch).toHaveBeenCalledTimes(2);
+    expect(hook.isTesting).toBe(false);
   });
 
   it('reports IPC failures and cancels owned requests on unmount', async () => {

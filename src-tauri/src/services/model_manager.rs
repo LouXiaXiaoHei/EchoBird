@@ -1067,7 +1067,7 @@ pub async fn test_model(internal_id: &str, prompt: &str, protocol: &str) -> Test
 }
 
 /// Ping model server (HEAD request, test reachability only)
-pub async fn ping_model(internal_id: &str) -> PingResult {
+pub async fn ping_model(internal_id: &str, batch_id: Option<&str>) -> PingResult {
     let models = get_models();
     let model = match models.iter().find(|m| m.internal_id == internal_id) {
         Some(m) => m.clone(),
@@ -1097,8 +1097,7 @@ pub async fn ping_model(internal_id: &str) -> PingResult {
         }
     };
 
-    let client = build_client(&model);
-    let result = ping_endpoint(&client, url).await;
+    let result = ping_endpoint(url, batch_id).await;
     if result.success {
         let _ = update_model(
             internal_id,
@@ -1116,31 +1115,13 @@ pub async fn ping_model(internal_id: &str) -> PingResult {
     result
 }
 
-async fn ping_endpoint(client: &reqwest::Client, endpoint: &str) -> PingResult {
-    let base_url = url::Url::parse(endpoint)
-        .map(|parsed| parsed.origin().ascii_serialization())
-        .unwrap_or_else(|_| endpoint.to_string());
-    let start = Instant::now();
-    let response = client
-        .head(&base_url)
-        .timeout(std::time::Duration::from_millis(1000))
-        .send()
-        .await;
-    let latency = start.elapsed().as_millis() as f64;
-    let error = match response {
-        Ok(_) if latency <= 1000.0 => None,
-        Ok(_) => Some("timeout".into()),
-        Err(e) => Some(if e.is_timeout() {
-            "timeout".into()
-        } else {
-            e.to_string()
-        }),
-    };
+async fn ping_endpoint(endpoint: &str, batch_id: Option<&str>) -> PingResult {
+    let result = super::connection_probe::measure(endpoint, batch_id).await;
     PingResult {
-        success: error.is_none(),
-        latency: if error.is_none() { latency } else { -1.0 },
-        url: base_url,
-        error,
+        success: result.is_ok(),
+        latency: result.map(|latency| latency as f64).unwrap_or(-1.0),
+        url: super::connection_probe::origin(endpoint).unwrap_or_else(|| endpoint.to_owned()),
+        error: result.err().map(str::to_owned),
     }
 }
 
@@ -1189,28 +1170,30 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let result = ping_endpoint(&client, &format!("{origin}/v1?token=unused")).await;
+        let result = ping_endpoint(&format!("{origin}/v1?token=unused"), None).await;
         assert!(result.success);
         assert!(result.latency >= 25.0 && result.latency <= 1000.0);
         assert_eq!(result.url, origin);
         {
             let calls = calls.lock().unwrap();
-            assert_eq!(calls.len(), 1);
-            assert_eq!(calls[0].0, Method::HEAD);
-            assert_eq!(calls[0].1.to_string(), "/");
-            assert!(!calls[0].2.contains_key("authorization"));
+            assert_eq!(calls.len(), 5);
+            for call in calls.iter() {
+                assert_eq!(call.0, Method::HEAD);
+                assert_eq!(call.1.to_string(), "/");
+                assert!(!call.2.contains_key("authorization"));
+            }
         }
         server.abort();
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        // A listening socket with no HTTP responder must hit the one-second deadline.
+        // A listening socket with no HTTP responder must hit the sample deadline.
         let started = Instant::now();
-        let result = ping_endpoint(&client, &endpoint).await;
+        let result = ping_endpoint(&endpoint, None).await;
         assert!(!result.success);
         assert_eq!(result.error.as_deref(), Some("timeout"));
-        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(started.elapsed() >= super::super::connection_probe::SAMPLE_TIMEOUT);
+        assert!(started.elapsed() < Duration::from_secs(6));
         drop(listener);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1220,7 +1203,7 @@ mod tests {
             let (mut stream, _) = listener.accept().await.unwrap();
             stream.write_all(b"invalid HTTP\r\n\r\n").await.unwrap();
         });
-        let result = ping_endpoint(&client, &endpoint).await;
+        let result = ping_endpoint(&endpoint, None).await;
         assert!(!result.success);
         assert_ne!(result.error.as_deref(), Some("timeout"));
         assert!(result.error.is_some());

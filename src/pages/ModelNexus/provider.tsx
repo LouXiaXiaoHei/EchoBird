@@ -275,36 +275,41 @@ export function ModelNexusProvider({ children }: { children: React.ReactNode }) 
     if (isTesting) return;
     setIsTesting(true);
     const allModels = userModels;
+    const batchId = crypto.randomUUID();
     setPingingModelIds(new Set(allModels.map((m) => m.internalId)));
-    for (const model of allModels) {
-      try {
-        const result = await api.pingModel(model.internalId);
-        setPingingModelIds((prev) => {
-          const next = new Set(prev);
-          next.delete(model.internalId);
-          return next;
-        });
-        // Keep timeouts (-2) distinct from other tested failures (-1).
-        setModelLatencies((prev) => ({
-          ...prev,
-          [model.internalId]:
-            result?.error === 'timeout' || (result?.success && result.latency > 1000)
-              ? -2
-              : result?.success
-                ? result.latency
-                : -1,
-        }));
-      } catch {
-        setPingingModelIds((prev) => {
-          const next = new Set(prev);
-          next.delete(model.internalId);
-          return next;
-        });
-        setModelLatencies((prev) => ({ ...prev, [model.internalId]: -1 }));
+    try {
+      for (const model of allModels) {
+        try {
+          const result = await api.pingModel(model.internalId, batchId);
+          setPingingModelIds((prev) => {
+            const next = new Set(prev);
+            next.delete(model.internalId);
+            return next;
+          });
+          // Keep timeouts (-2) distinct from other tested failures (-1).
+          setModelLatencies((prev) => ({
+            ...prev,
+            [model.internalId]:
+              result?.error === 'timeout' || (result?.success && result.latency > 1000)
+                ? -2
+                : result?.success
+                  ? result.latency
+                  : -1,
+          }));
+        } catch {
+          setPingingModelIds((prev) => {
+            const next = new Set(prev);
+            next.delete(model.internalId);
+            return next;
+          });
+          setModelLatencies((prev) => ({ ...prev, [model.internalId]: -1 }));
+        }
       }
+    } finally {
+      void api.finishConnectionTestBatch(batchId).catch(() => undefined);
+      setPingingModelIds(new Set());
+      setIsTesting(false);
     }
-    setPingingModelIds(new Set());
-    setIsTesting(false);
   };
 
   // Refresh usage for all models

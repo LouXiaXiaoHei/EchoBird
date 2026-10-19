@@ -5,6 +5,7 @@ import {
   type SmartRouterProbeResult,
 } from '../../api/smartRouter';
 import type { RouteModelNode } from './provider';
+import { finishConnectionTestBatch } from '../../api/models';
 
 function binding(model: RouteModelNode) {
   return JSON.stringify([
@@ -24,6 +25,7 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
   const generation = useRef(0);
   const running = useRef(false);
   const requests = useRef(new Map<string, string>());
+  const batchId = useRef<string | null>(null);
   const bindings = new Map(models.map((model) => [model.id, binding(model)]));
   const bindingsKey = JSON.stringify([...bindings].sort(([a], [b]) => a.localeCompare(b)));
 
@@ -34,6 +36,10 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
       void cancelSmartRouterProbe(requestId).catch(() => undefined);
     }
     requests.current.clear();
+    if (batchId.current) {
+      void finishConnectionTestBatch(batchId.current).catch(() => undefined);
+      batchId.current = null;
+    }
     setPendingIds(new Set());
   }, []);
 
@@ -43,6 +49,8 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
     if (!active || running.current || models.length === 0) return;
     running.current = true;
     const attempt = ++generation.current;
+    const batch = crypto.randomUUID();
+    batchId.current = batch;
     const queue = models.map((model) => ({ model, binding: binding(model) }));
     let next = 0;
     setPendingIds(new Set(models.map((model) => model.id)));
@@ -54,7 +62,12 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
         requests.current.set(model.id, requestId);
         let result: SmartRouterProbeResult;
         try {
-          result = await testSmartRouterCandidate(model.internalId, model.modelId, requestId);
+          result = await testSmartRouterCandidate(
+            model.internalId,
+            model.modelId,
+            requestId,
+            batch
+          );
         } catch {
           result = { latencyMs: null, error: 'request_failed' };
         }
@@ -71,8 +84,15 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
         });
       }
     };
-    await Promise.all([worker(), worker()]);
-    if (generation.current === attempt) running.current = false;
+    try {
+      await Promise.all([worker(), worker()]);
+    } finally {
+      if (batchId.current === batch) {
+        batchId.current = null;
+        void finishConnectionTestBatch(batch).catch(() => undefined);
+      }
+      if (generation.current === attempt) running.current = false;
+    }
   };
 
   const results: Record<string, SmartRouterProbeResult> = {};

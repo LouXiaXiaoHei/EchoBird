@@ -13,6 +13,7 @@ vi.mock('../../components/LatencyIndicator', () => ({ LatencyIndicator: () => nu
 vi.mock('../../api/tauri', () => ({
   getModels: vi.fn(),
   pingModel: vi.fn(),
+  finishConnectionTestBatch: vi.fn().mockResolvedValue(undefined),
   testModel: vi.fn(),
   queryModelUsage: vi.fn(),
   updateModel: vi.fn(),
@@ -61,7 +62,46 @@ it.each([
     .find((span) => span.children.join('') === label);
   expect(value).toBeDefined();
   expect(value!.props.className).toContain(color);
-  expect(api.pingModel).toHaveBeenCalledExactlyOnceWith('fixture');
+  expect(api.pingModel).toHaveBeenCalledExactlyOnceWith('fixture', expect.any(String));
+  expect(api.finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(
+    vi.mocked(api.pingModel).mock.calls[0][1]
+  );
+  expect(api.testModel).not.toHaveBeenCalled();
+  expect(api.queryModelUsage).not.toHaveBeenCalled();
+  expect(api.updateModel).not.toHaveBeenCalled();
+});
+
+it('uses one round for all rows and starts a fresh round on the next click', async () => {
+  vi.mocked(api.getModels).mockResolvedValue([
+    { internalId: 'fixture', name: 'Fixture', baseUrl: 'https://fixture.test/v1', apiKey: '' },
+    { internalId: 'second', name: 'Second', baseUrl: 'https://fixture.test/anthropic', apiKey: '' },
+  ]);
+  vi.mocked(api.pingModel).mockResolvedValue({
+    url: 'https://fixture.test',
+    success: true,
+    latency: 220,
+  });
+  await act(async () => {
+    renderer = create(
+      <ModelNexusProvider>
+        <Harness />
+      </ModelNexusProvider>
+    );
+  });
+  expect(api.pingModel).not.toHaveBeenCalled();
+  expect(api.finishConnectionTestBatch).not.toHaveBeenCalled();
+  await act(async () => context.pingAllModels());
+  const batch = vi.mocked(api.pingModel).mock.calls[0][1];
+  expect(batch).toEqual(expect.any(String));
+  expect(api.pingModel).toHaveBeenNthCalledWith(2, 'second', batch);
+  expect(api.finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(batch);
+  expect(context.modelLatencies).toEqual({ fixture: 220, second: 220 });
+  expect(context.pingingModelIds.size).toBe(0);
+  expect(context.isTesting).toBe(false);
+  await act(async () => context.pingAllModels());
+  expect(api.pingModel).toHaveBeenCalledTimes(4);
+  expect(vi.mocked(api.pingModel).mock.calls[2][1]).not.toBe(batch);
+  expect(api.finishConnectionTestBatch).toHaveBeenCalledTimes(2);
   expect(api.testModel).not.toHaveBeenCalled();
   expect(api.queryModelUsage).not.toHaveBeenCalled();
   expect(api.updateModel).not.toHaveBeenCalled();
