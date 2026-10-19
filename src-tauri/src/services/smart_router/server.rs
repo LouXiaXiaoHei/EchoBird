@@ -41,6 +41,8 @@ const MAX_ROUTE_ATTEMPTS: usize = 20;
 const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(45);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(120);
+const UPSTREAM_FIRST_CONTENT_TIMEOUT: Duration = Duration::from_secs(30);
+const UPSTREAM_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_TRANSIENT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
@@ -306,6 +308,8 @@ struct RoutePolicy {
     time_budget: Duration,
     header_timeout: Duration,
     first_byte_timeout: Duration,
+    first_content_timeout: Duration,
+    stream_idle_timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -322,6 +326,8 @@ impl Default for RoutePolicy {
             time_budget: FALLBACK_TIME_BUDGET,
             header_timeout: UPSTREAM_HEADER_TIMEOUT,
             first_byte_timeout: UPSTREAM_FIRST_BYTE_TIMEOUT,
+            first_content_timeout: UPSTREAM_FIRST_CONTENT_TIMEOUT,
+            stream_idle_timeout: UPSTREAM_STREAM_IDLE_TIMEOUT,
         }
     }
 }
@@ -1158,8 +1164,13 @@ async fn route_with_policy(
         }
         upstream_body["model"] = Value::String(candidate.model_id.clone());
         let activity_guard = RouteActivityGuard::begin(&candidate.internal_id);
+        let first_content_deadline = tokio::time::Instant::now() + policy.first_content_timeout;
         let sent = tokio::time::timeout(
-            header_timeout,
+            if stream_requested {
+                header_timeout.min(policy.first_content_timeout)
+            } else {
+                header_timeout
+            },
             send_candidate(
                 state,
                 inbound_headers,
@@ -1363,7 +1374,9 @@ async fn route_with_policy(
                 });
                 break;
             };
-            let first = match tokio::time::timeout(first_byte_timeout, async {
+            let first_byte_deadline =
+                first_content_deadline.min(tokio::time::Instant::now() + first_byte_timeout);
+            let first = match tokio::time::timeout_at(first_byte_deadline, async {
                 while let Some(chunk) = upstream_stream.next().await {
                     let chunk = chunk?;
                     if !chunk.is_empty() {
@@ -1374,15 +1387,22 @@ async fn route_with_policy(
             })
             .await
             {
-                Ok(Ok(chunk)) => {
+                Ok(Ok(chunk)) => tokio::time::timeout_at(
+                    first_content_deadline,
                     preflight_stream(
                         chunk,
                         &mut upstream_stream,
                         &mut completion,
                         bound_continuation && native_responses,
-                    )
-                    .await
-                }
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(axum::Error::new(stream_timeout_error(
+                        "first_content_timeout",
+                        "Upstream timed out before any output",
+                    )))
+                }),
                 Ok(Err(error)) => Err(error),
                 Err(_) => {
                     mark_failure(state, &candidate, FailureClass::Transient, None);
@@ -1397,27 +1417,52 @@ async fn route_with_policy(
             };
             match first {
                 Ok(buffered) => {
+                    completion
+                        .last_progress
+                        .get_or_insert_with(tokio::time::Instant::now);
                     let stream_state = state.clone();
                     let stream_candidate = candidate.clone();
                     let body_stream = stream::unfold(
-                        (buffered, upstream_stream, completion, false, activity_guard),
-                        move |(mut buffered, mut upstream, mut completion, finished, guard)| {
+                        Some((buffered, upstream_stream, completion, activity_guard)),
+                        move |state| {
                             let stream_state = stream_state.clone();
                             let stream_candidate = stream_candidate.clone();
                             async move {
-                                if finished {
-                                    return None;
-                                }
+                                let (mut buffered, mut upstream, mut completion, guard) = state?;
                                 let (item, observed) = if let Some(bytes) = buffered.pop_front() {
                                     (Some(Ok(bytes)), true)
                                 } else {
-                                    (upstream.next().await, false)
+                                    let deadline = completion.last_progress.unwrap()
+                                        + policy.stream_idle_timeout;
+                                    let item = tokio::time::timeout_at(deadline, upstream.next())
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            Some(Err(axum::Error::new(stream_timeout_error(
+                                                "stream_idle_timeout",
+                                                "Upstream stream timed out waiting for output",
+                                            ))))
+                                        });
+                                    (item, false)
                                 };
                                 let (result, finished) = match item {
                                     Some(Ok(bytes)) => match if observed {
                                         Ok(())
                                     } else {
-                                        completion.push(&bytes)
+                                        completion.push(&bytes).and_then(|()| {
+                                            if !completion.done && completion.last_progress
+                                                .is_some_and(|last| last.elapsed() >= policy.stream_idle_timeout)
+                                            {
+                                                Err(std::io::Error::new(
+                                                    std::io::ErrorKind::TimedOut,
+                                                    stream_timeout_error(
+                                                        "stream_idle_timeout",
+                                                        "Upstream stream timed out waiting for output",
+                                                    ),
+                                                ))
+                                            } else {
+                                                Ok(())
+                                            }
+                                        })
                                     } {
                                         Ok(()) => {
                                             if completion.done && buffered.is_empty() {
@@ -1492,7 +1537,22 @@ async fn route_with_policy(
                                         }
                                     },
                                 };
-                                Some((result, (buffered, upstream, completion, finished, guard)))
+                                let result =
+                                    result.or_else(|error| {
+                                        match proxy_error_from_chain(&error).filter(|error| {
+                                            error.error_code.as_deref()
+                                                == Some("stream_idle_timeout")
+                                        }) {
+                                            Some(error) => {
+                                                Ok(stream_timeout_event(protocol, error))
+                                            }
+                                            None => Err(error),
+                                        }
+                                    });
+                                Some((
+                                    result,
+                                    (!finished).then_some((buffered, upstream, completion, guard)),
+                                ))
                             }
                         },
                     );
@@ -1827,6 +1887,13 @@ impl AnthropicSseAdapter {
         }
         let chunk: Value = serde_json::from_str(data)
             .map_err(|error| format!("Invalid Smart Router stream: {error}"))?;
+        if chunk["error"]["code"] == "stream_idle_timeout" {
+            self.finished = true;
+            return Ok(vec![anthropic_sse_event(
+                "error",
+                json!({"type":"error","error":chunk["error"]}),
+            )]);
+        }
         if event == "error"
             || chunk.get("error").is_some_and(|error| !error.is_null())
             || chunk["type"] == "error"
@@ -2285,6 +2352,7 @@ struct StreamCompletion {
     response_id: Option<String>,
     failure: Option<crate::services::account_proxy::ProxyError>,
     meaningful: bool,
+    last_progress: Option<tokio::time::Instant>,
     accounted: bool,
     legitimate_empty: bool,
     finish_reason: bool,
@@ -2323,7 +2391,7 @@ impl StreamCompletion {
             }
             if self.protocol == RouteProtocol::Responses {
                 let kind = value["type"].as_str().unwrap_or(&event);
-                self.meaningful |= matches!(
+                let meaningful = matches!(
                     kind,
                     "response.output_text.delta"
                         | "response.reasoning_summary_text.delta"
@@ -2333,9 +2401,16 @@ impl StreamCompletion {
                         | "response.output_audio.delta"
                         | "response.audio_transcript.delta"
                         | "response.output_audio_transcript.delta"
+                        | "response.function_call_arguments.delta"
+                        | "response.custom_tool_call_input.delta"
                 ) && nonempty_text(&value["delta"]);
-                self.meaningful |= output_item_has_content(&value["item"])
+                let meaningful = meaningful
+                    || output_item_has_content(&value["item"])
                     || content_part_has_content(&value["part"]);
+                if meaningful {
+                    self.meaningful = true;
+                    self.last_progress = Some(tokio::time::Instant::now());
+                }
                 self.accounted |= positive_token_usage(&value["response"]["usage"]);
                 if matches!(kind, "response.completed" | "response.incomplete") {
                     if !value["response"]["error"].is_null() {
@@ -2370,7 +2445,10 @@ impl StreamCompletion {
             self.accounted |= positive_token_usage(&value["usage"]);
             if let Some(choices) = value["choices"].as_array() {
                 for choice in choices {
-                    self.meaningful |= chat_message_has_content(&choice["delta"]);
+                    if chat_message_has_content(&choice["delta"]) {
+                        self.meaningful = true;
+                        self.last_progress = Some(tokio::time::Instant::now());
+                    }
                     self.legitimate_empty |= matches!(
                         choice["finish_reason"].as_str(),
                         Some("length" | "content_filter")
@@ -2593,6 +2671,30 @@ fn legitimate_empty_response(response: &Value) -> bool {
             response["incomplete_details"]["reason"].as_str(),
             Some("max_output_tokens" | "content_filter")
         )
+}
+
+fn stream_timeout_error(code: &str, message: &str) -> crate::services::account_proxy::ProxyError {
+    let mut error =
+        crate::services::account_proxy::ProxyError::new(StatusCode::GATEWAY_TIMEOUT, message);
+    error.error_code = Some(code.into());
+    error.error_type = Some("timeout_error".into());
+    error
+}
+
+fn stream_timeout_event(
+    protocol: RouteProtocol,
+    error: &crate::services::account_proxy::ProxyError,
+) -> Bytes {
+    if protocol == RouteProtocol::Responses {
+        return Bytes::from(format!(
+            "event: error\ndata: {}\n\n",
+            json!({"type":"error","code":error.error_code,"message":error.message,"param":null})
+        ));
+    }
+    Bytes::from(format!(
+        "data: {}\n\n",
+        json!({"error":{"type":error.error_type,"code":error.error_code,"message":error.message}})
+    ))
 }
 
 fn empty_response_error() -> crate::services::account_proxy::ProxyError {
@@ -4200,6 +4302,7 @@ mod tests {
                 time_budget: Duration::from_millis(30),
                 header_timeout: Duration::from_secs(1),
                 first_byte_timeout: Duration::from_secs(1),
+                ..RoutePolicy::default()
             },
         )
         .await;
@@ -4235,6 +4338,7 @@ mod tests {
                     time_budget: Duration::from_millis(30),
                     header_timeout: Duration::from_secs(1),
                     first_byte_timeout: Duration::from_secs(1),
+                    ..RoutePolicy::default()
                 },
             ),
         )

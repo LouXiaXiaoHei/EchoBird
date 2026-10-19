@@ -3,6 +3,296 @@ use std::net::SocketAddr;
 
 use super::*;
 
+fn timeout_stream_frame(protocol: RouteProtocol, kind: &str) -> String {
+    if protocol == RouteProtocol::Chat {
+        let delta = match kind {
+            "metadata" => json!({"role":"assistant"}),
+            "reasoning" => json!({"reasoning_content":"thinking"}),
+            "tool" => json!({"tool_calls":[{"index":0,"function":{"arguments":"x"}}]}),
+            _ => json!({"content":"output"}),
+        };
+        return format!("data: {}\n\n", json!({"choices":[{"delta":delta}]}));
+    }
+    let value = match kind {
+        "metadata" => {
+            json!({"type":"response.created","response":{"id":"resp_pending","status":"in_progress"}})
+        }
+        "reasoning" => json!({"type":"response.reasoning_text.delta","delta":"thinking"}),
+        "tool" => json!({"type":"response.function_call_arguments.delta","delta":"x"}),
+        _ => json!({"type":"response.output_text.delta","delta":"output"}),
+    };
+    format!(
+        "event: {}\ndata: {value}\n\n",
+        value["type"].as_str().unwrap()
+    )
+}
+
+fn timeout_terminal(protocol: RouteProtocol) -> &'static str {
+    if protocol == RouteProtocol::Chat {
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"
+    } else {
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_finished\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
+    }
+}
+
+fn timeout_state(first: Body, protocol: RouteProtocol) -> AppState {
+    let mut first = Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(first)
+        .unwrap();
+    if protocol == RouteProtocol::Responses {
+        first.extensions_mut().insert(NativeResponses);
+    }
+    let backup = Body::from(format!(
+        "{}{}",
+        timeout_stream_frame(protocol, "text"),
+        timeout_terminal(protocol)
+    ));
+    audit_fixtures(first, Response::new(backup))
+}
+
+#[tokio::test]
+async fn stream_timeout_first_content_falls_back_despite_metadata_and_heartbeats() {
+    for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(8);
+        tx.send(Ok(Bytes::from(timeout_stream_frame(protocol, "metadata"))))
+            .await
+            .unwrap();
+        let sender = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                if sender
+                    .send(Ok(Bytes::from_static(b": heartbeat\n\n")))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let state = timeout_state(Body::from_stream(ReceiverStream::new(rx)), protocol);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            route_with_policy(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[],"input":"hello","stream":true}),
+                vec![audit_candidate("first"), audit_candidate("second")],
+                RoutePolicy {
+                    first_content_timeout: Duration::from_millis(80),
+                    ..RoutePolicy::default()
+                },
+                protocol,
+            ),
+        )
+        .await
+        .expect("metadata must not keep preflight waiting forever");
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "second/second-model"
+        );
+        let output = response.into_body().collect().await.unwrap().to_bytes();
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("output"));
+        assert!(!output.contains("resp_pending"));
+        assert!(!output.contains("heartbeat"));
+        assert_eq!(
+            state.route_memory.lock().unwrap().candidates["first"].failure,
+            Some(FailureClass::Transient)
+        );
+        tokio::time::timeout(Duration::from_secs(1), tx.closed())
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stream_timeout_after_output_closes_upstream_without_replay_or_binding() {
+    for (protocol, anthropic) in [
+        (RouteProtocol::Chat, false),
+        (RouteProtocol::Responses, false),
+        (RouteProtocol::Chat, true),
+    ] {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(8);
+        tx.send(Ok(Bytes::from(timeout_stream_frame(protocol, "text"))))
+            .await
+            .unwrap();
+        let sender = tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+                if sender
+                    .send(Ok(Bytes::from_static(b": heartbeat\n\n")))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let state = timeout_state(Body::from_stream(ReceiverStream::new(rx)), protocol);
+        let response = route_with_policy(
+            &state,
+            &HeaderMap::new(),
+            json!({"messages":[],"input":"hello","stream":true}),
+            vec![audit_candidate("first"), audit_candidate("second")],
+            RoutePolicy {
+                stream_idle_timeout: Duration::from_millis(80),
+                ..RoutePolicy::default()
+            },
+            protocol,
+        )
+        .await;
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "first/first-model"
+        );
+        let response = if anthropic {
+            openai_stream_to_anthropic(response)
+        } else {
+            response
+        };
+        let output = tokio::time::timeout(Duration::from_secs(1), response.into_body().collect())
+            .await
+            .expect("a stalled reply must finish waiting")
+            .unwrap()
+            .to_bytes();
+        let wire = String::from_utf8_lossy(&output);
+        assert!(wire.contains("output"));
+        assert!(!wire.contains("[DONE]"));
+        assert!(!wire.contains("response.completed"));
+        assert!(!wire.contains("message_stop"));
+        let errors = crate::services::account_proxy::SseParser::default()
+            .push(&output)
+            .into_iter()
+            .filter_map(|(_, data)| {
+                let value: Value = serde_json::from_str(&data).unwrap();
+                (value["code"] == "stream_idle_timeout"
+                    || value["error"]["code"] == "stream_idle_timeout")
+                    .then_some(value)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("timed out"));
+        tokio::time::timeout(Duration::from_secs(1), tx.closed())
+            .await
+            .unwrap();
+        let memory = state.route_memory.lock().unwrap();
+        assert_eq!(
+            memory.candidates["first"].failure,
+            Some(FailureClass::Transient)
+        );
+        assert!(memory.response_bindings.is_empty());
+        assert!(state
+            .fixture_responses
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .contains_key("second"));
+    }
+}
+
+#[tokio::test]
+async fn stream_timeout_bound_continuation_never_switches_models() {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
+    tx.send(Ok(Bytes::from(timeout_stream_frame(
+        RouteProtocol::Responses,
+        "metadata",
+    ))))
+    .await
+    .unwrap();
+    let state = timeout_state(
+        Body::from_stream(ReceiverStream::new(rx)),
+        RouteProtocol::Responses,
+    );
+    let first = audit_candidate("first");
+    remember_response(&state, &first, Some("resp_previous"));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        route_with_policy(
+            &state,
+            &HeaderMap::new(),
+            json!({"input":"continue","previous_response_id":"resp_previous","stream":true}),
+            vec![first, audit_candidate("second")],
+            RoutePolicy {
+                first_content_timeout: Duration::from_millis(50),
+                ..RoutePolicy::default()
+            },
+            RouteProtocol::Responses,
+        ),
+    )
+    .await
+    .expect("a bound stream must finish waiting");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    let output = response.into_body().collect().await.unwrap().to_bytes();
+    let error: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(error["error"]["code"], "first_content_timeout");
+    assert!(state
+        .fixture_responses
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .contains_key("second"));
+    tokio::time::timeout(Duration::from_secs(1), tx.closed())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn stream_timeout_progress_preserves_long_text_reasoning_and_tool_streams() {
+    for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+        for kind in ["text", "reasoning", "tool"] {
+            let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(8);
+            tx.send(Ok(Bytes::from(timeout_stream_frame(protocol, kind))))
+                .await
+                .unwrap();
+            tokio::spawn(async move {
+                for _ in 0..8 {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    tx.send(Ok(Bytes::from(timeout_stream_frame(protocol, kind))))
+                        .await
+                        .unwrap();
+                }
+                tx.send(Ok(Bytes::from_static(
+                    timeout_terminal(protocol).as_bytes(),
+                )))
+                .await
+                .unwrap();
+            });
+            let state = timeout_state(Body::from_stream(ReceiverStream::new(rx)), protocol);
+            let response = route_with_policy(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[],"input":"hello","stream":true}),
+                vec![audit_candidate("first"), audit_candidate("second")],
+                RoutePolicy {
+                    first_content_timeout: Duration::from_millis(150),
+                    stream_idle_timeout: Duration::from_millis(150),
+                    ..RoutePolicy::default()
+                },
+                protocol,
+            )
+            .await;
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "first/first-model"
+            );
+            response.into_body().collect().await.unwrap();
+            assert!(state.route_memory.lock().unwrap().candidates.is_empty());
+            assert!(state
+                .fixture_responses
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .contains_key("second"));
+        }
+    }
+}
+
 #[tokio::test]
 async fn no_enabled_candidates_fail_without_contacting_an_upstream_for_all_protocols() {
     let state = AppState::for_tests().unwrap();

@@ -1585,6 +1585,7 @@ async fn responses_budget_covers_native_error_and_chat_body_collection_together(
                     time_budget: budget,
                     header_timeout: Duration::from_secs(4),
                     first_byte_timeout: Duration::from_secs(4),
+                    ..RoutePolicy::default()
                 },
                 RouteProtocol::Responses,
             ),
