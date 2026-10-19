@@ -1,12 +1,14 @@
 // ModelCard component
 
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import { RefreshCw } from 'lucide-react';
 import { useConfirm } from '../ConfirmDialog';
 import { useI18n } from '../../hooks/useI18n';
 import type { ModelUsageData } from '../../api/tauri';
 import type { TKey } from '../../i18n/types';
 import { useUsageClock } from '../../hooks/useUsageClock';
+import { LatencyIndicator } from '../LatencyIndicator';
+import { modelLatencyColor } from '../../utils/modelLatency';
 import { formatQuotaPercent, quotaPercent, quotaPeriodKeys } from '../../utils/modelUsage';
 import { quotaColorClasses, quotaTone } from '../../utils/quotaColors';
 
@@ -137,11 +139,11 @@ export interface ModelCardProps {
   baseUrl?: string; // API endpoint (OpenAI)
   anthropicUrl?: string; // API endpoint (Anthropic)
   modelId?: string; // model ID (provider-defined)
-  latency?: number; // latency in ms, undefined = untested
+  latency?: number; // ms; undefined = untested, -1 = failed, -2 = timed out
   protocols?: ('openai' | 'anthropic')[]; // supported API protocols
   openaiTested?: boolean; // OpenAI protocol tested
   anthropicTested?: boolean; // Anthropic protocol tested
-  isPinging?: boolean; // currently pinging (shows decode animation)
+  isPinging?: boolean; // currently pinging
   viewMode?: 'config' | 'usage'; // display mode
   usageData?: ModelUsageData; // usage quota data
   onEdit?: () => void; // edit callback
@@ -155,10 +157,6 @@ export interface ModelCardProps {
    *  Model Center's sortable grid. */
   dragHandlePad?: boolean;
 }
-
-// Matrix decode animation — characters scramble then lock in sequence
-const MATRIX_CHARS = 'ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789';
-const TARGET_TEXT = 'ECHOBIRD';
 
 // Format countdown time (ms to human readable) - i18n aware
 const formatCountdown = (ms: number, t: (key: TKey) => string): string => {
@@ -177,82 +175,6 @@ const formatCountdown = (ms: number, t: (key: TKey) => string): string => {
   } else {
     return t('model.countdown.minutes').replace('{m}', String(minutes));
   }
-};
-
-// Generate random character
-const randomChar = () => MATRIX_CHARS[Math.floor(Math.random() * MATRIX_CHARS.length)];
-
-export const MatrixDecode = ({ duration = 2000 }: { duration?: number }) => {
-  // Initialize with random chars immediately
-  const [chars, setChars] = useState<string[]>(() =>
-    Array(TARGET_TEXT.length)
-      .fill(0)
-      .map(() => randomChar())
-  );
-  const [locked, setLocked] = useState<boolean[]>(Array(TARGET_TEXT.length).fill(false));
-
-  useEffect(() => {
-    // Calculate lock interval for each character
-    const totalSteps = TARGET_TEXT.length;
-    // Reserve 20% of time for final state, allocate remaining 80% for sequential locking
-    const stepInterval = (duration * 0.8) / totalSteps;
-    // Character scramble speed (min 30ms to stay visible)
-    const tickRate = Math.max(30, stepInterval / 2);
-
-    // Random character rolling
-    const interval = setInterval(() => {
-      setChars((prev) => prev.map((_, i) => (locked[i] ? TARGET_TEXT[i] : randomChar())));
-    }, tickRate);
-
-    // Lock characters one by one
-    const lockTimers = TARGET_TEXT.split('').map(
-      (_, i) =>
-        setTimeout(
-          () => {
-            setLocked((prev) => {
-              const next = [...prev];
-              next[i] = true;
-              return next;
-            });
-            setChars((prev) => {
-              const next = [...prev];
-              next[i] = TARGET_TEXT[i];
-              return next;
-            });
-          },
-          duration * 0.2 + i * stepInterval
-        ) // Initial delay 20%
-    );
-
-    return () => {
-      clearInterval(interval);
-      lockTimers.forEach((t) => clearTimeout(t));
-    };
-    // Animation is keyed on `duration`; it reads `locked` for the current
-    // frame but must not restart when `locked` changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [duration]);
-
-  return (
-    <span className="font-mono inline-flex gap-[2px] text-xs">
-      {chars.map((char, i) => (
-        <span
-          key={i}
-          className={`inline-block transition-all ${
-            locked[i] ? 'text-cyber-text' : 'text-green-500 opacity-80'
-          }`}
-          style={{
-            transitionDuration: `${Math.max(50, duration / 20)}ms`,
-            textShadow: locked[i]
-              ? '0 0 8px rgba(0, 255, 136, 0.8)'
-              : '0 0 4px rgba(0, 255, 0, 0.5)',
-          }}
-        >
-          {char}
-        </span>
-      ))}
-    </span>
-  );
 };
 
 // ModelCard component
@@ -485,21 +407,13 @@ export const ModelCard = React.memo(
             <div className="flex items-center gap-1">
               <span className="text-cyber-text/60">{t('model.latency')}:</span>
               {isPinging ? (
-                <MatrixDecode />
+                <LatencyIndicator />
+              ) : latency === -2 ? (
+                <span className="text-red-500 font-bold">{t('model.timedOut')}</span>
               ) : latency === -1 ? (
                 <span className="text-red-500 font-bold">Error</span>
               ) : latency !== undefined ? (
-                <span
-                  className={
-                    latency < 200
-                      ? 'text-green-500'
-                      : latency < 500
-                        ? 'text-yellow-500'
-                        : 'text-red-500'
-                  }
-                >
-                  {latency}ms
-                </span>
+                <span className={modelLatencyColor(latency)}>{latency}ms</span>
               ) : (
                 <span className="text-cyber-text-muted/70 text-xs">{t('model.notTested')}</span>
               )}

@@ -67,6 +67,7 @@ import type { AccountSource } from '../../api/types';
 import type { FreeModelEntry } from '../../api/freeModels';
 import { getModelIcon } from '../../components';
 import { ModelListCard } from '../../components/ModelListCard';
+import { LatencyIndicator } from '../../components/LatencyIndicator';
 import { RoutingToggle } from '../../components/RoutingToggle';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
@@ -79,12 +80,14 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
 import { copyText } from '../../utils/copyText';
+import { modelLatencyColor } from '../../utils/modelLatency';
 import { useModelNexus } from '../ModelNexus/context';
 import { accountProxyIdentityLabel, accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
 import { accountProxyStatus } from '../AppManager/accountProxyStatus';
 import { AppManagerContext } from '../AppManager/context';
 import './FreeModels.css';
 import { type RouteModelNode, providerRank, useFreeModels } from './provider';
+import { useRouteResponseTests } from './useRouteResponseTests';
 export { FreeModelsProvider, useFreeModels } from './provider';
 
 const NODE_COLUMN_GAP = 24;
@@ -363,6 +366,8 @@ interface RouteModelCardProps {
   paused?: boolean;
   pending?: boolean;
   statusLabel?: string;
+  testing?: boolean;
+  testResult?: api.SmartRouterProbeResult;
   authorizationFailed?: boolean;
   reauthorizing?: boolean;
   onReauthorize?: () => void;
@@ -392,6 +397,8 @@ function RouteModelCard({
   paused = false,
   pending = false,
   statusLabel,
+  testing = false,
+  testResult,
   authorizationFailed = false,
   reauthorizing = false,
   onReauthorize,
@@ -530,7 +537,7 @@ function RouteModelCard({
           </div>
         </div>
         <div className="free-model-route-row-details relative pointer-events-none">
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 items-center justify-end gap-2">
             {authorizationFailed ? (
               <>
                 <span role="status" className="shrink-0 text-xs font-semibold text-cyber-error">
@@ -565,6 +572,24 @@ function RouteModelCard({
               </span>
             )}
           </div>
+          <span
+            className="free-model-route-latency flex w-[72px] shrink-0 items-center justify-center text-center text-xs font-mono tabular-nums text-cyber-text-secondary"
+            aria-label={t('freeModels.router.responseLatency')}
+          >
+            {testing ? (
+              <LatencyIndicator />
+            ) : testResult?.error === 'timeout' || (testResult?.latencyMs ?? 0) > 1000 ? (
+              <span className="text-red-500">{t('freeModels.router.testTimeout')}</span>
+            ) : testResult?.latencyMs != null ? (
+              <span className={modelLatencyColor(testResult.latencyMs)}>
+                {testResult.latencyMs}ms
+              </span>
+            ) : testResult?.error ? (
+              <span className="text-red-500">{t('freeModels.router.testFailed')}</span>
+            ) : (
+              '—'
+            )}
+          </span>
           {modelPicker}
         </div>
         <div className="free-model-route-row-actions relative flex shrink-0 items-center gap-1">
@@ -1085,6 +1110,10 @@ export function FreeModelsMain() {
       return model ? [model] : [];
     });
   }, [customModels, selectedIds]);
+  const responseTests = useRouteResponseTests(
+    selectedModels,
+    activePage === 'freeModels' && layout === 'list'
+  );
   const accountStatusByModel = useMemo(() => {
     const bindings = new Map<
       string,
@@ -1444,6 +1473,28 @@ export function FreeModelsMain() {
           }}
         />
 
+        {layout === 'list' && (
+          <div className="relative z-10 flex h-[40px] items-center justify-end">
+            <button
+              type="button"
+              onClick={() => void responseTests.test()}
+              disabled={
+                responseTests.isTesting || selectedModels.length === 0 || savingModelIds.size > 0
+              }
+              aria-label={t('btn.pingAll')}
+              aria-busy={responseTests.isTesting || undefined}
+              className="relative flex items-center justify-center px-3 py-1 text-xs font-mono text-cyber-text-muted transition-colors hover:text-cyber-text disabled:opacity-50"
+            >
+              <span className={responseTests.isTesting ? 'invisible' : undefined}>
+                {t('btn.pingAll')}
+              </span>
+              {responseTests.isTesting && (
+                <RefreshCw size={12} className="absolute inset-0 m-auto animate-spin" aria-hidden />
+              )}
+            </button>
+          </div>
+        )}
+
         {selectedModels.length === 0 ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center text-center pointer-events-none">
             <div>
@@ -1481,7 +1532,7 @@ export function FreeModelsMain() {
                           paddingInline: NODE_SIDE_PADDING,
                           marginTop: HUB_TO_NODE_GAP,
                         }
-                      : { paddingInline: NODE_SIDE_PADDING, marginTop: 40 }
+                      : { paddingInline: NODE_SIDE_PADDING }
                   }
                 >
                   {selectedModels.map((model, index) => {
@@ -1496,6 +1547,8 @@ export function FreeModelsMain() {
                         providerIconSrc={providerIconFor(model)}
                         priority={index + 1}
                         list={layout === 'list'}
+                        testing={responseTests.pendingIds.has(model.id)}
+                        testResult={responseTests.results[model.id]}
                         paused={pausedIds.has(model.id) || authorizationFailed}
                         pending={candidateTogglePending.has(model.id) || removingIds.has(model.id)}
                         active={
@@ -1809,10 +1862,6 @@ export function FreeModelsPanel() {
 
   const addSavedModel = async (model: (typeof userModels)[number]) => {
     if (addingId || selectedIds.has(model.internalId)) return;
-    if (selectedIds.size >= api.SMART_ROUTER_CANDIDATE_LIMIT) {
-      showToast('warning', t('freeModels.router.limitReached'));
-      return;
-    }
     setAddingId(model.internalId);
     try {
       await addSelectedModel({

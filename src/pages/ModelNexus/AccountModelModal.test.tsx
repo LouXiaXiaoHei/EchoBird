@@ -6,9 +6,10 @@ import * as accountApi from '../../api/accountProxy';
 import { AddModelModal, ModelNexusProvider } from './ModelNexus';
 import { useModelNexus } from './context';
 
-const { showToast, addSelectedModel } = vi.hoisted(() => ({
+const { showToast, addSelectedModel, selectedIds } = vi.hoisted(() => ({
   showToast: vi.fn(),
   addSelectedModel: vi.fn(),
+  selectedIds: new Set<string>(),
 }));
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
@@ -20,7 +21,7 @@ vi.mock('../../components', () => ({
   getModelIcon: () => null,
 }));
 vi.mock('../FreeModels/provider', () => ({
-  useFreeModels: () => ({ addSelectedModel, updateSelectedModel: vi.fn(), selectedIds: new Set() }),
+  useFreeModels: () => ({ addSelectedModel, updateSelectedModel: vi.fn(), selectedIds }),
 }));
 vi.mock('../../api/tauri', () => ({
   getModels: vi.fn().mockResolvedValue([]),
@@ -28,7 +29,6 @@ vi.mock('../../api/tauri', () => ({
   updateModel: vi.fn(),
   deleteModel: vi.fn().mockResolvedValue(undefined),
   queryModelUsage: vi.fn(),
-  SMART_ROUTER_CANDIDATE_LIMIT: 10,
 }));
 vi.mock('../../api/accountProxy', async (original) => ({
   ...(await original<typeof import('../../api/accountProxy')>()),
@@ -83,6 +83,7 @@ function saveButton() {
     .find((button) => button.children.includes('model.enterSave'))!;
 }
 beforeEach(() => {
+  selectedIds.clear();
   const stored = new Map<string, string>();
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => stored.get(key) ?? null,
@@ -168,6 +169,18 @@ it('hides the name and key and saves the account label with its binding through 
   expect(nameInput).toBeDefined();
   await act(async () => nameInput.props.onChange({ target: { value: 'My API model' } }));
   expect(context.newModelForm.name).toBe('My API model');
+});
+
+it('adds an account model when Smart Router already has more than twenty candidates', async () => {
+  for (let index = 0; index < 25; index++) selectedIds.add(`existing-${index}`);
+  await open();
+  await act(async () => saveButton().props.onClick());
+  expect(api.addModel).toHaveBeenCalledOnce();
+  expect(addSelectedModel).toHaveBeenCalledWith(
+    expect.objectContaining({ internalId: saved.internalId })
+  );
+  expect(showToast).not.toHaveBeenCalled();
+  expect(context.showAddModelModal).toBe(false);
 });
 
 it('requires a saved account before writing and keeps the form available', async () => {

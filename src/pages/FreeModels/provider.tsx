@@ -228,12 +228,17 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
         ? await api.setSmartRouterEnabled(false)
         : loadedRouter;
     setCustomModels(routeModels);
-    const next = new Set(router.candidateIds);
+    // Deleted models have no visible row and must not occupy an addition slot.
+    // Keep the local server configured while it is temporarily offline.
+    const candidateIds = router.candidateIds.filter(
+      (id) => modelsById.has(id) || id === 'local-server'
+    );
+    const next = new Set(candidateIds);
     selectedIdsRef.current = next;
     setSelectedIds((current) => {
       if (
         current.size === next.size &&
-        [...current].every((id, index) => id === router.candidateIds[index])
+        [...current].every((id, index) => id === candidateIds[index])
       ) {
         return current;
       }

@@ -6,6 +6,7 @@ import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import * as api from '../../api/tauri';
 import * as modelApi from '../../api/models';
 import * as accountApi from '../../api/accountProxy';
+import * as routerProbe from '../../api/smartRouter';
 import type { ModelConfig } from '../../api/types';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -26,6 +27,13 @@ const { confirm, showToast, edit, updateUserModel, drag } = vi.hoisted(() => ({
 }));
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../components', () => ({ getModelIcon: () => null }));
+vi.mock('../../components/LatencyIndicator', () => ({
+  LatencyIndicator: () => <span className="model-latency-loading" />,
+}));
+vi.mock('../../api/smartRouter', () => ({
+  testSmartRouterCandidate: vi.fn(),
+  cancelSmartRouterProbe: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => confirm }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast }) }));
 vi.mock('../ModelNexus/context', () => ({
@@ -264,6 +272,106 @@ describe('Smart Router list layout and candidate pause', () => {
     vi.unstubAllGlobals();
   });
 
+  it('does not count deleted model references and cleans them on the next explicit addition', async () => {
+    order = ['one', 'two', ...Array.from({ length: 18 }, (_, index) => `deleted-${index}`)];
+    paused = ['one'];
+    await open();
+    await layout('list');
+    expect(rows()).toHaveLength(2);
+    expect([...context.selectedIds]).toEqual(['one', 'two']);
+    expect(context.pausedIds.has('one')).toBe(true);
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    noModelWrites();
+    await act(async () =>
+      context.addSelectedModel({
+        ...models[2],
+        modelId: models[2].modelId!,
+      })
+    );
+    expect(api.setSmartRouterCandidates).toHaveBeenCalledExactlyOnceWith(['one', 'two', 'three']);
+    expect(rows()).toHaveLength(3);
+    expect(context.pausedIds.has('one')).toBe(true);
+    noModelWrites();
+  });
+
+  it('retains existing unavailable models and the offline local-server slot', async () => {
+    models[0].apiKey = '';
+    order = ['one', 'local-server', 'deleted'];
+    await open();
+    expect([...context.selectedIds]).toEqual(['one', 'local-server']);
+    expect(context.customModels.map((model) => model.id)).toEqual(['one']);
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    noModelWrites();
+  });
+
+  it('tests paused and account rows only on click, displaying results without route writes', async () => {
+    paused = ['two'];
+    vi.mocked(routerProbe.testSmartRouterCandidate).mockImplementation(async (id) =>
+      id === 'one' ? { latencyMs: 123, error: null } : { latencyMs: null, error: 'request_failed' }
+    );
+    await open();
+    expect(
+      renderer.root
+        .findAllByType('button')
+        .some((node) => node.props['aria-label'] === 'btn.pingAll')
+    ).toBe(false);
+    await layout('list');
+    expect(routerProbe.testSmartRouterCandidate).not.toHaveBeenCalled();
+    const button = renderer.root
+      .findAllByType('button')
+      .find((node) => node.props['aria-label'] === 'btn.pingAll')!;
+    await act(async () => button.props.onClick());
+    expect(
+      vi.mocked(routerProbe.testSmartRouterCandidate).mock.calls.map((call) => call.slice(0, 2))
+    ).toEqual([
+      ['one', 'saved-model'],
+      ['two', 'account-old'],
+      ['three', 'other-model'],
+    ]);
+    const slots = renderer.root.findAllByProps({
+      'aria-label': 'freeModels.router.responseLatency',
+    });
+    expect(slots).toHaveLength(3);
+    expect(slots[0].findByProps({ className: 'text-green-500' }).children.join('')).toBe('123ms');
+    expect(JSON.stringify(renderer.toJSON())).toContain('freeModels.router.testFailed');
+    expect(context.pausedIds.has('two')).toBe(true);
+    expect(api.setSmartRouterCandidateEnabled).not.toHaveBeenCalled();
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    noModelWrites();
+  });
+
+  it.each([
+    [199, 'text-green-500', '199ms'],
+    [200, 'text-yellow-500', '200ms'],
+    [499, 'text-yellow-500', '499ms'],
+    [500, 'text-red-500', '500ms'],
+    [1000, 'text-red-500', '1000ms'],
+    [1001, 'text-red-500', 'freeModels.router.testTimeout'],
+  ])(
+    'matches Model Center colors and the timeout display for %dms',
+    async (latencyMs, color, text) => {
+      vi.mocked(routerProbe.testSmartRouterCandidate).mockResolvedValue({
+        latencyMs: Number(latencyMs),
+        error: null,
+      });
+      await open();
+      await layout('list');
+      const button = renderer.root
+        .findAllByType('button')
+        .find((node) => node.props['aria-label'] === 'btn.pingAll')!;
+      await act(async () => button.props.onClick());
+      const slot = renderer.root.findAllByProps({
+        'aria-label': 'freeModels.router.responseLatency',
+      })[0];
+      expect(slot.findByType('span').findByProps({ className: color }).children.join('')).toBe(
+        text
+      );
+      noModelWrites();
+    }
+  );
+
   it('places the only icon layout switch between privacy and help in the title bar', async () => {
     await open();
     const group = renderer.root.findByProps({ 'aria-label': 'freeModels.layout.label' });
@@ -314,6 +422,7 @@ describe('Smart Router list layout and candidate pause', () => {
     expect(api.removeSmartRouterCandidate).not.toHaveBeenCalled();
     expect(modelApi.fetchUpstreamModelCatalog).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
+    expect(routerProbe.testSmartRouterCandidate).not.toHaveBeenCalled();
     expect(storage.get('echobird-router-layout')).toBe('list');
     noModelWrites();
   });

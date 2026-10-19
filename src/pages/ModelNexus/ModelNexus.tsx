@@ -454,7 +454,7 @@ export function AddModelModal() {
   const { t } = useI18n();
   const { showToast } = useToast();
   const [isSavingModel, setIsSavingModel] = useState(false);
-  const { addSelectedModel, updateSelectedModel, selectedIds } = useFreeModels();
+  const { addSelectedModel, updateSelectedModel } = useFreeModels();
   const {
     showAddModelModal,
     modelModalAnimatingOut,
@@ -762,15 +762,6 @@ export function AddModelModal() {
                 showToast('warning', t('accountProxy.selectRequired'));
                 return;
               }
-              if (
-                modelModalDestination === 'freeRouter' &&
-                !editingModelId &&
-                selectedIds.size >= api.SMART_ROUTER_CANDIDATE_LIMIT
-              ) {
-                showToast('warning', t('freeModels.router.limitReached'));
-                return;
-              }
-
               setIsSavingModel(true);
               try {
                 if (editingModelId) {

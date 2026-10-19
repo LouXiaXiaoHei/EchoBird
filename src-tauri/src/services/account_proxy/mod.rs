@@ -25,6 +25,30 @@ use serde_json::{json, Value};
 use crate::models::model::AccountProvider;
 
 pub(crate) use codearts::signed_headers as codearts_signed_headers;
+
+pub(crate) fn connection_base(
+    provider: AccountProvider,
+    metadata: &Value,
+) -> Result<String, ProxyError> {
+    use AccountProvider::*;
+    match provider {
+        ClaudeCode => Ok("https://api.anthropic.com".into()),
+        CodeArts => Ok(codearts::api(metadata).into()),
+        Grok => grok::base(metadata),
+        Kiro => kiro::base(metadata, false),
+        Minimax => minimax::base(metadata),
+        Qoder => Ok(crate::services::qoder_accounts::Edition::Qoder
+            .gateway()
+            .into()),
+        QoderCn => Ok(crate::services::qoder_accounts::Edition::QoderCn
+            .gateway()
+            .into()),
+        Trae | Traecn => trae::base(provider, metadata),
+        Zcode => Ok(zcode::origin(metadata).into()),
+        _ => Ok(providers::base(provider, metadata).into()),
+    }
+}
+
 pub(crate) use protocol::SseParser;
 #[cfg(test)]
 pub(crate) fn remember_free_model_ids(
@@ -257,4 +281,92 @@ pub(crate) fn stream_response(body: Body) -> Response {
         .header("cache-control", "no-cache")
         .body(body)
         .expect("fixed response headers")
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+
+    #[test]
+    fn connection_targets_cover_all_providers_and_saved_regions_without_authentication() {
+        use AccountProvider::*;
+        for (provider, metadata, expected) in [
+            (ClaudeCode, Value::Null, "https://api.anthropic.com"),
+            (
+                CodeArts,
+                Value::Null,
+                "https://snap-access.cn-north-4.myhuaweicloud.com",
+            ),
+            (Codex, Value::Null, "https://chatgpt.com/backend-api/codex"),
+            (WorkBuddy, Value::Null, "https://copilot.tencent.com"),
+            (WorkBuddyAi, Value::Null, "https://www.workbuddy.ai"),
+            (
+                Antigravity,
+                Value::Null,
+                "https://daily-cloudcode-pa.googleapis.com",
+            ),
+            (
+                Copilot,
+                json!({"baseUrl":"https://api.business.githubcopilot.com"}),
+                "https://api.business.githubcopilot.com",
+            ),
+            (Kilo, Value::Null, "https://api.kilo.ai/api/openrouter"),
+            (
+                Kimi,
+                json!({"baseUrl":"https://api.kimi.ai/coding/v1"}),
+                "https://api.kimi.ai/coding/v1",
+            ),
+            (
+                Kimi,
+                json!({"baseUrl":"https://api.kimi.com/coding/v1"}),
+                "https://api.kimi.com/coding/v1",
+            ),
+            (
+                OpenDesign,
+                Value::Null,
+                crate::services::opendesign_accounts::LINK,
+            ),
+            (Grok, Value::Null, "https://cli-chat-proxy.grok.com/v1"),
+            (Cline, Value::Null, "https://api.cline.bot/api/v1"),
+            (
+                Kiro,
+                json!({"region":"eu-west-1"}),
+                "https://runtime.eu-west-1.kiro.dev",
+            ),
+            (Minimax, json!({"region":"cn"}), "https://agent.minimax.cn"),
+            (
+                Minimax,
+                json!({"region":"global"}),
+                "https://agent.minimax.io",
+            ),
+            (Qoder, Value::Null, "https://api3.qoder.sh"),
+            (QoderCn, Value::Null, "https://gateway.qoder.com.cn"),
+            (
+                Trae,
+                json!({"region":"SG"}),
+                "https://coresg-normal.trae.ai",
+            ),
+            (
+                Trae,
+                json!({"region":"US"}),
+                "https://coresg-normal.trae.ai",
+            ),
+            (
+                Trae,
+                json!({"region":"USTTP"}),
+                "https://core-normal.traeapi.us",
+            ),
+            (
+                Traecn,
+                json!({"region":"CN"}),
+                "https://trae-api-cn.mchost.guru",
+            ),
+            (Zcode, Value::Null, "https://zcode.z.ai"),
+        ] {
+            assert_eq!(connection_base(provider, &metadata).unwrap(), expected);
+        }
+        assert!(connection_base(Kiro, &json!({"region":"invalid"})).is_err());
+        assert!(connection_base(Traecn, &json!({"region":"SG"})).is_err());
+        assert!(connection_base(Minimax, &json!({"region":"invalid"})).is_err());
+    }
 }

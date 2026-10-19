@@ -304,6 +304,12 @@ fn proxy_saved_at(edition: Edition, id: &str, path: &Path) -> Result<Saved, Stri
         .ok_or_else(|| "accountError.invalidAccount".into())
 }
 
+pub(crate) fn connection_metadata(edition: Edition, id: &str) -> Result<Value, String> {
+    let saved = proxy_saved_at(edition, id, &store_path(edition)?)?;
+    let metadata = proxy_value(edition, &unprotect(&saved)?)?;
+    Ok(serde_json::json!({"region": metadata["region"]}))
+}
+
 pub(crate) async fn proxy_credentials(
     edition: Edition,
     id: &str,

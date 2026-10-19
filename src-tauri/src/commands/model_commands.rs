@@ -83,53 +83,6 @@ pub async fn update_model(
 }
 
 fn validate_model_update(existing: &ModelConfig, updates: &UpdateModelInput) -> Result<(), String> {
-    validate_model_update_with_keyless(
-        existing,
-        updates,
-        crate::services::free_model_directory::is_keyless_model,
-    )
-}
-
-fn validate_model_update_with_keyless(
-    existing: &ModelConfig,
-    updates: &UpdateModelInput,
-    is_keyless: impl Fn(&str, &str) -> bool,
-) -> Result<(), String> {
-    use crate::models::model::ModelScope;
-    use crate::services::free_model_directory::{keyless_endpoint, KeylessAuth};
-
-    validate_account_model_update(existing, updates)?;
-    if existing.scope != ModelScope::SmartRouter
-        || existing.account_source.is_some()
-        || updates.account_source.is_some()
-        || (updates.base_url.is_none() && updates.model_id.is_none() && updates.api_key.is_none())
-    {
-        return Ok(());
-    }
-    let base_url = updates.base_url.as_deref().unwrap_or(&existing.base_url);
-    if keyless_endpoint(base_url) != Some(KeylessAuth::Public) {
-        return Ok(());
-    }
-    let api_key = updates.api_key.as_deref().unwrap_or(&existing.api_key);
-    let model_id = updates
-        .model_id
-        .as_deref()
-        .or(existing.model_id.as_deref())
-        .unwrap_or_default();
-    if model_manager::decrypt_key_for_use(api_key)
-        .trim()
-        .is_empty()
-        && !is_keyless(base_url, model_id)
-    {
-        return Err("An API key is required for this model".into());
-    }
-    Ok(())
-}
-
-fn validate_account_model_update(
-    existing: &ModelConfig,
-    updates: &UpdateModelInput,
-) -> Result<(), String> {
     if (updates.account_source.is_some() || existing.account_source.is_some())
         && updates
             .model_id
@@ -271,32 +224,32 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_public_model_update_rejects_a_paid_switch_with_an_empty_effective_key() {
+    fn api_model_updates_allow_switching_models_and_clearing_the_key() {
         let existing = public_model_fixture();
         let before = serde_json::to_value(&existing).unwrap();
         let paid = UpdateModelInput {
             model_id: Some("paid-model".into()),
             ..Default::default()
         };
-        assert!(validate_model_update_with_keyless(&existing, &paid, |_, _| false).is_err());
+        assert!(validate_model_update(&existing, &paid).is_ok());
         assert_eq!(serde_json::to_value(&existing).unwrap(), before);
         let mut keyed = existing.clone();
         keyed.api_key = "saved-key".into();
-        assert!(validate_model_update_with_keyless(&keyed, &paid, |_, _| false).is_ok());
+        assert!(validate_model_update(&keyed, &paid).is_ok());
         for key in ["", "   ", "enc:v1:00"] {
             let remove_key = UpdateModelInput {
                 model_id: Some("paid-model".into()),
                 api_key: Some(key.into()),
                 ..Default::default()
             };
-            assert!(validate_model_update_with_keyless(&keyed, &remove_key, |_, _| false).is_err());
+            assert!(validate_model_update(&keyed, &remove_key).is_ok());
         }
         let with_key = UpdateModelInput {
             model_id: Some("paid-model".into()),
             api_key: Some("new-key".into()),
             ..Default::default()
         };
-        assert!(validate_model_update_with_keyless(&existing, &with_key, |_, _| false).is_ok());
+        assert!(validate_model_update(&existing, &with_key).is_ok());
     }
 
     #[test]
@@ -306,37 +259,25 @@ mod tests {
             model_id: Some("new-future-free".into()),
             ..Default::default()
         };
-        assert!(
-            validate_model_update_with_keyless(&existing, &next_free, |url, id| url
-                == "https://opencode.ai/inference/v1"
-                && id == "new-future-free")
-            .is_ok()
-        );
+        assert!(validate_model_update(&existing, &next_free).is_ok());
         let paid = UpdateModelInput {
             model_id: Some("paid-model".into()),
             ..Default::default()
         };
         let mut model_center = existing.clone();
         model_center.scope = crate::models::model::ModelScope::ModelCenter;
-        assert!(validate_model_update_with_keyless(&model_center, &paid, |_, _| false).is_ok());
+        assert!(validate_model_update(&model_center, &paid).is_ok());
         let other_endpoint = UpdateModelInput {
             base_url: Some("https://api.example.com/v1".into()),
             model_id: Some("paid-model".into()),
             ..Default::default()
         };
-        assert!(
-            validate_model_update_with_keyless(&existing, &other_endpoint, |_, _| false).is_ok()
-        );
+        assert!(validate_model_update(&existing, &other_endpoint).is_ok());
         let health = UpdateModelInput {
             openai_tested: Some(false),
             ..Default::default()
         };
-        assert!(
-            validate_model_update_with_keyless(&existing, &health, |_, _| panic!(
-                "health-only updates must not read catalogs"
-            ))
-            .is_ok()
-        );
+        assert!(validate_model_update(&existing, &health).is_ok());
         let account = UpdateModelInput {
             account_source: Some(AccountSource {
                 provider: AccountProvider::Codex,
@@ -345,16 +286,11 @@ mod tests {
             model_id: Some("native-model".into()),
             ..Default::default()
         };
-        assert!(
-            validate_model_update_with_keyless(&existing, &account, |_, _| panic!(
-                "account updates must not read public catalogs"
-            ))
-            .is_ok()
-        );
+        assert!(validate_model_update(&existing, &account).is_ok());
     }
 
     #[test]
-    fn dynamic_public_model_update_checks_the_effective_endpoint_before_any_save() {
+    fn api_model_updates_allow_a_public_endpoint_without_a_key() {
         let mut existing = public_model_fixture();
         existing.base_url = "https://api.example.com/v1".into();
         let updates = UpdateModelInput {
@@ -362,7 +298,7 @@ mod tests {
             model_id: Some("paid-model".into()),
             ..Default::default()
         };
-        assert!(validate_model_update_with_keyless(&existing, &updates, |_, _| false).is_err());
+        assert!(validate_model_update(&existing, &updates).is_ok());
     }
 
     #[test]
@@ -371,9 +307,9 @@ mod tests {
             "internalId":"fixture","name":"Model","baseUrl":"account://echobird","modelId":"existing-model",
             "accountSource":{"provider":"codex","accountId":"saved-id"}
         })).unwrap();
-        assert!(validate_account_model_update(&existing, &UpdateModelInput::default()).is_ok());
+        assert!(validate_model_update(&existing, &UpdateModelInput::default()).is_ok());
         for id in ["", "   "] {
-            assert!(validate_account_model_update(
+            assert!(validate_model_update(
                 &existing,
                 &UpdateModelInput {
                     model_id: Some(id.into()),
@@ -384,8 +320,8 @@ mod tests {
         }
         existing.account_source = None;
         existing.model_id = None;
-        assert!(validate_account_model_update(&existing, &UpdateModelInput::default()).is_ok());
-        assert!(validate_account_model_update(
+        assert!(validate_model_update(&existing, &UpdateModelInput::default()).is_ok());
+        assert!(validate_model_update(
             &existing,
             &UpdateModelInput {
                 account_source: Some(AccountSource {
@@ -396,7 +332,7 @@ mod tests {
             }
         )
         .is_err());
-        assert!(validate_account_model_update(
+        assert!(validate_model_update(
             &existing,
             &UpdateModelInput {
                 account_source: Some(AccountSource {

@@ -46,7 +46,7 @@ fn required<'a>(credentials: &'a Value, field: &str) -> Result<&'a str, ProxyErr
         })
 }
 
-fn base(credentials: &Value) -> Result<String, ProxyError> {
+pub(super) fn base(credentials: &Value) -> Result<String, ProxyError> {
     #[cfg(test)]
     if let Some(base) = credentials["baseUrl"].as_str() {
         let url = url::Url::parse(base).map_err(ProxyError::upstream)?;

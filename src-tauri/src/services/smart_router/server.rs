@@ -22,18 +22,22 @@ use super::{
     SMART_ROUTER_MODEL_ID,
 };
 use crate::models::model::AccountProvider;
-use crate::services::{free_model_directory, model_manager};
+use crate::services::model_manager;
 use crate::utils::platform::echobird_dir;
 
 #[path = "zen_free.rs"]
 mod zen_free;
+
+#[path = "probe.rs"]
+mod probe;
+pub(crate) use probe::{cancel_probe, probe_candidate, ProbeResult};
 
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STREAM_PREFLIGHT_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BINDINGS: usize = 512;
 const RESPONSE_BINDING_LIFETIME_MS: u64 = 24 * 60 * 60 * 1_000;
 const RESPONSES_CAPABILITY_LIFETIME_MS: u64 = 5 * 60 * 1_000;
-pub const MAX_ROUTE_CANDIDATES: usize = 20;
+const MAX_ROUTE_ATTEMPTS: usize = 20;
 const FALLBACK_TIME_BUDGET: Duration = Duration::from_secs(45);
 const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -314,7 +318,7 @@ enum RouteProtocol {
 impl Default for RoutePolicy {
     fn default() -> Self {
         Self {
-            max_attempts: MAX_ROUTE_CANDIDATES,
+            max_attempts: MAX_ROUTE_ATTEMPTS,
             time_budget: FALLBACK_TIME_BUDGET,
             header_timeout: UPSTREAM_HEADER_TIMEOUT,
             first_byte_timeout: UPSTREAM_FIRST_BYTE_TIMEOUT,
@@ -662,12 +666,6 @@ fn resolve_candidates_from(
                 return None;
             }
             let api_key = model_manager::decrypt_key_for_use(&model.api_key);
-            if api_key.trim().is_empty()
-                && model.account_source.is_none()
-                && !free_model_directory::is_keyless_model(&model.base_url, model_id)
-            {
-                return None;
-            }
 
             Some(Candidate {
                 attempt: None,
@@ -3391,7 +3389,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_keyless_catalog_entries_without_admitting_other_blank_keys() {
+    fn resolves_configured_models_with_blank_keys_without_a_catalog_match() {
         let models: Vec<crate::models::model::ModelConfig> = serde_json::from_value(json!([
             {"internalId":"kilo", "name":"Kilo", "modelId":"kilo-auto/free",
                 "baseUrl":"https://api.kilo.ai/api/gateway", "apiKey":""},
@@ -3426,10 +3424,10 @@ mod tests {
                 .iter()
                 .map(|item| item.internal_id.as_str())
                 .collect::<Vec<_>>(),
-            ["account", "kilo", "zen-free"]
+            ["paid", "zen", "account", "kilo", "zen-free", "spoof", "blank"]
         );
         assert!(resolved.iter().all(|item| item.api_key.trim().is_empty()));
-        assert!(resolved[0].account_source.is_some());
+        assert!(resolved[2].account_source.is_some());
     }
 
     #[test]
@@ -3635,12 +3633,22 @@ mod tests {
         let state = AppState::for_tests().unwrap();
         for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
             for key in ["", " \t ", "upstream-key"] {
-                let mut upstream = candidate(addr, "keyless");
-                upstream.api_key = key.into();
+                let models = vec![serde_json::from_value(json!({
+                    "internalId":"keyless", "name":"Custom API", "modelId":"fixture-model",
+                    "baseUrl":format!("http://{addr}/v1"), "apiKey":key
+                }))
+                .unwrap()];
+                let resolved = resolve_candidates_from(
+                    vec!["keyless".into()],
+                    &models,
+                    &crate::services::local_llm::LocalServerInfo::default(),
+                );
+                assert_eq!(resolved.len(), 1);
+                let upstream = &resolved[0];
                 let response = send_api_request(
                     &state,
                     &inbound_headers(),
-                    &upstream,
+                    upstream,
                     &json!({"model":"fixture-model", "stream":false}),
                     protocol,
                 )
@@ -4123,7 +4131,7 @@ mod tests {
             post(move |Json(body): Json<Value>| {
                 let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {
-                    if attempt < MAX_ROUTE_CANDIDATES {
+                    if attempt < MAX_ROUTE_ATTEMPTS {
                         StatusCode::TOO_MANY_REQUESTS.into_response()
                     } else {
                         Json(json!({
@@ -4137,7 +4145,7 @@ mod tests {
             }),
         );
         let addr = spawn_mock(upstream).await;
-        let candidates = (0..MAX_ROUTE_CANDIDATES)
+        let candidates = (0..MAX_ROUTE_ATTEMPTS)
             .map(|index| candidate(addr, &format!("candidate-{index}")))
             .collect();
         let state = AppState::for_tests().unwrap();
@@ -4150,7 +4158,7 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(hits.load(Ordering::SeqCst), MAX_ROUTE_CANDIDATES);
+        assert_eq!(hits.load(Ordering::SeqCst), MAX_ROUTE_ATTEMPTS);
         assert_eq!(
             response.headers()["X-EchoBird-Routed-Via"],
             "candidate-19/candidate-19-model"
@@ -4188,7 +4196,7 @@ mod tests {
                 candidate(second_addr, "second"),
             ],
             RoutePolicy {
-                max_attempts: MAX_ROUTE_CANDIDATES,
+                max_attempts: MAX_ROUTE_ATTEMPTS,
                 time_budget: Duration::from_millis(30),
                 header_timeout: Duration::from_secs(1),
                 first_byte_timeout: Duration::from_secs(1),

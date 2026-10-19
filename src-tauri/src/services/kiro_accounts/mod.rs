@@ -419,6 +419,15 @@ pub(crate) async fn proxy_credentials(id: &str, force: bool) -> Result<Value, St
     proxy::credentials(id, force, None).await
 }
 
+pub(crate) fn connection_metadata(id: &str) -> Result<Value, String> {
+    let accounts = load()?;
+    let saved = accounts
+        .get(id)
+        .filter(|saved| saved.account.id == id)
+        .ok_or("accountError.invalidAccount")?;
+    Ok(serde_json::json!({"region": unprotect(saved)?.region()?}))
+}
+
 pub(crate) async fn proxy_credentials_after_rejection(
     id: &str,
     rejected: &Value,

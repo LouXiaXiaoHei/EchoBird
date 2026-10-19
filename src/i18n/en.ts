@@ -154,6 +154,9 @@ const en: Translations = {
   'freeModels.router.idle': 'Standby',
   'freeModels.router.working': 'Working',
   'freeModels.router.paused': 'Paused',
+  'freeModels.router.responseLatency': 'Connection latency',
+  'freeModels.router.testFailed': 'Failed',
+  'freeModels.router.testTimeout': 'Timed out',
   'freeModels.router.candidateEnabled': 'Use in routing',
   'freeModels.router.removeTitle': 'Remove from routing',
   'freeModels.router.removeConfirm':
@@ -168,7 +171,6 @@ const en: Translations = {
   'freeModels.router.noAvailable': 'No available models',
   'freeModels.router.emptyTitle': '0 models connected',
   'freeModels.router.emptyDesc': 'Start adding models from the list on the right',
-  'freeModels.router.limitReached': 'Smart Router supports up to 20 models',
   'freeModels.router.priority': 'Priority',
   'freeModels.router.reorderHint':
     'Press and hold, then drag cards to set priority. Models are tried in numbered order.',
@@ -358,6 +360,7 @@ const en: Translations = {
   'model.source': 'SOURCE',
   'model.latency': 'LATENCY',
   'model.notTested': 'Not tested',
+  'model.timedOut': 'Timed out',
   'model.dragSort': 'Drag to reorder',
   // Copy button
   'btn.copy': '[COPY]',

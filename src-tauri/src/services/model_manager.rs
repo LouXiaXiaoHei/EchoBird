@@ -1097,48 +1097,50 @@ pub async fn ping_model(internal_id: &str) -> PingResult {
         }
     };
 
-    // Extract base domain
-    let base_url = match url::Url::parse(url) {
-        Ok(parsed) => format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("")),
-        Err(_) => url.to_string(),
-    };
-
     let client = build_client(&model);
-    let start = Instant::now();
+    let result = ping_endpoint(&client, url).await;
+    if result.success {
+        let _ = update_model(
+            internal_id,
+            UpdateModelInput {
+                openai_latency: Some(result.latency),
+                ..Default::default()
+            },
+        );
+        log::info!(
+            "[ModelManager] Ping succeeded: {} {}ms",
+            model.name,
+            result.latency
+        );
+    }
+    result
+}
 
-    match client
+async fn ping_endpoint(client: &reqwest::Client, endpoint: &str) -> PingResult {
+    let base_url = url::Url::parse(endpoint)
+        .map(|parsed| parsed.origin().ascii_serialization())
+        .unwrap_or_else(|_| endpoint.to_string());
+    let start = Instant::now();
+    let response = client
         .head(&base_url)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_millis(1000))
         .send()
-        .await
-    {
-        Ok(_) => {
-            let latency = start.elapsed().as_millis() as f64;
-            let _ = update_model(
-                internal_id,
-                UpdateModelInput {
-                    openai_latency: Some(latency),
-                    ..Default::default()
-                },
-            );
-            log::info!(
-                "[ModelManager] Ping succeeded: {} {}ms",
-                model.name,
-                latency
-            );
-            PingResult {
-                success: true,
-                latency,
-                url: base_url,
-                error: None,
-            }
-        }
-        Err(e) => PingResult {
-            success: false,
-            latency: -1.0,
-            url: base_url,
-            error: Some(e.to_string()),
-        },
+        .await;
+    let latency = start.elapsed().as_millis() as f64;
+    let error = match response {
+        Ok(_) if latency <= 1000.0 => None,
+        Ok(_) => Some("timeout".into()),
+        Err(e) => Some(if e.is_timeout() {
+            "timeout".into()
+        } else {
+            e.to_string()
+        }),
+    };
+    PingResult {
+        success: error.is_none(),
+        latency: if error.is_none() { latency } else { -1.0 },
+        url: base_url,
+        error,
     }
 }
 
@@ -1162,6 +1164,68 @@ pub fn is_key_destroyed(internal_id: &str) -> bool {
 mod tests {
     use super::*;
     use crate::models::model::ModelConfig;
+
+    #[tokio::test]
+    async fn ping_endpoint_measures_head_and_distinguishes_timeout_from_other_failures() {
+        use axum::{
+            http::{HeaderMap, Method, StatusCode, Uri},
+            routing::any,
+            Router,
+        };
+        use std::{
+            sync::{Arc, Mutex},
+            time::Duration,
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let captured = calls.clone();
+        let app =
+            Router::new().fallback(any(move |method: Method, uri: Uri, headers: HeaderMap| {
+                captured.lock().unwrap().push((method, uri, headers));
+                async {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                    StatusCode::UNAUTHORIZED
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = ping_endpoint(&client, &format!("{origin}/v1?token=unused")).await;
+        assert!(result.success);
+        assert!(result.latency >= 25.0 && result.latency <= 1000.0);
+        assert_eq!(result.url, origin);
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, Method::HEAD);
+            assert_eq!(calls[0].1.to_string(), "/");
+            assert!(!calls[0].2.contains_key("authorization"));
+        }
+        server.abort();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        // A listening socket with no HTTP responder must hit the one-second deadline.
+        let started = Instant::now();
+        let result = ping_endpoint(&client, &endpoint).await;
+        assert!(!result.success);
+        assert_eq!(result.error.as_deref(), Some("timeout"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(listener);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let invalid_http = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.write_all(b"invalid HTTP\r\n\r\n").await.unwrap();
+        });
+        let result = ping_endpoint(&client, &endpoint).await;
+        assert!(!result.success);
+        assert_ne!(result.error.as_deref(), Some("timeout"));
+        assert!(result.error.is_some());
+        invalid_http.await.unwrap();
+    }
 
     #[test]
     fn fingerprint_successful_native_probe_is_reused() {

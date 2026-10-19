@@ -115,7 +115,7 @@ fn region(credentials: &Value) -> Result<&str, ProxyError> {
     Ok(region)
 }
 
-fn base(credentials: &Value, management: bool) -> Result<String, ProxyError> {
+pub(super) fn base(credentials: &Value, management: bool) -> Result<String, ProxyError> {
     let region = region(credentials)?;
     #[cfg(test)]
     if let Some(base) = credentials["baseUrl"].as_str() {

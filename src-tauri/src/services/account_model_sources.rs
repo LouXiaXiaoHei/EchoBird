@@ -230,6 +230,36 @@ fn validate_saved_source(
     }
 }
 
+/// Resolve only the saved endpoint metadata; connection tests never renew tokens.
+pub(crate) async fn connection_endpoint(source: &AccountSource) -> Result<String, String> {
+    use AccountProvider::*;
+    let metadata = match source.provider {
+        Minimax => {
+            let account = minimax_accounts::list_saved_accounts()
+                .await?
+                .into_iter()
+                .find(|account| account.id == source.account_id)
+                .ok_or("accountError.invalidAccount")?;
+            serde_json::json!({"region": account.region})
+        }
+        Kimi => {
+            let account = super::kimi_accounts::list_saved_accounts()?
+                .into_iter()
+                .find(|account| account.id == source.account_id)
+                .ok_or("accountError.invalidAccount")?;
+            serde_json::json!({"baseUrl": account.region.base()})
+        }
+        Kiro => super::kiro_accounts::connection_metadata(&source.account_id)?,
+        Trae | Traecn => {
+            trae_accounts::connection_metadata(trae_edition(source.provider), &source.account_id)?
+        }
+        Copilot => super::copilot_accounts::proxy_credentials(&source.account_id, false).await?,
+        _ => Value::Null,
+    };
+    super::account_proxy::connection_base(source.provider, &metadata)
+        .map_err(|error| error.to_string())
+}
+
 /// Secrets are deliberately not exposed by any Tauri command.
 pub(crate) async fn credentials(
     source: &AccountSource,

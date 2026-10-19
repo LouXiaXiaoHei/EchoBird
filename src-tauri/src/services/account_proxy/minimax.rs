@@ -42,7 +42,7 @@ fn client() -> Result<&'static reqwest::Client, ProxyError> {
         .map_err(ProxyError::upstream)
 }
 
-fn base(credentials: &Value) -> Result<String, ProxyError> {
+pub(super) fn base(credentials: &Value) -> Result<String, ProxyError> {
     let region = credentials["region"].as_str().ok_or_else(|| {
         ProxyError::new(StatusCode::UNAUTHORIZED, "MiniMax account has no region")
     })?;

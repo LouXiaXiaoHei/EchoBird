@@ -373,7 +373,7 @@ fn region(provider: AccountProvider, credentials: &Value) -> Result<&'static str
     }
 }
 
-fn base(provider: AccountProvider, credentials: &Value) -> Result<String, ProxyError> {
+pub(super) fn base(provider: AccountProvider, credentials: &Value) -> Result<String, ProxyError> {
     let region = region(provider, credentials)?;
     #[cfg(test)]
     if let Some(raw) = credentials["baseUrl"].as_str() {

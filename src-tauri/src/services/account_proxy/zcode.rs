@@ -34,7 +34,7 @@ fn os_version() -> String {
     platform().replace('-', " ")
 }
 
-fn origin(credentials: &Value) -> &str {
+pub(super) fn origin(credentials: &Value) -> &str {
     #[cfg(test)]
     if let Some(base) = credentials["baseUrl"].as_str() {
         return base.trim_end_matches('/');

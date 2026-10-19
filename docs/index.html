@@ -1407,7 +1407,7 @@
                 'accounts.provider': '选择官方账号启动，或改选模型中心的第三方 API 模型。',
                 'routing.title': '多模型智能路由与故障自动切换',
                 'routing.desc': '从「我的模型」或免费模型目录添加模型，拖动卡片设置优先级，再为兼容工具选择 Auto Router。',
-                'routing.priority': '最多接入 20 个免费、付费或私有模型，按设定顺序调用，复用已有配置。',
+                'routing.priority': '接入免费、付费或私有模型，按设定顺序调用，复用已有配置。',
                 'routing.failover': '限流、额度耗尽或临时不可用时自动尝试下一个模型，冷却后恢复按优先级尝试。',
                 'routing.protocols': '提供 OpenAI Chat Completions 与 Anthropic Messages 本地接口，可供 Claude Code 等兼容工具使用；调用期间保持 EchoBird 运行。',
                 'routing.note': '智能路由切换模型 API，不会自动轮换登录账号。ChatGPT / Codex CLI 接入第三方模型需要 Responses API；当前智能路由尚未提供此接口，请使用账号切换或直接接入支持 Responses 的服务商。',
@@ -1509,7 +1509,7 @@
                 'accounts.provider': 'Launch with an official account, or select a third-party API model from Model Nexus.',
                 'routing.title': 'Multi-model smart routing with automatic failover',
                 'routing.desc': 'Add models from My Models or the free-model directory, drag cards to set priority, then select Auto Router for a compatible tool.',
-                'routing.priority': 'Connect up to 20 free, paid, or private models, reuse existing settings, and try models in your chosen order.',
+                'routing.priority': 'Connect free, paid, or private models, reuse existing settings, and try models in your chosen order.',
                 'routing.failover': 'Automatically try the next model on rate limits, exhausted quota, or temporary unavailability; retry in priority order after cooldown.',
                 'routing.protocols': 'Local OpenAI Chat Completions and Anthropic Messages endpoints work with compatible tools such as Claude Code. Keep EchoBird running while using the router.',
                 'routing.note': 'Smart Router switches model APIs, not saved login accounts. ChatGPT / Codex CLI third-party models need the Responses API, which Smart Router does not currently expose. Use account switching or a Responses-compatible provider directly for those tools.',
@@ -1872,7 +1872,7 @@
                 <h3 data-i18n="routing.title">多模型智能路由与故障自动切换</h3>
                 <p data-i18n="routing.desc">从「我的模型」或免费模型目录添加模型，拖动卡片设置优先级，再为兼容工具选择 Auto Router。</p>
                 <ul>
-                    <li><i class="fa-solid fa-check" aria-hidden="true"></i> <span data-i18n="routing.priority">最多接入 20 个免费、付费或私有模型，按设定顺序调用，复用已有配置。</span></li>
+                    <li><i class="fa-solid fa-check" aria-hidden="true"></i> <span data-i18n="routing.priority">接入免费、付费或私有模型，按设定顺序调用，复用已有配置。</span></li>
                     <li><i class="fa-solid fa-check" aria-hidden="true"></i> <span data-i18n="routing.failover">限流、额度耗尽或临时不可用时自动尝试下一个模型，冷却后恢复按优先级尝试。</span></li>
                     <li><i class="fa-solid fa-check" aria-hidden="true"></i> <span data-i18n="routing.protocols">提供 OpenAI Chat Completions 与 Anthropic Messages 本地接口，可供 Claude Code 等兼容工具使用；调用期间保持 EchoBird 运行。</span></li>
                 </ul>

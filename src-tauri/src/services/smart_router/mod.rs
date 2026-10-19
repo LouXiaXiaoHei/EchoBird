@@ -4,6 +4,7 @@ mod runtime;
 mod server;
 
 pub(crate) use server::forget_account_authentication;
+pub(crate) use server::{cancel_probe, probe_candidate, ProbeResult};
 
 #[cfg(test)]
 pub(crate) use server::route_live_account_probe;
@@ -282,13 +283,6 @@ fn prepare_candidate_ids(
         .filter(|id| id != SMART_ROUTER_INTERNAL_ID)
         .filter(|id| seen.insert(id.clone()))
         .collect();
-    if candidate_ids.len() > server::MAX_ROUTE_CANDIDATES {
-        return Err(format!(
-            "Smart Router supports up to {} candidate models",
-            server::MAX_ROUTE_CANDIDATES
-        ));
-    }
-
     for id in &candidate_ids {
         if existing_ids.contains(id) {
             continue;
@@ -349,15 +343,7 @@ fn model_is_routable(model: &ModelConfig) -> bool {
             .account_source
             .as_ref()
             .is_some_and(|s| !s.account_id.is_empty())
-            || (!model.base_url.trim().is_empty()
-                && !is_router_url(&model.base_url)
-                && (!model_manager::decrypt_key_for_use(&model.api_key)
-                    .trim()
-                    .is_empty()
-                    || crate::services::free_model_directory::is_keyless_model(
-                        &model.base_url,
-                        model.model_id.as_deref().unwrap_or_default(),
-                    ))))
+            || (!model.base_url.trim().is_empty() && !is_router_url(&model.base_url)))
 }
 
 fn local_server_is_routable(server: &crate::services::local_llm::LocalServerInfo) -> bool {
@@ -805,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_requires_model_url_and_key() {
+    fn candidate_requires_model_and_url_but_allows_blank_keys() {
         let mut model = ModelConfig {
             internal_id: "candidate".to_string(),
             name: "Candidate".to_string(),
@@ -833,9 +819,9 @@ mod tests {
         assert!(!model_is_routable(&model));
         model.base_url = "https://example.com/v1".to_string();
         model.api_key.clear();
-        assert!(!model_is_routable(&model));
+        assert!(model_is_routable(&model));
         model.api_key = "   ".to_string();
-        assert!(!model_is_routable(&model));
+        assert!(model_is_routable(&model));
     }
 
     #[test]
@@ -844,8 +830,6 @@ mod tests {
         for model in [
             serde_json::json!({"internalId":"new","name":"Anthropic only","modelId":"fixture",
                 "baseUrl":"","anthropicUrl":"https://example.test/anthropic","apiKey":"fixture-key"}),
-            serde_json::json!({"internalId":"new","name":"Missing key","modelId":"fixture",
-                "baseUrl":"https://example.test/v1","apiKey":""}),
             serde_json::json!({"internalId":"new","name":"Missing model","modelId":"",
                 "baseUrl":"https://example.test/v1","apiKey":"fixture-key"}),
         ] {
@@ -881,6 +865,42 @@ mod tests {
     }
 
     #[test]
+    fn candidate_count_is_unbounded_while_order_pause_and_validation_are_preserved() {
+        let local = crate::services::local_llm::LocalServerInfo::default();
+        let models: Vec<ModelConfig> = (0..50)
+            .map(|index| {
+                serde_json::from_value(serde_json::json!({
+            "internalId":format!("candidate-{index}"),"name":"Fixture","modelId":"fixture-model",
+            "baseUrl":"https://fixture.example/v1","apiKey":"fixture-key"
+        })).unwrap()
+            })
+            .collect();
+        let ids: Vec<_> = models
+            .iter()
+            .map(|model| model.internal_id.clone())
+            .collect();
+        let accepted = prepare_candidate_ids(ids.clone(), &[], &models, &local).unwrap();
+        assert_eq!(accepted, ids);
+        let config = StoredConfig {
+            candidate_ids: accepted,
+            disabled_candidate_ids: vec![ids[21].clone()],
+            ..Default::default()
+        };
+        let restored: StoredConfig =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.candidate_ids, ids);
+        assert_eq!(restored.active_candidate_ids().len(), 49);
+        let reordered: Vec<_> = ids.iter().cloned().rev().collect();
+        assert_eq!(
+            prepare_candidate_ids(reordered.clone(), &ids, &models, &local).unwrap(),
+            reordered
+        );
+        let mut invalid = ids.clone();
+        invalid.push("unavailable-new-model".into());
+        assert!(prepare_candidate_ids(invalid, &ids, &models, &local).is_err());
+    }
+
+    #[test]
     fn available_account_keyless_and_local_candidates_can_still_be_added() {
         let account: ModelConfig = serde_json::from_value(serde_json::json!({
             "internalId":"account","name":"Account","modelId":"fixture","baseUrl":"",
@@ -907,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn keyless_candidates_count_only_for_their_catalog_model_and_endpoint() {
+    fn blank_key_candidates_can_be_added_and_counted_without_a_catalog_match() {
         let mut model: ModelConfig = serde_json::from_value(serde_json::json!({
             "internalId": "keyless",
             "name": "Keyless",
@@ -933,14 +953,18 @@ mod tests {
             ),
             ("https://opencode.ai/zen/v1", "claude-opus-5"),
             ("https://opencode.ai/zen/v1", "space-bunny-free"),
-            ("https://opencode.ai/zen/v1", ""),
+            ("http://127.0.0.1:12345/v1", "local-model"),
         ] {
             model.base_url = base_url.into();
             model.model_id = Some(model_id.into());
-            assert!(!model_is_routable(&model));
+            assert!(model_is_routable(&model));
+            assert_eq!(
+                prepare_candidate_ids(ids.clone(), &[], &[model.clone()], &local_server).unwrap(),
+                ids
+            );
             assert_eq!(
                 usable_candidate_count_from(&ids, &[model.clone()], &local_server),
-                0
+                1
             );
         }
     }

@@ -38,3 +38,17 @@ pub fn get_smart_router_candidates() -> Vec<ModelConfig> {
 pub fn remove_smart_router_candidate(internal_id: String) -> Result<PublicConfig, String> {
     smart_router::remove_candidate(&internal_id)
 }
+
+#[tauri::command]
+pub(crate) async fn test_smart_router_candidate(
+    internal_id: String,
+    model_id: String,
+    request_id: String,
+) -> smart_router::ProbeResult {
+    smart_router::probe_candidate(&internal_id, &model_id, &request_id).await
+}
+
+#[tauri::command]
+pub fn cancel_smart_router_probe(request_id: String) {
+    smart_router::cancel_probe(&request_id);
+}

@@ -309,7 +309,7 @@ fn access_token(credentials: &Value) -> Result<&str, ProxyError> {
         .ok_or_else(|| ProxyError::new(StatusCode::UNAUTHORIZED, "Account has no access token"))
 }
 
-fn base(provider: AccountProvider, credentials: &Value) -> &str {
+pub(super) fn base(provider: AccountProvider, credentials: &Value) -> &str {
     if provider == AccountProvider::Cline {
         #[cfg(test)]
         if let Some(base) = credentials["baseUrl"].as_str() {

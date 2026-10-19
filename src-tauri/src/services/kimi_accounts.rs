@@ -27,7 +27,7 @@ impl Region {
             Self::Global => "https://auth.kimi.ai",
         }
     }
-    fn base(self) -> &'static str {
+    pub(crate) fn base(self) -> &'static str {
         match self {
             Self::Cn => "https://api.kimi.com/coding/v1",
             Self::Global => "https://api.kimi.ai/coding/v1",

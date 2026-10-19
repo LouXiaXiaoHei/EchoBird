@@ -1,8 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ModelConfig } from './types';
 
-export const SMART_ROUTER_CANDIDATE_LIMIT = 20;
-
 export interface SmartRouterConfig {
   enabled: boolean;
   candidateIds: string[];
@@ -20,6 +18,23 @@ export interface SmartRouterActivity {
   activeCandidateIds?: string[];
   sequence: number;
   updatedAtMs: number;
+}
+
+export interface SmartRouterProbeResult {
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export async function testSmartRouterCandidate(
+  internalId: string,
+  modelId: string,
+  requestId: string
+): Promise<SmartRouterProbeResult> {
+  return invoke('test_smart_router_candidate', { internalId, modelId, requestId });
+}
+
+export async function cancelSmartRouterProbe(requestId: string): Promise<void> {
+  return invoke('cancel_smart_router_probe', { requestId });
 }
 
 export async function getSmartRouterConfig(): Promise<SmartRouterConfig> {

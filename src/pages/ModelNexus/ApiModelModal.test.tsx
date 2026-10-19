@@ -9,10 +9,11 @@ import type { ModelConfig } from '../../api/types';
 import { AddModelModal, ModelNexusProvider } from './ModelNexus';
 import { useModelNexus, type NewModelForm } from './context';
 
-const { showToast, addSelectedModel, updateSelectedModel, t } = vi.hoisted(() => ({
+const { showToast, addSelectedModel, updateSelectedModel, selectedIds, t } = vi.hoisted(() => ({
   showToast: vi.fn(),
   addSelectedModel: vi.fn(),
   updateSelectedModel: vi.fn(),
+  selectedIds: new Set<string>(),
   t: (key: string) => key,
 }));
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t }) }));
@@ -27,7 +28,7 @@ vi.mock('../FreeModels/provider', () => ({
   useFreeModels: () => ({
     addSelectedModel,
     updateSelectedModel,
-    selectedIds: new Set(),
+    selectedIds,
   }),
 }));
 vi.mock('../../api/tauri', () => ({
@@ -40,7 +41,6 @@ vi.mock('../../api/tauri', () => ({
   encryptSecret: vi.fn(),
   queryModelUsage: vi.fn(),
   testModel: vi.fn(),
-  SMART_ROUTER_CANDIDATE_LIMIT: 10,
 }));
 vi.mock('../../api/models', () => ({
   getCachedUpstreamModelCatalog: vi.fn(),
@@ -125,6 +125,7 @@ function expectNoModelActions() {
 }
 
 beforeEach(() => {
+  selectedIds.clear();
   vi.useFakeTimers();
   renderer = undefined;
   vi.mocked(api.getModels).mockReset().mockResolvedValue([saved]);
@@ -140,6 +141,56 @@ afterEach(() => {
   act(() => renderer?.unmount());
   vi.clearAllMocks();
   vi.useRealTimers();
+});
+
+it('adds an API model when Smart Router already has more than twenty candidates', async () => {
+  for (let index = 0; index < 25; index++) selectedIds.add(`existing-${index}`);
+  vi.mocked(api.addModel).mockResolvedValue(saved);
+  await mount();
+  await openAdd();
+  await act(async () => context.setModelModalDestination('freeRouter'));
+  await act(async () => button('model.enterSave').props.onClick());
+  expect(api.addModel).toHaveBeenCalledWith(expect.objectContaining({ scope: 'smartRouter' }));
+  expect(addSelectedModel).toHaveBeenCalledWith(
+    expect.objectContaining({ internalId: saved.internalId })
+  );
+  expect(showToast).not.toHaveBeenCalled();
+  expect(context.showAddModelModal).toBe(false);
+});
+
+it.each(['', '   '])('saves a custom Smart Router API with a blank key (%j)', async (apiKey) => {
+  const created = { ...saved, apiKey, scope: 'smartRouter' as const };
+  vi.mocked(api.addModel).mockResolvedValue(created);
+  await mount();
+  await openAdd({ apiKey });
+  await act(async () => context.setModelModalDestination('freeRouter'));
+  await act(async () => button('model.enterSave').props.onClick());
+  expect(api.addModel).toHaveBeenCalledWith(
+    expect.objectContaining({ baseUrl: saved.baseUrl, apiKey, scope: 'smartRouter' })
+  );
+  expect(addSelectedModel).toHaveBeenCalledWith(expect.objectContaining({ apiKey }));
+  expect(api.deleteModel).not.toHaveBeenCalled();
+  expect(api.testModel).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+  expect(context.showAddModelModal).toBe(false);
+});
+
+it('saves an existing Smart Router API after clearing its key', async () => {
+  const updated = { ...saved, apiKey: '', scope: 'smartRouter' as const };
+  vi.mocked(api.updateModel).mockResolvedValue(updated);
+  await mount();
+  await act(async () => context.handleCardEdit({ ...saved, scope: 'smartRouter' }));
+  await act(async () => context.setNewModelForm((form) => ({ ...form, apiKey: '' })));
+  await act(async () => button('model.enterSave').props.onClick());
+  expect(api.updateModel).toHaveBeenCalledWith(
+    saved.internalId,
+    expect.objectContaining({ apiKey: '' })
+  );
+  expect(updateSelectedModel).toHaveBeenCalledWith(expect.objectContaining({ apiKey: '' }));
+  expect(api.testModel).not.toHaveBeenCalled();
+  expect(api.decryptSecret).not.toHaveBeenCalled();
+  expect(showToast).not.toHaveBeenCalled();
+  expect(context.showAddModelModal).toBe(false);
 });
 
 it('opens saved API Edit through the shared handler, refreshes manually and writes the selected original ID only on Save', async () => {

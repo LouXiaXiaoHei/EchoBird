@@ -284,13 +284,15 @@ export function ModelNexusProvider({ children }: { children: React.ReactNode }) 
           next.delete(model.internalId);
           return next;
         });
-        // -1 is the agreed-upon "tested and failed" sentinel that ModelCard
-        // turns into a red "Error" label. Leaving latency unset would
-        // collapse the failure back into "未测试" (never tested), which
-        // misleads the user who just watched the ping run.
+        // Keep timeouts (-2) distinct from other tested failures (-1).
         setModelLatencies((prev) => ({
           ...prev,
-          [model.internalId]: result?.success ? result.latency : -1,
+          [model.internalId]:
+            result?.error === 'timeout' || (result?.success && result.latency > 1000)
+              ? -2
+              : result?.success
+                ? result.latency
+                : -1,
         }));
       } catch {
         setPingingModelIds((prev) => {
