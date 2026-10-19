@@ -6,6 +6,7 @@ import { AppManagerContext, type AppManagerContextType } from '../AppManager/con
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountSectionRow } from '../AppManager/AccountSectionPrimitives';
+import { OpenDesignAccountSection } from '../AppManager/OpenDesignAccountSection';
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 
@@ -147,6 +148,75 @@ describe('Account Center display data', () => {
     ]);
     state.openDesignAccounts.accounts = [{ ...account, quotaWindows: [], balanceUsd: 0 }];
     expect(find().metrics[0].value).toBe('$0');
+  });
+  it.each([
+    ['free', 'Free'],
+    ['go', 'Go'],
+    ['plus', 'Plus'],
+    ['pro', 'Pro'],
+    ['max', 'Max'],
+    ['team', 'Team'],
+  ])('shows Open Design %s in both account views', (plan, label) => {
+    const state = context();
+    state.openDesignAccounts.accounts = [
+      {
+        id: 'design',
+        email: 'designer@example.test',
+        active: false,
+        plan,
+        quotaWindows: [],
+        balanceUsd: null,
+        subscriptionEndAt: null,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'opendesign')!;
+    const card = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[0]} />
+    );
+    let sidebarRenderer!: ReactTestRenderer;
+    act(() => {
+      sidebarRenderer = create(
+        <AppManagerContext.Provider value={state}>
+          <OpenDesignAccountSection />
+        </AppManagerContext.Provider>
+      );
+    });
+    const sidebar = JSON.stringify(sidebarRenderer.toJSON());
+    act(() => sidebarRenderer.unmount());
+    expect(card).toContain(`>${label}<`);
+    expect(sidebar).toContain(`"${label}"`);
+    expect(card).toContain('model.noUsageData');
+    expect(sidebar).not.toContain('0%');
+    expect(state.openDesignAccounts.refresh).not.toHaveBeenCalled();
+  });
+  it('keeps an unqueried Open Design plan unknown', () => {
+    const state = context();
+    state.openDesignAccounts.accounts = [
+      {
+        id: 'design',
+        email: 'designer@example.test',
+        active: false,
+        plan: null,
+        quotaWindows: [],
+        balanceUsd: null,
+        subscriptionEndAt: null,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'opendesign')!;
+    expect(provider.accounts[0].plan).toBeNull();
+    let sidebarRenderer!: ReactTestRenderer;
+    act(() => {
+      sidebarRenderer = create(
+        <AppManagerContext.Provider value={state}>
+          <OpenDesignAccountSection />
+        </AppManagerContext.Provider>
+      );
+    });
+    const sidebar = JSON.stringify(sidebarRenderer.toJSON());
+    act(() => sidebarRenderer.unmount());
+    expect(sidebar).toContain('—');
+    expect(sidebar).not.toContain('"Free"');
+    expect(state.openDesignAccounts.refresh).not.toHaveBeenCalled();
   });
   it('hides the identity and action labels while preserving quota, plan and real action targets', () => {
     const state = context();
@@ -1855,5 +1925,29 @@ describe('Account Center display data', () => {
       expect(html.includes('aria-label="accountCenter.subscription"')).toBe(account === paid);
     }
     expect(global.plan).toBe('agent.zcodeTrial');
+  });
+  it('shows a confirmed empty ZCode plan without inventing a subscription expiry or quota', () => {
+    const state = context();
+    state.zcodeAccounts.accounts = [
+      {
+        id: 'none',
+        email: 'none@example.test',
+        provider: 'bigmodel',
+        active: false,
+        plan: 'No Plan',
+        remainingPercent: null,
+        resetAt: null,
+      },
+    ];
+    const provider = providers(state).find((p) => p.id === 'zcode')!;
+    const account = provider.accounts[0];
+    expect(account.plan).toBe('agent.zcodeNoPlan');
+    expect(account.subscriptionEndAt).toBeUndefined();
+    expect(account.metrics[0]).toMatchObject({ value: '—', percent: null });
+    const html = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
+    expect(html).toContain('Agent.zcodeNoPlan');
+    expect(html).not.toContain('aria-label="accountCenter.subscription"');
+    expect(html).not.toContain('0%');
+    expect(state.zcodeAccounts.refresh).not.toHaveBeenCalled();
   });
 });

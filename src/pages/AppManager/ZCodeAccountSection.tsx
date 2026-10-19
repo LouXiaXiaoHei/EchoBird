@@ -53,7 +53,9 @@ export const ZCodeAccountSection: React.FC<{ showDivider?: boolean }> = ({
       <ZCodeAccountButton />
       <div className="space-y-2">
         {accounts.map((account) => {
-          const subscriptionEndAt = ['trial', 'free'].includes(account.plan?.toLowerCase() ?? '')
+          const subscriptionEndAt = ['trial', 'free', 'no plan'].includes(
+            account.plan?.toLowerCase() ?? ''
+          )
             ? null
             : account.subscriptionEndAt;
           return (
@@ -68,7 +70,9 @@ export const ZCodeAccountSection: React.FC<{ showDivider?: boolean }> = ({
                   >
                     {account.plan === 'Trial'
                       ? t('agent.zcodeTrial')
-                      : accountPlanLabel(account.plan.replace(/^ZCode\s+/i, ''))}
+                      : account.plan === 'No Plan'
+                        ? t('agent.zcodeNoPlan')
+                        : accountPlanLabel(account.plan.replace(/^ZCode\s+/i, ''))}
                   </span>
                 ) : null
               }

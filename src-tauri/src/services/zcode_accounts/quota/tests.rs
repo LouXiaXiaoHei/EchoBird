@@ -74,6 +74,33 @@ fn compact_tiers_also_apply_to_cached_accounts_without_refresh_or_writes() {
 }
 
 #[test]
+fn confirmed_empty_plan_is_distinct_from_unknown_and_active_trial() {
+    for provider in ["bigmodel", "zai"] {
+        let mut saved = account();
+        saved.provider = provider.into();
+        assert_eq!(super::super::row(&saved, None).plan, None);
+        for data in [json!({}), json!({"plans":null}), json!({"plans":{}})] {
+            super::super::apply_balance(&mut saved, &data);
+            assert_eq!(saved.plan, None);
+        }
+        super::super::apply_balance(&mut saved, &json!({"plans":[],"balances":[]}));
+        assert_eq!(saved.plan.as_deref(), Some("No Plan"));
+        assert_eq!(
+            super::super::row(&saved, None).plan.as_deref(),
+            Some("No Plan")
+        );
+        assert_eq!(saved.remaining_percent, None);
+        assert_eq!(saved.subscription_end_at, None);
+        super::super::apply_balance(
+            &mut saved,
+            &json!({"plans":[{"status":"active","name":"ZCode V3 Start Plan"}],"balances":[]}),
+        );
+        assert_eq!(saved.plan.as_deref(), Some("Trial"));
+        assert_eq!(saved.remaining_percent, None);
+    }
+}
+
+#[test]
 fn paid_tiers_and_billing_cycles_keep_subscription_and_quota_deadlines_separate() {
     for provider in ["bigmodel", "zai"] {
         for tier in ["Lite", "Pro", "Max"] {

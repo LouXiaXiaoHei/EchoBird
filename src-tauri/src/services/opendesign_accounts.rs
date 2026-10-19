@@ -464,13 +464,20 @@ fn timestamp(value: &Value) -> Option<i64> {
         .map(|date| date.timestamp())
 }
 
-fn apply_quota(account: &mut Account, preflight: &Value, summary: &Value) {
+fn apply_quota(account: &mut Account, preflight: &Value, summary: &Value) -> Result<(), String> {
+    if !summary.is_object() {
+        return Err("accountError.authResponse".into());
+    }
     account.balance_usd =
         number(&preflight["balanceUsd"]).or_else(|| number(&summary["balanceUsd"]));
-    account.plan = summary["membershipTier"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    account.plan = Some(
+        summary["membershipTier"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("free")
+            .to_owned(),
+    );
     account.subscription_end_at = timestamp(&summary["subscriptionCurrentPeriodEnd"]);
     let mut windows: Vec<_> = preflight["codingPlan"]["windows"]
         .as_array()
@@ -502,6 +509,7 @@ fn apply_quota(account: &mut Account, preflight: &Value, summary: &Value) {
         .collect();
     windows.sort_by_key(|(duration, _)| *duration);
     account.quota_windows = windows.into_iter().map(|(_, row)| row).collect();
+    Ok(())
 }
 
 pub async fn refresh(id: &str) -> Result<Account, String> {
@@ -553,7 +561,7 @@ pub async fn refresh(id: &str) -> Result<Account, String> {
         .get_mut(id)
         .filter(|row| row.control_key == initial.control_key)
         .ok_or("accountError.cancelled")?;
-    apply_quota(&mut saved.account, &preflight, &summary);
+    apply_quota(&mut saved.account, &preflight, &summary)?;
     let result = saved.account.clone();
     save_at(&path, &rows)?;
     Ok(result)

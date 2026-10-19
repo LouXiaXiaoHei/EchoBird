@@ -819,7 +819,12 @@ fn apply_balance(saved: &mut Saved, data: &Value) {
     saved.quota_windows.clear();
     saved.plan = active_plan
         .and_then(|p| p["name"].as_str())
-        .map(quota::plan_label);
+        .map(quota::plan_label)
+        .or_else(|| {
+            plans
+                .filter(|plans| plans.is_empty())
+                .map(|_| "No Plan".into())
+        });
     let balances: Vec<&Value> = data["balances"]
         .as_array()
         .into_iter()
@@ -971,7 +976,7 @@ mod tests {
             reset_at: None,
         };
         apply_balance(&mut saved, &json!({"plans": [], "balances": []}));
-        assert_eq!(saved.plan, None);
+        assert_eq!(saved.plan.as_deref(), Some("No Plan"));
         assert_eq!(saved.remaining_percent, None);
         apply_balance(
             &mut saved,
@@ -1270,7 +1275,7 @@ mod tests {
         saved.plan = Some("Old".into());
         saved.remaining_percent = Some(99.0);
         apply_balance(&mut saved, &json!({"plans":[],"balances":[]}));
-        assert_eq!(saved.plan, None);
+        assert_eq!(saved.plan.as_deref(), Some("No Plan"));
         assert_eq!(saved.remaining_percent, None);
         apply_balance(
             &mut saved,

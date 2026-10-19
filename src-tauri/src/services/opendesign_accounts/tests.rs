@@ -144,7 +144,8 @@ fn unknown_quota_is_not_zero_and_vendor_windows_show_remaining_allowance() {
             {"durationSeconds":3600,"usedCredits":0,"limitCredits":0}
         ]}}),
         &json!({"membershipTier":"go","subscriptionCurrentPeriodEnd":"2026-11-16T00:00:00Z"}),
-    );
+    )
+    .unwrap();
     assert_eq!(saved.account.balance_usd, Some(2.5));
     assert_eq!(saved.account.quota_windows.len(), 2);
     assert_eq!(saved.account.quota_windows[0].label, "5h");
@@ -153,9 +154,47 @@ fn unknown_quota_is_not_zero_and_vendor_windows_show_remaining_allowance() {
     assert_eq!(saved.account.quota_windows[1].remaining_percent, 75.0);
     assert!(saved.account.quota_windows[1].reset_at.is_some());
     assert!(saved.account.subscription_end_at.is_some());
-    apply_quota(&mut saved.account, &json!({}), &json!({}));
+    apply_quota(&mut saved.account, &json!({}), &json!({})).unwrap();
     assert!(saved.account.balance_usd.is_none());
     assert!(saved.account.quota_windows.is_empty());
+}
+
+#[test]
+fn successful_summary_recognizes_free_and_preserves_returned_tiers() {
+    let mut saved = account_from_profile(&profile("one")).unwrap();
+    for summary in [
+        json!({}),
+        json!({"membershipTier":null}),
+        json!({"membershipTier":"  "}),
+    ] {
+        saved.account.plan = Some("pro".into());
+        apply_quota(&mut saved.account, &json!({}), &summary).unwrap();
+        assert_eq!(saved.account.plan.as_deref(), Some("free"));
+        assert_eq!(saved.account.balance_usd, None);
+    }
+    for tier in ["free", "go", "plus", "pro", "max", "team"] {
+        apply_quota(
+            &mut saved.account,
+            &json!({}),
+            &json!({"membershipTier":format!(" {tier} ")}),
+        )
+        .unwrap();
+        assert_eq!(saved.account.plan.as_deref(), Some(tier));
+    }
+}
+
+#[test]
+fn invalid_summary_preserves_cached_plan_and_quota() {
+    let mut saved = account_from_profile(&profile("one")).unwrap();
+    saved.account.balance_usd = Some(2.5);
+    let before = serde_json::to_value(&saved.account).unwrap();
+    for summary in [Value::Null, json!([]), json!("invalid")] {
+        assert_eq!(
+            apply_quota(&mut saved.account, &json!({}), &summary).unwrap_err(),
+            "accountError.authResponse"
+        );
+        assert_eq!(serde_json::to_value(&saved.account).unwrap(), before);
+    }
 }
 
 #[test]

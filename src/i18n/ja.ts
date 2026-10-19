@@ -410,6 +410,7 @@ const ja: Partial<Translations> = {
   'agent.kimiMonthTotal': '月間合計',
   'agent.kimiMonthCode': '月間コーディング',
   'agent.zcodeTrial': '体験',
+  'agent.zcodeNoPlan': '未契約',
   'agent.qoderTrial': '体験版',
   'agent.grantedCredits': '報酬クレジット',
   'agent.minimaxPurchasedCredits': '購入クレジット',

@@ -537,9 +537,11 @@ export function accountCenterProviders(
           plan:
             account.plan === 'Trial'
               ? t('agent.zcodeTrial')
-              : account.plan?.replace(/^ZCode\s+/i, ''),
+              : account.plan === 'No Plan'
+                ? t('agent.zcodeNoPlan')
+                : account.plan?.replace(/^ZCode\s+/i, ''),
           subscriptionEndAt:
-            ['trial', 'free'].includes(account.plan?.toLowerCase() ?? '') ||
+            ['trial', 'free', 'no plan'].includes(account.plan?.toLowerCase() ?? '') ||
             (!account.plan && account.subscriptionEndAt == null)
               ? undefined
               : (account.subscriptionEndAt ?? null),

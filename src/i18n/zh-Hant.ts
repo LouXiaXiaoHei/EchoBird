@@ -391,6 +391,7 @@ const zhHant: Partial<Translations> = {
   'agent.kimiMonthTotal': '每月總額度',
   'agent.kimiMonthCode': '程式設計每月額度',
   'agent.zcodeTrial': '體驗版',
+  'agent.zcodeNoPlan': '未開通',
   'agent.qoderTrial': '體驗版',
   'agent.grantedCredits': '獎勵積分',
   'agent.minimaxPurchasedCredits': '購買積分',

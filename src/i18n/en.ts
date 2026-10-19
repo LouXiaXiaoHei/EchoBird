@@ -394,6 +394,7 @@ const en: Translations = {
   'agent.kimiMonthTotal': 'Monthly total',
   'agent.kimiMonthCode': 'Monthly coding',
   'agent.zcodeTrial': 'Trial',
+  'agent.zcodeNoPlan': 'No plan',
   'agent.qoderTrial': 'Trial',
   'agent.grantedCredits': 'Reward credits',
   'agent.minimaxPurchasedCredits': 'Purchased credits',

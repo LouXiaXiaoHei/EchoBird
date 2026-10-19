@@ -354,6 +354,7 @@ const zhHans: Partial<Translations> = {
   'agent.kimiMonthTotal': '月总额度',
   'agent.kimiMonthCode': '编程月额度',
   'agent.zcodeTrial': '体验版',
+  'agent.zcodeNoPlan': '未开通',
   'agent.qoderTrial': '体验版',
   'agent.grantedCredits': '奖励积分',
   'agent.minimaxPurchasedCredits': '购买积分',

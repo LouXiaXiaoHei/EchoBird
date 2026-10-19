@@ -5,7 +5,10 @@ import { ZCodeAccountSection } from './ZCodeAccountSection';
 import { AppManagerContext, type AppManagerContextType } from './context';
 
 vi.mock('../../hooks/useI18n', () => ({
-  useI18n: () => ({ t: (key: string) => (key === 'agent.zcodeTrial' ? '体验' : key) }),
+  useI18n: () => ({
+    t: (key: string) =>
+      key === 'agent.zcodeTrial' ? '体验' : key === 'agent.zcodeNoPlan' ? '未开通' : key,
+  }),
 }));
 let renderer: ReactTestRenderer;
 afterEach(() => {
@@ -48,7 +51,7 @@ function element(context: AppManagerContextType) {
   );
 }
 describe('ZCode account section', () => {
-  it.each(['Trial', 'Free', 'Lite', 'Pro', 'Max', 'Team'])(
+  it.each(['Trial', 'Free', 'No Plan', 'Lite', 'Pro', 'Max', 'Team'])(
     'shows %s once and reserves subscription countdown space only for paid accounts',
     (plan) => {
       vi.useFakeTimers();
@@ -70,10 +73,9 @@ describe('ZCode account section', () => {
         vi.advanceTimersByTime(0);
       });
       const markup = JSON.stringify(renderer.toJSON());
-      expect(markup.match(new RegExp(`"${plan === 'Trial' ? '体验' : plan}"`, 'g'))).toHaveLength(
-        1
-      );
-      if (plan === 'Trial' || plan === 'Free') {
+      const expectedPlan = plan === 'Trial' ? '体验' : plan === 'No Plan' ? '未开通' : plan;
+      expect(markup.match(new RegExp(`"${expectedPlan}"`, 'g'))).toHaveLength(1);
+      if (plan === 'Trial' || plan === 'Free' || plan === 'No Plan') {
         expect(markup).not.toContain('30d0h');
         expect(markup).toContain('grid-cols-[16px_minmax(0,1fr)_44px]');
       } else {
@@ -91,6 +93,18 @@ describe('ZCode account section', () => {
       expect(JSON.stringify(renderer.toJSON())).toContain('(4h59m)');
     }
   );
+  it('keeps an unqueried plan unknown without claiming trial access or no subscription', () => {
+    const context = fixture(null);
+    context.zcodeAccounts.accounts[0].plan = null;
+    act(() => {
+      renderer = create(element(context));
+    });
+    const markup = JSON.stringify(renderer.toJSON());
+    expect(markup).toContain('—');
+    expect(markup).not.toContain('体验');
+    expect(markup).not.toContain('未开通');
+    expect(context.zcodeAccounts.refresh).not.toHaveBeenCalled();
+  });
   it('keeps the shared pill, typography, quota bar and unknown value', () => {
     act(() => {
       renderer = create(element(fixture()));

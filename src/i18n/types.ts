@@ -322,6 +322,7 @@ export type TKey =
   | 'agent.kimiMonthTotal'
   | 'agent.kimiMonthCode'
   | 'agent.zcodeTrial'
+  | 'agent.zcodeNoPlan'
   | 'agent.qoderTrial'
   | 'agent.grantedCredits'
   | 'agent.minimaxPurchasedCredits'
