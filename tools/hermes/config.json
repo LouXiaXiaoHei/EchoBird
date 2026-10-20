@@ -1,5 +1,5 @@
 {
-    "configFile": "~/.echobird/hermes.json",
-    "format": "json",
+    "configFile": "~/.hermes/config.yaml",
+    "format": "yaml",
     "custom": true
 }

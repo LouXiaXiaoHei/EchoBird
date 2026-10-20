@@ -16,6 +16,7 @@ mod copilot;
 pub(crate) mod dsh;
 mod generic;
 mod grok;
+pub(crate) mod hermes;
 mod kilo;
 pub(crate) mod kimicode;
 mod mimocode;
@@ -343,6 +344,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         // config at ~/.config/openscience/openscience.json.
         "openscience" => return apply_openscience(&model_info),
         "dsh" => return apply_dsh(&model_info),
+        "hermes" => return hermes::apply(&model_info),
 
         // ZCode keeps model configuration in its selected data directory.
         "zcode" => return apply_zcode(&model_info),
@@ -412,6 +414,13 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
 /// the tool itself regenerates a fresh, vendor-default config on next launch.
 /// Used by the App Desktop "restore to official" flow.
 pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
+    if tool_id == "hermes" {
+        return ApplyResult {
+            success: false,
+            message: "Select a native provider in Hermes to restore its model configuration."
+                .into(),
+        };
+    }
     if tool_id == "codearts" {
         return codearts::configure(tool_id, None).await;
     }
@@ -555,6 +564,7 @@ pub async fn restore_tool_to_official(tool_id: &str) -> ApplyResult {
 
 pub async fn get_tool_model_info(tool_id: &str) -> Option<ModelInfo> {
     match tool_id {
+        "hermes" => return hermes::read(),
         "codearts" => return codearts::read(tool_id),
         "vscode" => return vscode::read(),
         "openclaw" => return read_openclaw(),

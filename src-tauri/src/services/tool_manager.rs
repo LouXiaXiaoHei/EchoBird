@@ -2056,6 +2056,9 @@ pub(crate) fn model_config_paths() -> (Vec<PathBuf>, Vec<String>) {
 }
 
 fn model_config_path(def: &ToolDefinition) -> Result<PathBuf, String> {
+    if def.id == "hermes" {
+        return Ok(super::tool_config_manager::hermes::config_path());
+    }
     if def.id == "zcode" {
         return super::zcode_paths::resolve()
             .map(|paths| paths.config_dir.join("provider_config.json"));

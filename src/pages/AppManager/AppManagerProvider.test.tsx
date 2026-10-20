@@ -274,6 +274,117 @@ describe('Devin application account apply', () => {
   });
 });
 
+describe('Hermes native model apply', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  function Harness() {
+    context = useAppManager();
+    return null;
+  }
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: vi.fn() });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools([
+      {
+        id: 'hermes',
+        name: 'Hermes Desktop',
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      },
+    ]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'hermes-fixture',
+        name: 'Fixture',
+        modelId: 'native-model',
+        baseUrl: 'https://provider.example/api/v4',
+        apiKey: '',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool('hermes'));
+    act(() => {
+      context.handleSelectModel('hermes', 'hermes-fixture');
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(true);
+    });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  it('keeps navigation passive and applies the selected endpoint and empty key only on launch', async () => {
+    act(() => context.setViewMode('install'));
+    act(() => context.setViewMode('desktop'));
+    await act(async () => context.setSelectedTool(null));
+    await act(async () => context.setSelectedTool('hermes'));
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(openDialog).not.toHaveBeenCalled();
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledExactlyOnceWith(
+      'hermes',
+      expect.objectContaining({
+        model: 'native-model',
+        baseUrl: 'https://provider.example/api/v4',
+        apiKey: '',
+        protocol: 'openai',
+      })
+    );
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith('hermes', undefined, undefined);
+  });
+  it('shows an explicit configuration error without starting the client', async () => {
+    vi.mocked(api.applyModelToTool).mockResolvedValueOnce({
+      success: false,
+      message: 'accountError.format',
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.applyError).toBe('Localized configuration format error');
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('does not repeat an apply or launch the client while native configuration is pending', async () => {
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        })
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = context.handleLaunch();
+    });
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      finish({ success: true, message: 'ok' });
+      await pending;
+    });
+    expect(api.startTool).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('Claude Desktop account apply', () => {
   let renderer: ReactTestRenderer;
   let context: ReturnType<typeof useAppManager>;
