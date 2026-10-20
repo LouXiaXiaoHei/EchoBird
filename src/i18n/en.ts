@@ -53,7 +53,7 @@ const en: Translations = {
   'accountCenter.empty': 'No saved accounts',
   'accountCenter.loading': 'Loading accounts',
   'accountCenter.website': 'Open {name} website',
-  'accountCenter.subscriptionProviders': 'Account & subscription providers',
+  'accountCenter.subscriptionProviders': 'Special Thanks: Accounts & Top-ups',
   'accountCenter.noSubscriptionProviders': 'No providers listed yet',
   'accountCenter.claimAll': 'Claim all rewards',
   'accountCenter.refreshAll': 'Refresh quotas',
@@ -286,7 +286,7 @@ const en: Translations = {
   'model.deleteConfirm':
     'This model configuration will be permanently removed. This action cannot be undone.',
   'model.providers': 'Providers',
-  'model.relays': 'Relay Stations',
+  'model.relays': 'Special Thanks: Relay Stations',
   'model.config': 'Config',
   'model.usage': 'Usage',
   'model.noUsageData': 'No usage data available',
