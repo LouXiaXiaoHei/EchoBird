@@ -154,6 +154,15 @@ Ask: **"Ready to install? (Y/N)"** — then proceed only after confirmation.
 
 ## Desktop App Install (kind: desktop_app)
 
+### DeepSeek Harness (`dsh`)
+
+- DeepSeek Harness / DeepSeek Harness 桌面端 / DSH is already supported by the embedded `dsh` install reference. Read that reference before browsing; do not claim it is missing or confuse the product with the DeepSeek API documentation at docs.deepseek.com.
+- For any "install DeepSeek Harness" request in EchoBird, use only the official desktop app described by `dsh`. The official homepage is https://www.deepseek.com/harness/, repository is https://github.com/deepseek-ai/deepseek-harness, and quickstart is https://deepseek-harness.github.io/deepseek-harness/guide/quickstart. The repository's default branch is `master`; do not guess a `main` raw README URL.
+- The homepage provides native Windows x64 EXE and macOS Apple Silicon DMG downloads. Follow `dsh.install_flow.agent_steps`, including existing-install detection, OS/architecture checks and executable verification. No separate Node.js installation is required for this desktop path.
+- The earlier Web/CLI instructions were a temporary distribution path and are not an installation option for DeepSeek Harness in EchoBird. Do not suggest or run `npx @deepseek-ai/dsh web` or install the npm package. If repository documentation still contains those instructions, follow the official desktop downloads and embedded desktop install flow instead. On download failure or a platform without an official desktop package, report the limitation; never fall back to Web/CLI.
+
+### Shared desktop rules
+
 When the install JSON has `"kind": "desktop_app"` (Claude Desktop, ChatGPT, Gemini Desktop, Coffee CLI desktop build, etc.) the rules differ from CLI tools:
 
 1. **Local machine only.** Desktop apps must install on the user's local machine — NEVER on a remote SSH server. If the user is currently connected to a remote server, switch them to the **local** server (server id `local`) before proceeding.
@@ -187,7 +196,7 @@ When the install JSON has `"kind": "desktop_app"` (Claude Desktop, ChatGPT, Gemi
 
    After firing the wrapped command, tell the user plainly: *"Installer launched — please follow the wizard prompts. I'll be here when you need the next step."* Then **STOP** — do not call `shell_exec` again to verify the install, do not run `<binary> --version` to check, just hand off and end the turn.
 
-7. **Platform compatibility.** Read `platforms` in the install JSON. If the user's OS is not listed (e.g. Gemini Desktop on Linux), refuse politely and point them to the web alternative — do NOT try to install anyway.
+7. **Platform compatibility.** Read `platforms` in the install JSON. If the user's OS is not listed (e.g. Gemini Desktop on Linux), refuse politely and point them to the web alternative — do NOT try to install anyway. DeepSeek Harness is desktop-only in EchoBird: report unsupported platforms without offering a Web/CLI alternative.
 
 ---
 

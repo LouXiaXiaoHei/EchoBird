@@ -1440,6 +1440,7 @@ async fn build_system_prompt(request: &AgentRequest, ssh_pool: &SSHPool) -> Stri
         | Kilo Code | Kilo | `@kilocode/cli` | kilo |\n\
         | Kimi CLI | Moonshot AI | `@moonshot-ai/kimi-code` | kimi |\n\
         | Kimi Desktop (Kimi 桌面端) | Moonshot AI | none; official desktop installer | Kimi Code.exe / Kimi Code.app |\n\
+        | DeepSeek Harness (DSH) | DeepSeek | none; desktop only, embedded `dsh` reference | DeepSeek Harness.exe / DeepSeek Harness.app |\n\
         MiniMax has two entries: MiniMax CLI (`minimaxcode`, command mcode) and MiniMax Desktop / MiniMax 桌面端 (`minimaxdesktop`). Before installing Desktop, ask the user to choose China or international unless they already specified the edition; follow that edition in the embedded minimaxdesktop reference. Both editions share the same app icon, executable name and native API config, but can coexist at separate paths. EchoBird supports API model switching only for MiniMax; leave account login to the native client. If the request only says MiniMax Code, resolve CLI/Desktop from context or ask before installing.\n\
         When the user says 'install Codex', install `@openai/codex`. Do NOT install Claude Code.\n\
         When the user says 'install Claude Code', install via `irm https://claude.ai/install.ps1 | iex` (Windows) or `curl -fsSL https://claude.ai/install.sh | bash`. Do NOT install Codex.\n\

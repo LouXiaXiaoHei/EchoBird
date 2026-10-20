@@ -2,7 +2,9 @@
     "id": "dsh",
     "displayName": "DeepSeek Harness",
     "homepage": "https://www.deepseek.com/harness/",
-    "docs": "https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.md",
+    "docs": "https://deepseek-harness.github.io/deepseek-harness/guide/quickstart",
+    "repository": "https://github.com/deepseek-ai/deepseek-harness",
+    "desktop_docs": "https://github.com/deepseek-ai/deepseek-harness/blob/master/apps/desktop/README.md",
     "kind": "desktop_app",
     "platforms": [
         "windows",
@@ -30,7 +32,7 @@
         ]
     },
     "identity_guard": {
-        "description": "This entry launches the official DeepSeek Harness desktop app (DeepSeek Harness.exe / DeepSeek Harness.app). DSH Desktop.exe belongs to independent community wrappers, such as dataelement/dsh-desktop, with separate data directories and profiles; it must not satisfy this official desktop installation request. The npm package @deepseek-ai/dsh and dsh web are the separate CLI/web launch path and must not satisfy this desktop installation request."
+        "description": "DeepSeek Harness in EchoBird means only the official desktop app (DeepSeek Harness.exe / DeepSeek Harness.app). DSH Desktop.exe belongs to independent community wrappers, such as dataelement/dsh-desktop, with separate data directories and profiles; it must not satisfy this official desktop installation request. Earlier @deepseek-ai/dsh npm and dsh web instructions were a temporary distribution path, not an installation option in EchoBird. Do not offer or run them, including as a fallback when a desktop download fails or the target platform has no official desktop package."
     },
     "network_requirements": {
         "test_urls": [
