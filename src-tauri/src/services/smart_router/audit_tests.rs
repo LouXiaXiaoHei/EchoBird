@@ -183,7 +183,12 @@ async fn stream_timeout_after_output_closes_upstream_without_replay_or_binding()
             memory.candidates["first"].failure,
             Some(FailureClass::Transient)
         );
-        assert!(memory.response_bindings.is_empty());
+        assert!(state
+            .response_memory
+            .lock()
+            .unwrap()
+            .response_bindings
+            .is_empty());
         assert!(state
             .fixture_responses
             .as_ref()
@@ -611,7 +616,7 @@ async fn audit_bound_empty_response_fails_without_switching_provider() {
             .unwrap()
             .contains_key("second"));
         assert!(!state
-            .route_memory
+            .response_memory
             .lock()
             .unwrap()
             .response_bindings
@@ -659,7 +664,10 @@ async fn audit_bound_native_context_failure_stays_http_bad_request() {
         .contains_key("second"));
     let memory = state.route_memory.lock().unwrap();
     assert!(memory.candidates.is_empty());
-    assert!(!memory
+    assert!(!state
+        .response_memory
+        .lock()
+        .unwrap()
         .response_bindings
         .contains_key("resp_bound_context_failed"));
 }

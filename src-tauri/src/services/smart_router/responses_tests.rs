@@ -391,7 +391,12 @@ async fn converted_account_body_errors_preserve_auth_rate_limits_and_model_scope
                 .contains_key(&account_health_key(&candidate).unwrap()),
             !model_scope
         );
-        assert!(memory.response_bindings.is_empty());
+        assert!(state
+            .response_memory
+            .lock()
+            .unwrap()
+            .response_bindings
+            .is_empty());
         drop(memory);
         assert!(!state
             .fixture_responses
@@ -456,7 +461,12 @@ async fn chat_fallback_sse_errors_keep_header_and_usage_limit_recovery() {
         let health = memory.candidates.get(&candidate.internal_id).unwrap();
         assert_eq!(health.failure, Some(FailureClass::RateLimit));
         assert!(health.cooldown_until_ms.unwrap() >= started + (seconds - 1) * 1000);
-        assert!(memory.response_bindings.contains_key("resp_error_backup"));
+        assert!(state
+            .response_memory
+            .lock()
+            .unwrap()
+            .response_bindings
+            .contains_key("resp_error_backup"));
         assert_eq!(first.calls().len(), 2);
         assert_eq!(backup.calls().len(), 1);
     }
@@ -964,7 +974,12 @@ async fn native_failed_json_preserves_top_level_error_health_and_never_binds_fai
                 3_600_000
             };
             assert!(health.cooldown_until_ms.unwrap() >= started + minimum);
-            assert!(!memory.response_bindings.contains_key("resp_failed_json"));
+            assert!(!state
+                .response_memory
+                .lock()
+                .unwrap()
+                .response_bindings
+                .contains_key("resp_failed_json"));
         }
         let continuation = route_responses_with_candidates(
             &state, &HeaderMap::new(),
@@ -1001,7 +1016,7 @@ async fn conflicting_native_response_ids_cannot_silently_rebind_continuation() {
         assert_eq!(response_json(response).await["id"], "resp_collision");
         if index == 0 {
             state
-                .route_memory
+                .response_memory
                 .lock()
                 .unwrap()
                 .response_bindings
@@ -1011,7 +1026,7 @@ async fn conflicting_native_response_ids_cannot_silently_rebind_continuation() {
         }
     }
     {
-        let memory = state.route_memory.lock().unwrap();
+        let memory = state.response_memory.lock().unwrap();
         let binding = &memory.response_bindings["resp_collision"];
         assert!(binding.ambiguous);
         assert!(binding.expires_at_ms >= now_ms() + 23 * 60 * 60 * 1000);
@@ -1145,7 +1160,10 @@ async fn native_continuation_sse_errors_only_exempt_request_scoped_statuses_from
                 memory.candidates[&a.internal_id].cooldown_until_ms.unwrap() >= started + 120_000
             );
         }
-        assert!(!memory
+        assert!(!state
+            .response_memory
+            .lock()
+            .unwrap()
             .response_bindings
             .contains_key("resp_continuation_failed"));
         assert_eq!(native.calls().len(), 2);
@@ -1220,12 +1238,12 @@ async fn continuation_binding_survives_memory_restore_and_expiry_never_sends_ups
     )
     .await;
     assert_eq!(response_json(initial).await["id"], "resp_persisted_binding");
-    let serialized = serde_json::to_vec(&*state.route_memory.lock().unwrap()).unwrap();
+    let serialized = serde_json::to_vec(&*state.response_memory.lock().unwrap()).unwrap();
     let stored = std::str::from_utf8(&serialized).unwrap();
     assert!(!stored.contains("do-not-persist-conversation"));
     assert!(!stored.contains("upstream-key"));
     let restored = AppState::for_tests().unwrap();
-    *restored.route_memory.lock().unwrap() = serde_json::from_slice(&serialized).unwrap();
+    *restored.response_memory.lock().unwrap() = serde_json::from_slice(&serialized).unwrap();
     let response = route_responses_with_candidates(
         &restored, &HeaderMap::new(),
         json!({"model":SMART_ROUTER_MODEL_ID,"previous_response_id":"resp_persisted_binding","input":"follow-up"}),
@@ -1237,7 +1255,7 @@ async fn continuation_binding_survives_memory_restore_and_expiry_never_sends_ups
         "resp_restored_followup"
     );
     restored
-        .route_memory
+        .response_memory
         .lock()
         .unwrap()
         .response_bindings
@@ -1538,7 +1556,10 @@ async fn nonstream_continuation_sse_failure_preserves_actual_status_and_scoped_h
                 memory.candidates[&a.internal_id].cooldown_until_ms.unwrap() >= started + 120_000
             );
         }
-        assert!(!memory
+        assert!(!state
+            .response_memory
+            .lock()
+            .unwrap()
             .response_bindings
             .contains_key("resp_nonstream_continuation_failed"));
         assert_eq!(native.calls().len(), 2);

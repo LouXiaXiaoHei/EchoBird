@@ -508,20 +508,14 @@ pub(crate) fn remove_account_candidates(
 }
 
 pub(crate) fn forget_candidate_memory(internal_id: &str) {
-    for id in profiles::ids() {
-        profiles::with(&id, || server::forget_candidate_memory(internal_id));
-    }
+    server::forget_candidate_memory(internal_id);
 }
 
 pub(crate) fn forget_account_authentication(
     provider: crate::models::model::AccountProvider,
     account_id: &str,
 ) {
-    for id in profiles::ids() {
-        profiles::with(&id, || {
-            server::forget_account_authentication(provider, account_id)
-        });
-    }
+    server::forget_account_authentication(provider, account_id);
 }
 
 pub(crate) fn remove_candidate_everywhere(internal_id: &str) -> Result<(), String> {

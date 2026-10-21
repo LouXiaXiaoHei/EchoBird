@@ -5,6 +5,11 @@ use std::collections::{HashMap, HashSet};
 tokio::task_local! { static CURRENT: String; }
 #[cfg(test)]
 tokio::task_local! { static FIXTURE_ROOT: PathBuf; }
+
+#[cfg(test)]
+pub(super) fn with_fixture_root<T>(root: PathBuf, run: impl FnOnce() -> T) -> T {
+    FIXTURE_ROOT.sync_scope(root, run)
+}
 static RUNNING_GROUPS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -82,7 +87,7 @@ fn save_registry(value: &Registry) -> Result<(), String> {
         &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
     )
 }
-fn read_stored(id: &str) -> Option<StoredConfig> {
+pub(super) fn read_stored(id: &str) -> Option<StoredConfig> {
     serde_json::from_slice(&fs::read(path_for(id)).ok()?).ok()
 }
 fn valid_id(id: &str) -> bool {

@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::{Body, Bytes};
@@ -46,12 +46,13 @@ const AUTH_OR_BILLING_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const MODEL_UNAVAILABLE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
-static ROUTE_MEMORY: OnceLock<Arc<Mutex<RouteMemory>>> = OnceLock::new();
+static ROUTE_MEMORY: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<RouteMemory>>>>> = OnceLock::new();
 static ROUTE_MEMORY_WRITERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
 static ROUTE_ACTIVITY: OnceLock<Arc<Mutex<RouteActivity>>> = OnceLock::new();
 static GROUP_ACTIVITY: OnceLock<Mutex<HashMap<String, Arc<Mutex<RouteActivity>>>>> =
     OnceLock::new();
-static GROUP_MEMORY: OnceLock<Mutex<HashMap<String, Arc<Mutex<RouteMemory>>>>> = OnceLock::new();
+static GROUP_MEMORY: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<ResponseMemory>>>>> =
+    OnceLock::new();
 
 fn shared_activity() -> Arc<Mutex<RouteActivity>> {
     let id = super::profiles::current_id();
@@ -172,6 +173,8 @@ struct AppState {
     http_client: reqwest::Client,
     route_memory: Arc<Mutex<RouteMemory>>,
     route_memory_path: Option<PathBuf>,
+    response_memory: Arc<Mutex<ResponseMemory>>,
+    response_memory_path: Option<PathBuf>,
     #[cfg(test)]
     fixture_responses: Option<Arc<Mutex<HashMap<String, Response>>>>,
     #[cfg(test)]
@@ -205,6 +208,8 @@ impl AppState {
             http_client,
             route_memory: shared_route_memory(),
             route_memory_path: Some(route_memory_path()),
+            response_memory: shared_response_memory(),
+            response_memory_path: Some(response_memory_path()),
             #[cfg(test)]
             fixture_responses: None,
             #[cfg(test)]
@@ -226,6 +231,8 @@ impl AppState {
             http_client,
             route_memory: Arc::new(Mutex::new(RouteMemory::default())),
             route_memory_path: None,
+            response_memory: Arc::new(Mutex::new(ResponseMemory::default())),
+            response_memory_path: None,
             fixture_responses: None,
             fixture_authentication: None,
         })
@@ -247,10 +254,23 @@ struct RouteMemory {
     credential_versions: HashMap<String, (String, u64)>,
     #[serde(skip)]
     account_epochs: HashMap<String, u64>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    response_bindings: HashMap<String, ResponseBinding>,
+    #[serde(skip)]
+    candidate_epochs: HashMap<String, u64>,
+    #[serde(skip)]
+    recovered_revisions: HashMap<String, u64>,
+    #[serde(skip)]
+    recovering: HashMap<String, Weak<AttemptHealth>>,
+    #[serde(skip)]
+    credential_refreshes: HashMap<String, Arc<CredentialRefresh>>,
     #[serde(skip)]
     unsupported_responses: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseMemory {
+    #[serde(default)]
+    response_bindings: HashMap<String, ResponseBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,7 +292,10 @@ impl Default for RouteMemory {
             revision: 0,
             credential_versions: HashMap::new(),
             account_epochs: HashMap::new(),
-            response_bindings: HashMap::new(),
+            candidate_epochs: HashMap::new(),
+            recovered_revisions: HashMap::new(),
+            recovering: HashMap::new(),
+            credential_refreshes: HashMap::new(),
             unsupported_responses: HashMap::new(),
         }
     }
@@ -287,6 +310,8 @@ struct CandidateHealth {
     cooldown_until_ms: Option<u64>,
     #[serde(default)]
     fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resource_key: Option<String>,
     #[serde(default)]
     failure: Option<FailureClass>,
     #[serde(default)]
@@ -298,8 +323,17 @@ struct CandidateHealth {
 #[derive(Debug)]
 struct AttemptHealth {
     revision: u64,
+    candidate_id: String,
+    account_key: Option<String>,
     account_epoch: u64,
+    candidate_epoch: u64,
     credential_version: Mutex<Option<String>>,
+}
+
+#[derive(Debug)]
+struct CredentialRefresh {
+    created: Instant,
+    result: tokio::sync::Mutex<Option<Result<Value, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,22 +404,69 @@ fn route_memory_version() -> u32 {
 fn route_memory_path() -> PathBuf {
     super::profiles::root()
         .join("config")
+        .join("smart-router-health.json")
+}
+
+fn response_memory_path() -> PathBuf {
+    super::profiles::root()
+        .join("config")
         .join(format!("{}-state.json", super::profiles::current_id()))
 }
 
 fn shared_route_memory() -> Arc<Mutex<RouteMemory>> {
-    let id = super::profiles::current_id();
-    if id != SMART_ROUTER_INTERNAL_ID {
-        return GROUP_MEMORY
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .unwrap()
-            .entry(id)
-            .or_insert_with(|| Arc::new(Mutex::new(load_route_memory(&route_memory_path()))))
-            .clone();
-    }
     ROUTE_MEMORY
-        .get_or_init(|| Arc::new(Mutex::new(load_route_memory(&route_memory_path()))))
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(route_memory_path())
+        .or_insert_with(|| {
+            let path = route_memory_path();
+            let memory = if path.exists() {
+                load_route_memory(&path)
+            } else {
+                let mut merged = RouteMemory::default();
+                for id in super::profiles::ids() {
+                    let previous =
+                        super::profiles::with(&id, || load_route_memory(&response_memory_path()));
+                    merged.revision = merged.revision.max(previous.revision);
+                    for (target, source) in [
+                        (&mut merged.candidates, previous.candidates),
+                        (&mut merged.accounts, previous.accounts),
+                    ] {
+                        for (key, health) in source {
+                            if target.get(&key).map_or(true, |current| {
+                                current.cooldown_until_ms < health.cooldown_until_ms
+                            }) {
+                                target.insert(key, health);
+                            }
+                        }
+                    }
+                }
+                merged
+            };
+            let memory = Arc::new(Mutex::new(memory));
+            // Save the migration before any group rewrites its session-only state.
+            if !path.exists() {
+                persist_memory_at(&path, memory.lock().unwrap());
+            }
+            memory
+        })
+        .clone()
+}
+
+fn shared_response_memory() -> Arc<Mutex<ResponseMemory>> {
+    GROUP_MEMORY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(response_memory_path())
+        .or_insert_with(|| {
+            let memory = fs::read(response_memory_path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                .unwrap_or_default();
+            Arc::new(Mutex::new(memory))
+        })
         .clone()
 }
 
@@ -408,7 +489,7 @@ fn load_route_memory(path: &Path) -> RouteMemory {
 // Allocate the sequence while holding route_memory, then release it before
 // serialization or disk access. A later snapshot cannot be overwritten by an
 // earlier caller that was descheduled before reaching the writer.
-fn persist_memory_at(path: &Path, memory: std::sync::MutexGuard<'_, RouteMemory>) {
+fn persist_memory_at<T: Clone + Serialize>(path: &Path, memory: std::sync::MutexGuard<'_, T>) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -417,7 +498,7 @@ fn persist_memory_at(path: &Path, memory: std::sync::MutexGuard<'_, RouteMemory>
     write_memory_snapshot(path, sequence, &snapshot);
 }
 
-fn write_memory_snapshot(path: &Path, sequence: u64, memory: &RouteMemory) {
+fn write_memory_snapshot(path: &Path, sequence: u64, memory: &impl Serialize) {
     let Ok(mut written) = ROUTE_MEMORY_WRITERS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -449,16 +530,37 @@ fn persist_route_memory(state: &AppState, memory: std::sync::MutexGuard<'_, Rout
     }
 }
 
+fn persist_response_memory(state: &AppState, memory: std::sync::MutexGuard<'_, ResponseMemory>) {
+    if let Some(path) = &state.response_memory_path {
+        persist_memory_at(path, memory);
+    }
+}
+
 pub(crate) fn retain_candidate_memory(candidate_ids: &[String]) {
+    let mut valid: HashSet<String> = candidate_ids.iter().cloned().collect();
+    let current = super::profiles::current_id();
+    for id in super::profiles::ids().iter().filter(|id| **id != current) {
+        valid.extend(
+            super::profiles::read_stored(id)
+                .into_iter()
+                .flat_map(|config| config.candidate_ids),
+        );
+    }
     let memory = shared_route_memory();
     let Ok(mut memory) = memory.lock() else {
         return;
     };
-    let valid: HashSet<&str> = candidate_ids.iter().map(String::as_str).collect();
     let previous_len = memory.candidates.len();
-    memory
+    let removed: HashSet<_> = memory
         .candidates
-        .retain(|candidate_id, _| valid.contains(candidate_id.as_str()));
+        .keys()
+        .chain(memory.candidate_epochs.keys())
+        .filter(|id| !valid.contains(*id))
+        .cloned()
+        .collect();
+    for id in removed {
+        clear_candidate_health(&mut memory, &id);
+    }
     if memory.candidates.len() != previous_len {
         persist_memory_at(&route_memory_path(), memory);
     }
@@ -475,6 +577,12 @@ pub(crate) fn forget_candidate_memory(candidate_id: &str) {
 }
 
 fn clear_candidate_health(memory: &mut RouteMemory, candidate_id: &str) -> bool {
+    let epoch = memory
+        .candidate_epochs
+        .entry(candidate_id.into())
+        .or_default();
+    *epoch = epoch.saturating_add(1);
+    memory.revision = memory.revision.saturating_add(1);
     memory.candidates.remove(candidate_id).is_some()
 }
 
@@ -922,40 +1030,78 @@ async fn send_candidate(
 struct RejectedAccountCredentials(Value);
 
 async fn refresh_rejected_account(
-    _state: &AppState,
+    state: &AppState,
     candidate: &Candidate,
     rejected: &RejectedAccountCredentials,
     started: Instant,
     policy: RoutePolicy,
 ) -> Result<Value, crate::services::account_proxy::ProxyError> {
-    if let Some(source) = &candidate.account_source {
+    let refresh = async {
+        let source = candidate
+            .account_source
+            .as_ref()
+            .expect("Only account requests bind credentials");
+        let slot = {
+            let mut memory = state
+                .route_memory
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let account = source_health_key(source);
+            let epoch = memory.account_epochs.get(&account).copied().unwrap_or(0);
+            let key = format!(
+                "{account}:{epoch}:{:x}",
+                Sha256::digest(rejected.0.to_string())
+            );
+            memory.credential_refreshes.retain(|_, slot| {
+                slot.created.elapsed() < Duration::from_secs(30) || Arc::strong_count(slot) > 1
+            });
+            if let Some(slot) = memory.credential_refreshes.get(&key) {
+                slot.clone()
+            } else {
+                let slot = Arc::new(CredentialRefresh {
+                    created: Instant::now(),
+                    result: tokio::sync::Mutex::new(None),
+                });
+                if memory.credential_refreshes.len() < 128 {
+                    memory.credential_refreshes.insert(key, slot.clone());
+                }
+                slot
+            }
+        };
+        let mut result = slot.result.lock().await;
+        if let Some(value) = result.as_ref() {
+            return value.clone();
+        }
         crate::services::account_proxy::forget_preparation_metadata(
             source.provider,
             &source.account_id,
         );
-    }
-    let refresh = async {
-        #[cfg(test)]
-        if let Some(fixture) = &_state.fixture_authentication {
-            let (delay, result) = {
-                let mut fixture = fixture.lock().unwrap();
-                fixture.rejections.push((
-                    candidate.account_source.clone().unwrap(),
-                    rejected.0.clone(),
-                ));
-                (fixture.delay, fixture.result.clone())
-            };
-            tokio::time::sleep(delay).await;
-            return result;
+        let value = async {
+            #[cfg(test)]
+            if let Some(fixture) = &state.fixture_authentication {
+                let (delay, result) = {
+                    let mut fixture = fixture.lock().unwrap();
+                    fixture.rejections.push((
+                        candidate.account_source.clone().unwrap(),
+                        rejected.0.clone(),
+                    ));
+                    (fixture.delay, fixture.result.clone())
+                };
+                tokio::time::sleep(delay).await;
+                return result;
+            }
+            crate::services::account_model_sources::credentials_after_rejection(
+                candidate
+                    .account_source
+                    .as_ref()
+                    .expect("Only account requests bind credentials"),
+                &rejected.0,
+            )
+            .await
         }
-        crate::services::account_model_sources::credentials_after_rejection(
-            candidate
-                .account_source
-                .as_ref()
-                .expect("Only account requests bind credentials"),
-            &rejected.0,
-        )
-        .await
+        .await;
+        *result = Some(value.clone());
+        value
     };
     let timeout = remaining_timeout(started, policy.time_budget, policy.header_timeout)
         .ok_or_else(|| {
@@ -1187,7 +1333,10 @@ async fn route_with_policy(
         .take()
         .or_else(|| available.next().map(|candidate| (candidate, None)))
     {
-        if candidate_is_cooling_down(state, &candidate) {
+        let authentication_retried = refreshed_credentials.is_some();
+        if (authentication_retried && candidate_is_cooling_down(state, &candidate))
+            || (!authentication_retried && !try_begin_attempt(state, &mut candidate))
+        {
             continue;
         }
         if attempts.len() >= policy.max_attempts {
@@ -1209,10 +1358,6 @@ async fn route_with_policy(
             break;
         };
         let mut upstream_body = body.clone();
-        let authentication_retried = refreshed_credentials.is_some();
-        if !authentication_retried {
-            begin_attempt(state, &mut candidate);
-        }
         upstream_body["model"] = Value::String(candidate.model_id.clone());
         let activity_guard =
             RouteActivityGuard::begin_for(&candidate.internal_id, state.activity.clone());
@@ -2316,52 +2461,61 @@ fn anthropic_response(
 }
 
 fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<Candidate> {
-    let Ok(mut memory) = state.route_memory.lock() else {
+    let Ok(memory) = state.route_memory.lock() else {
         return candidates;
     };
     let now = now_ms();
-    let fingerprints: HashMap<&str, &str> = candidates
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.internal_id.as_str(),
-                candidate.fingerprint.as_str(),
-            )
-        })
-        .collect();
-    let previous_len = memory.candidates.len();
-    let account_keys: HashSet<String> = candidates.iter().filter_map(account_health_key).collect();
-    let previous_accounts = memory.accounts.len();
-    memory.accounts.retain(|key, _| account_keys.contains(key));
-    memory.candidates.retain(|candidate_id, health| {
-        fingerprints
-            .get(candidate_id.as_str())
-            .is_some_and(|fingerprint| health.fingerprint == *fingerprint)
-    });
-    let changed =
-        memory.candidates.len() != previous_len || memory.accounts.len() != previous_accounts;
-    let result = candidates
+    candidates
         .into_iter()
-        .filter(|candidate| {
-            !account_is_cooling_down(&memory, candidate, now)
-                && !memory
-                    .candidates
-                    .get(&candidate.internal_id)
-                    .and_then(|health| health.cooldown_until_ms)
-                    .is_some_and(|until| until > now)
+        .filter(|candidate| !is_cooling_down(&memory, candidate, now))
+        .collect()
+}
+
+fn candidate_health<'a>(
+    memory: &'a RouteMemory,
+    candidate: &Candidate,
+) -> Option<&'a CandidateHealth> {
+    let resource = resource_key(candidate);
+    memory
+        .candidates
+        .values()
+        .filter(|health| {
+            health
+                .resource_key
+                .as_deref()
+                .map_or(health.fingerprint == candidate.fingerprint, |key| {
+                    key == resource
+                })
         })
-        .collect();
-    if changed {
-        persist_route_memory(state, memory);
+        .max_by_key(|health| health.cooldown_until_ms)
+}
+
+fn resource_key(candidate: &Candidate) -> String {
+    if let Some(source) = &candidate.account_source {
+        candidate_fingerprint(
+            &candidate.model_id,
+            "account://echobird",
+            &serde_json::to_string(source).unwrap_or_default(),
+        )
+    } else {
+        candidate_fingerprint(
+            &candidate.model_id,
+            candidate.base_url.trim_end_matches('/'),
+            &candidate.api_key,
+        )
     }
-    result
 }
 
 fn account_is_cooling_down(memory: &RouteMemory, candidate: &Candidate, now: u64) -> bool {
-    let Some(health) = account_health_key(candidate).and_then(|key| memory.accounts.get(&key))
-    else {
-        return false;
-    };
+    applicable_account_health(memory, candidate)
+        .is_some_and(|health| health.cooldown_until_ms.is_some_and(|until| until > now))
+}
+
+fn applicable_account_health<'a>(
+    memory: &'a RouteMemory,
+    candidate: &Candidate,
+) -> Option<&'a CandidateHealth> {
+    let health = account_health_key(candidate).and_then(|key| memory.accounts.get(&key))?;
     if health.failure == Some(FailureClass::Billing) {
         if let Some(source) = &candidate.account_source {
             if matches!(
@@ -2374,11 +2528,11 @@ fn account_is_cooling_down(memory: &RouteMemory, candidate: &Candidate, now: u64
             .iter()
             .any(|model| model.eq_ignore_ascii_case(&candidate.model_id))
             {
-                return false;
+                return None;
             }
         }
     }
-    health.cooldown_until_ms.is_some_and(|until| until > now)
+    Some(health)
 }
 
 fn account_health_key(candidate: &Candidate) -> Option<String> {
@@ -2391,17 +2545,18 @@ fn source_health_key(source: &crate::models::model::AccountSource) -> String {
     ))
 }
 
+fn is_cooling_down(memory: &RouteMemory, candidate: &Candidate, now: u64) -> bool {
+    candidate_health(memory, candidate)
+        .and_then(|health| health.cooldown_until_ms)
+        .is_some_and(|until| until > now)
+        || account_is_cooling_down(memory, candidate, now)
+}
+
 fn candidate_is_cooling_down(state: &AppState, candidate: &Candidate) -> bool {
     let Ok(memory) = state.route_memory.lock() else {
         return false;
     };
-    let now = now_ms();
-    memory
-        .candidates
-        .get(&candidate.internal_id)
-        .and_then(|health| health.cooldown_until_ms)
-        .is_some_and(|until| until > now)
-        || account_is_cooling_down(&memory, candidate, now)
+    is_cooling_down(&memory, candidate, now_ms())
 }
 
 #[derive(Default)]
@@ -2830,29 +2985,91 @@ fn mark_stream_failure(
     Some(FailureClass::Transient)
 }
 
+#[cfg(test)]
 fn begin_attempt(state: &AppState, candidate: &mut Candidate) {
-    let Ok(memory) = state.route_memory.lock() else {
-        return;
+    candidate.attempt = Some(new_attempt(&state.route_memory.lock().unwrap(), candidate));
+}
+
+fn try_begin_attempt(state: &AppState, candidate: &mut Candidate) -> bool {
+    let Ok(mut memory) = state.route_memory.lock() else {
+        return false;
     };
-    candidate.attempt = Some(Arc::new(AttemptHealth {
+    if is_cooling_down(&memory, candidate, now_ms()) {
+        return false;
+    }
+    // Weak leases last through the response body, and disappear on cancellation.
+    // Healthy resources take no lease and retain their normal parallelism.
+    let expired: Vec<_> = memory
+        .recovering
+        .iter()
+        .filter(|(_, attempt)| {
+            attempt
+                .upgrade()
+                .map_or(true, |attempt| !attempt_epoch_is_current(&memory, &attempt))
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in expired {
+        memory.recovering.remove(&key);
+    }
+    let mut recovery_keys = Vec::new();
+    if candidate_health(&memory, candidate).is_some() {
+        recovery_keys.push(format!("model:{}", resource_key(candidate)));
+    }
+    if let Some(key) = account_health_key(candidate).filter(|_| {
+        applicable_account_health(&memory, candidate).is_some_and(|health| {
+            health
+                .cooldown_until_ms
+                .is_some_and(|until| until <= now_ms())
+        })
+    }) {
+        recovery_keys.push(format!("account:{key}"));
+    }
+    if recovery_keys
+        .iter()
+        .any(|key| memory.recovering.contains_key(key))
+    {
+        return false;
+    }
+    let attempt = new_attempt(&memory, candidate);
+    memory
+        .candidate_epochs
+        .entry(candidate.internal_id.clone())
+        .or_default();
+    for key in recovery_keys {
+        memory.recovering.insert(key, Arc::downgrade(&attempt));
+    }
+    candidate.attempt = Some(attempt);
+    true
+}
+
+fn new_attempt(memory: &RouteMemory, candidate: &Candidate) -> Arc<AttemptHealth> {
+    Arc::new(AttemptHealth {
         revision: memory.revision,
+        candidate_id: candidate.internal_id.clone(),
+        account_key: account_health_key(candidate),
         account_epoch: account_health_key(candidate)
             .and_then(|key| memory.account_epochs.get(&key).copied())
             .unwrap_or(0),
+        candidate_epoch: memory
+            .candidate_epochs
+            .get(&candidate.internal_id)
+            .copied()
+            .unwrap_or(0),
         credential_version: Mutex::new(None),
-    }));
+    })
 }
 
-fn attempt_is_current(memory: &RouteMemory, candidate: &Candidate) -> bool {
+fn attempt_has_current_credentials(memory: &RouteMemory, candidate: &Candidate) -> bool {
     let Some(attempt) = &candidate.attempt else {
         return true;
     };
+    if !attempt_epoch_is_current(memory, attempt) {
+        return false;
+    }
     let Some(key) = account_health_key(candidate) else {
         return true;
     };
-    if memory.account_epochs.get(&key).copied().unwrap_or(0) != attempt.account_epoch {
-        return false;
-    }
     let version = attempt.credential_version.lock().ok();
     match (
         version.as_deref().and_then(|value| value.as_ref()),
@@ -2861,6 +3078,44 @@ fn attempt_is_current(memory: &RouteMemory, candidate: &Candidate) -> bool {
         (Some(attempted), Some((current, _))) => attempted == current,
         _ => true,
     }
+}
+
+fn attempt_epoch_is_current(memory: &RouteMemory, attempt: &AttemptHealth) -> bool {
+    memory
+        .candidate_epochs
+        .get(&attempt.candidate_id)
+        .copied()
+        .unwrap_or(0)
+        == attempt.candidate_epoch
+        && attempt.account_key.as_ref().map_or(true, |key| {
+            memory.account_epochs.get(key).copied().unwrap_or(0) == attempt.account_epoch
+        })
+}
+
+fn attempt_is_current(memory: &RouteMemory, candidate: &Candidate) -> bool {
+    if !attempt_has_current_credentials(memory, candidate) {
+        return false;
+    }
+    let Some(attempt) = &candidate.attempt else {
+        return true;
+    };
+    if memory
+        .recovered_revisions
+        .get(&format!("model:{}", resource_key(candidate)))
+        .is_some_and(|revision| attempt.revision < *revision)
+    {
+        return false;
+    }
+    if let Some(key) = account_health_key(candidate) {
+        if memory
+            .recovered_revisions
+            .get(&format!("account:{key}"))
+            .is_some_and(|revision| attempt.revision < *revision)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn clear_account_authentication(
@@ -2922,7 +3177,7 @@ fn bind_attempt_credentials(state: &AppState, candidate: &Candidate, credentials
     let Ok(mut memory) = state.route_memory.lock() else {
         return;
     };
-    if memory.account_epochs.get(&key).copied().unwrap_or(0) != attempt.account_epoch {
+    if !attempt_epoch_is_current(&memory, attempt) {
         return;
     }
     let Ok(mut attempted_version) = attempt.credential_version.lock() else {
@@ -2967,14 +3222,34 @@ fn mark_success(state: &AppState, candidate: &Candidate) {
                 .cooldown_until_ms
                 .is_some_and(|until| until > now_ms()))
     };
-    let removed_failure = memory
-        .candidates
-        .get(&candidate.internal_id)
-        .is_some_and(may_clear)
-        && memory.candidates.remove(&candidate.internal_id).is_some();
+    let previous_len = memory.candidates.len();
+    let resource = resource_key(candidate);
+    memory.candidates.retain(|_, health| {
+        !health
+            .resource_key
+            .as_deref()
+            .map_or(health.fingerprint == candidate.fingerprint, |key| {
+                key == resource
+            })
+            || !may_clear(health)
+    });
+    let removed_failure = memory.candidates.len() != previous_len;
     let removed_account = account_health_key(candidate).is_some_and(|key| {
         memory.accounts.get(&key).is_some_and(may_clear) && memory.accounts.remove(&key).is_some()
     });
+    let watermark = revision.min(memory.revision);
+    if removed_failure {
+        memory
+            .recovered_revisions
+            .insert(format!("model:{resource}"), watermark);
+    }
+    if removed_account {
+        if let Some(key) = account_health_key(candidate) {
+            memory
+                .recovered_revisions
+                .insert(format!("account:{key}"), watermark);
+        }
+    }
     if removed_failure || removed_account {
         persist_route_memory(state, memory);
     }
@@ -3005,19 +3280,32 @@ fn mark_failure_scoped(
     if !attempt_is_current(&memory, candidate) {
         return;
     }
+    let mut next = candidate_health(&memory, candidate)
+        .cloned()
+        .unwrap_or_else(|| CandidateHealth {
+            fingerprint: candidate.fingerprint.clone(),
+            ..CandidateHealth::default()
+        });
+    next.fingerprint = candidate.fingerprint.clone();
+    next.resource_key = Some(resource_key(candidate));
+    let same_transient_wave = failure == FailureClass::Transient
+        && next.failure == Some(failure)
+        && (next.cooldown_until_ms.is_some_and(|until| until > now_ms())
+            || candidate
+                .attempt
+                .as_ref()
+                .is_some_and(|attempt| attempt.revision < next.revision));
+    if same_transient_wave {
+        return;
+    }
     memory.revision = memory.revision.saturating_add(1);
     let revision = memory.revision;
+    next.consecutive_failures = next.consecutive_failures.saturating_add(1);
     let entry = memory
         .candidates
         .entry(candidate.internal_id.clone())
         .or_default();
-    if entry.fingerprint != candidate.fingerprint {
-        *entry = CandidateHealth {
-            fingerprint: candidate.fingerprint.clone(),
-            ..CandidateHealth::default()
-        };
-    }
-    entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+    *entry = next;
     let cooldown = cooldown_for_failure(failure, retry_after, entry.consecutive_failures);
     let deadline = now_ms().saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64);
     if !entry
@@ -3048,6 +3336,7 @@ fn mark_failure_scoped(
                         consecutive_failures,
                         cooldown_until_ms: Some(deadline),
                         fingerprint: candidate.fingerprint.clone(),
+                        resource_key: None,
                         failure: Some(failure),
                         revision,
                         account_key: Some(key),
@@ -3230,7 +3519,7 @@ fn response_candidates(
         .filter(|id| !id.is_empty())
         .ok_or("previous_response_id must be a response ID")?;
     let binding = state
-        .route_memory
+        .response_memory
         .lock()
         .ok()
         .and_then(|memory| memory.response_bindings.get(id).cloned())
@@ -3249,12 +3538,19 @@ fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) 
     let Some(id) = id.filter(|id| !id.is_empty() && id.len() <= 1024) else {
         return;
     };
-    let Ok(mut memory) = state.route_memory.lock() else {
-        return;
-    };
-    if !attempt_is_current(&memory, candidate) {
+    if !state.route_memory.lock().is_ok_and(|health| {
+        // A valid response belongs to the same account after token refresh.
+        // Explicit sign-in or model edits still invalidate the old request.
+        candidate
+            .attempt
+            .as_ref()
+            .map_or(true, |attempt| attempt_epoch_is_current(&health, attempt))
+    }) {
         return;
     }
+    let Ok(mut memory) = state.response_memory.lock() else {
+        return;
+    };
     let now = now_ms();
     memory
         .response_bindings
@@ -3266,7 +3562,7 @@ fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) 
         {
             binding.ambiguous = true;
             binding.expires_at_ms = now.saturating_add(RESPONSE_BINDING_LIFETIME_MS);
-            persist_route_memory(state, memory);
+            persist_response_memory(state, memory);
             return;
         }
     }
@@ -3291,7 +3587,7 @@ fn remember_response(state: &AppState, candidate: &Candidate, id: Option<&str>) 
             ambiguous: false,
         },
     );
-    persist_route_memory(state, memory);
+    persist_response_memory(state, memory);
 }
 
 fn remember_unsupported_responses(state: &AppState, candidate: &Candidate) {
@@ -3507,6 +3803,10 @@ mod responses_tests;
 #[cfg(test)]
 #[path = "audit_tests.rs"]
 mod audit_tests;
+
+#[cfg(test)]
+#[path = "concurrency_tests.rs"]
+mod concurrency_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4016,11 +4316,11 @@ mod tests {
         let second_id = format!("smart-router-{}", uuid::Uuid::new_v4());
         let first_activity = super::super::profiles::with(&first_id, shared_activity);
         let second_activity = super::super::profiles::with(&second_id, shared_activity);
-        let first_memory = super::super::profiles::with(&first_id, shared_route_memory);
-        let second_memory = super::super::profiles::with(&second_id, shared_route_memory);
+        let first_memory = super::super::profiles::with(&first_id, shared_response_memory);
+        let second_memory = super::super::profiles::with(&second_id, shared_response_memory);
         assert!(!Arc::ptr_eq(&first_memory, &second_memory));
-        first_memory.lock().unwrap().revision = 73;
-        assert_eq!(second_memory.lock().unwrap().revision, 0);
+        assert!(first_memory.lock().unwrap().response_bindings.is_empty());
+        assert!(second_memory.lock().unwrap().response_bindings.is_empty());
         let activity = RouteActivityGuard::begin_for("first-candidate", first_activity.clone());
         assert!(first_activity
             .lock()
@@ -4032,8 +4332,8 @@ mod tests {
         drop(activity);
         assert!(first_activity.lock().unwrap().active_attempts.is_empty());
         assert_ne!(
-            super::super::profiles::with(&first_id, route_memory_path),
-            super::super::profiles::with(&second_id, route_memory_path)
+            super::super::profiles::with(&first_id, response_memory_path),
+            super::super::profiles::with(&second_id, response_memory_path)
         );
 
         let mut state = AppState::for_tests().unwrap();
