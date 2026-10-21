@@ -59,13 +59,15 @@ pub(super) fn write(content: &str, table: &str, key: &str, value: Option<Item>) 
     };
     match value {
         Some(mut value) => {
-            if let (Some(old), Some(new)) = (
-                current.get(key).and_then(Item::as_value),
-                value.as_value_mut(),
-            ) {
-                *new.decor_mut() = old.decor().clone();
+            if let Some(existing) = current.get_mut(key) {
+                let value_decor = existing.as_value().map(|old| old.decor().clone());
+                if let (Some(value_decor), Some(new)) = (value_decor, value.as_value_mut()) {
+                    *new.decor_mut() = value_decor;
+                }
+                *existing = value;
+            } else {
+                current.insert(key, value);
             }
-            current.insert(key, value);
         }
         None => {
             current.remove(key);

@@ -1,9 +1,9 @@
 //! Shared model configuration for Codex CLI and ChatGPT Desktop.
 
 use super::{
-    echobird_dir, ensure_parent, toml_delete_top, toml_read_table_value, toml_read_top,
-    toml_write_table_value, toml_write_table_value_raw, toml_write_top, toml_write_top_raw,
-    write_json_file, ApplyResult, ModelInfo,
+    echobird_dir, ensure_parent, toml_delete_table_value, toml_delete_top, toml_read_table_value,
+    toml_read_top, toml_write_table_value, toml_write_table_value_raw, toml_write_top,
+    toml_write_top_raw, write_json_file, ApplyResult, ModelInfo,
 };
 use crate::services::codex_accounts;
 use crate::services::codex_catalog;
@@ -14,6 +14,17 @@ use std::path::Path;
 /// provider section so model switches do not accumulate stale sections.
 const CODEX_PROVIDER: &str = "OpenAI";
 const DEEPSEEK_DESKTOP_EFFORTS: &str = r#"["low", "medium", "high", "xhigh", "ultra", "max"]"#;
+const CODEX_ROUTE_TOP_LEVEL_KEYS: &[&str] = &[
+    "model",
+    "model_reasoning_effort",
+    "review_model",
+    "model_catalog_json",
+    "model_context_window",
+    "model_auto_compact_token_limit",
+    "web_search",
+    "model_supports_reasoning_summaries",
+    "model_reasoning_summary",
+];
 
 // ─── Per-model capability registry ───
 //
@@ -495,90 +506,112 @@ fn read_codex_auth_key(codex_dir: &Path) -> Option<String> {
         .map(String::from)
 }
 
-pub(super) fn restore_codex_to_official(tool_id: &str, config_path: &Path) -> ApplyResult {
-    // Full-file overwrite. ChatGPT's model picker shows the
-    // `model_provider` id VERBATIM, so the built-in lowercase id
-    // "openai" rendered as a lowercase "openai" chip — inconsistent with
-    // the third-party path, which uses a capitalized "OpenAI" provider.
-    // Point at a capitalized "OpenAI" provider so the chip casing
-    // matches everywhere.
-    //
-    // We deliberately do NOT set `base_url`. Codex's `to_api_provider`
-    // resolves an unset base_url from the AUTH MODE — chatgpt.com/
-    // backend-api/codex for a ChatGPT login, api.openai.com otherwise —
-    // which is exactly the built-in openai behavior that keeps
-    // ChatGPT-account users working. `requires_openai_auth = true`
-    // reproduces the built-in's login-screen / auth.json handling. (A
-    // table keyed lowercase "openai" would be silently dropped: Codex's
-    // merge does `entry(key).or_insert`, and the built-in already owns
-    // that key — only a new "OpenAI" key takes effect.)
-    //
-    // We also write no `model` line — pinning one (we used to pin
-    // "gpt-4o") breaks ChatGPT-account users because OpenAI rejects
-    // gpt-4o for that auth path. Without it Codex selects an
-    // auth-appropriate default (gpt-5-codex for ChatGPT, otherwise its
-    // built-in default). Codex regenerates everything else
-    // (projects/marketplaces/tui state) on next launch.
-    let content = "model_provider = \"OpenAI\"\n\
-                   \n\
-                   [model_providers.OpenAI]\n\
-                   name = \"OpenAI\"\n\
-                   wire_api = \"responses\"\n\
-                   requires_openai_auth = true\n";
+fn configured_codex_base_url(content: &str) -> String {
+    ["model_providers.OpenAI", "model_providers.openai"]
+        .into_iter()
+        .map(|table| toml_read_table_value(content, table, "base_url"))
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or_default()
+}
 
-    ensure_parent(config_path);
-    match fs::write(config_path, content) {
-        Ok(_) => {
-            // Restore auth.json from our backup if we have one (OAuth
-            // tokens, prior api-key from before the third-party detour).
-            //
-            // We do NOT delete auth.json when no backup exists. The old
-            // behavior was "fall through to Codex's own login flow",
-            // but deleting auth.json out from under a running Codex
-            // process produces a worse failure mode: the in-memory
-            // React state and the on-disk auth become inconsistent,
-            // which surfaces as a "fake account"
-            // displayed in the Codex sidebar and silently partitions
-            // any chats the user created during the third-party
-            // session into an inaccessible namespace. Leaving the
-            // third-party apikey in place at worst causes a 401 on
-            // next Codex request, which Codex handles loudly via its
-            // own re-login UI — better than silent data loss. Users
-            // who actually want to log out should use Codex's own
-            // logout button.
-            let auth_path = config_path
-                .parent()
-                .unwrap_or(Path::new(""))
-                .join("auth.json");
-            let auth_backup_path = echobird_dir().join("codex-auth.bak.json");
-            if let Err(error) = codex_accounts::restore_legacy_oauth(&auth_path, &auth_backup_path)
-            {
-                return ApplyResult {
-                    success: false,
-                    message: format!("Failed to restore Codex account: {error}"),
-                };
-            }
+fn codex_route_is_official(content: &str) -> bool {
+    toml_read_top(content, "model_provider").eq_ignore_ascii_case("openai")
+        && configured_codex_base_url(content).trim().is_empty()
+}
 
-            let relay_path = echobird_dir().join("codex.json");
-            if relay_path.exists() {
-                let _ = fs::remove_file(&relay_path);
-            }
-            ApplyResult {
-                success: true,
-                message: format!(
-                    "{} restored to OpenAI official provider.",
-                    if tool_id == "chatgptdesktop" {
-                        "ChatGPT"
-                    } else {
-                        "Codex CLI"
-                    }
-                ),
-            }
+fn official_codex_config_from(content: &str) -> Result<String, String> {
+    if content.parse::<toml_edit::DocumentMut>().is_err() {
+        return Err("Codex configuration is not valid TOML".into());
+    }
+
+    let trailing_newline = content.is_empty() || content.ends_with('\n');
+    let mut next = content.to_string();
+    next = toml_write_top(&next, "model_provider", CODEX_PROVIDER);
+    for key in CODEX_ROUTE_TOP_LEVEL_KEYS {
+        next = toml_delete_top(&next, key);
+    }
+
+    let provider = "model_providers.OpenAI";
+    next = toml_write_table_value(&next, provider, "name", CODEX_PROVIDER);
+    next = toml_write_table_value(&next, provider, "wire_api", "responses");
+    next = toml_write_table_value_raw(&next, provider, "requires_openai_auth", "true");
+    next = toml_delete_table_value(&next, provider, "base_url");
+
+    if toml_read_table_value(&next, "desktop", "enabled-reasoning-efforts")
+        == DEEPSEEK_DESKTOP_EFFORTS
+    {
+        next = super::toml::write(&next, "desktop", "enabled-reasoning-efforts", None);
+    }
+
+    if trailing_newline && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    Ok(next)
+}
+
+fn restore_codex_config_at(config_path: &Path) -> Result<bool, String> {
+    let existing = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "Failed to read Codex config {}: {error}",
+                config_path.display()
+            ))
         }
-        Err(e) => ApplyResult {
+    };
+    if !existing.trim().is_empty() && codex_route_is_official(&existing) {
+        return Ok(false);
+    }
+
+    let next = official_codex_config_from(&existing)?;
+    ensure_parent(config_path);
+    fs::write(config_path, next).map_err(|error| {
+        format!(
+            "Failed to write Codex config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    Ok(true)
+}
+
+pub(super) fn restore_codex_to_official(tool_id: &str, config_path: &Path) -> ApplyResult {
+    if let Err(error) = restore_codex_config_at(config_path) {
+        return ApplyResult {
             success: false,
-            message: format!("Failed to restore Codex config: {}", e),
-        },
+            message: format!("Failed to restore Codex config: {error}"),
+        };
+    }
+
+    // Restore auth.json from the snapshot taken before third-party mode.
+    // When no snapshot exists, keep the current file: deleting it while the
+    // client is running leaves the UI and disk state inconsistent.
+    let auth_path = config_path
+        .parent()
+        .unwrap_or(Path::new(""))
+        .join("auth.json");
+    let auth_backup_path = echobird_dir().join("codex-auth.bak.json");
+    if let Err(error) = codex_accounts::restore_legacy_oauth(&auth_path, &auth_backup_path) {
+        return ApplyResult {
+            success: false,
+            message: format!("Failed to restore Codex account: {error}"),
+        };
+    }
+
+    let relay_path = echobird_dir().join("codex.json");
+    if relay_path.exists() {
+        let _ = fs::remove_file(&relay_path);
+    }
+    ApplyResult {
+        success: true,
+        message: format!(
+            "{} restored to OpenAI official provider.",
+            if tool_id == "chatgptdesktop" {
+                "ChatGPT"
+            } else {
+                "Codex CLI"
+            }
+        ),
     }
 }
 
@@ -1272,5 +1305,189 @@ mod tests {
         assert!(!other.contains("model_supports_reasoning_summaries"));
         assert!(!other.contains("model_reasoning_summary"));
         assert!(other.contains("web_search = \"live\""));
+    }
+
+    #[test]
+    fn restoring_official_route_preserves_unrelated_user_state() {
+        let third_party = r#"# keep this comment
+model_provider = "OpenAI"
+model = "provider-model"
+model_reasoning_effort = "high"
+model_context_window = 1048576
+model_auto_compact_token_limit = 943718
+model_catalog_json = "models.json"
+web_search = "live"
+model_supports_reasoning_summaries = true
+model_reasoning_summary = "none"
+
+[desktop]
+followUpQueueMode = "queue"
+enabled-reasoning-efforts = ["low", "medium", "high", "xhigh", "ultra", "max"]
+theme = "dark"
+
+[projects.fixture]
+trust_level = "trusted"
+
+[mcp_servers.files]
+command = "files-server"
+
+[plugins."example@market"]
+enabled = true
+
+[model_providers.OpenAI]
+name = "OpenAI"
+base_url = "https://provider.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+keep = "provider-local-field"
+"#;
+
+        let restored = official_codex_config_from(third_party).unwrap();
+        assert_eq!(toml_read_top(&restored, "model_provider"), "OpenAI");
+        assert!(restored.contains("# keep this comment"));
+        assert_eq!(
+            toml_read_table_value(&restored, "desktop", "followUpQueueMode"),
+            "queue"
+        );
+        assert_eq!(toml_read_table_value(&restored, "desktop", "theme"), "dark");
+        assert_eq!(
+            toml_read_table_value(&restored, "projects.fixture", "trust_level"),
+            "trusted"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "mcp_servers.files", "command"),
+            "files-server"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "plugins.\"example@market\"", "enabled"),
+            "true"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "model_providers.OpenAI", "keep"),
+            "provider-local-field"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "model_providers.OpenAI", "wire_api"),
+            "responses"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "model_providers.OpenAI", "requires_openai_auth"),
+            "true"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "model_providers.OpenAI", "base_url"),
+            ""
+        );
+        for key in [
+            "model",
+            "model_reasoning_effort",
+            "model_context_window",
+            "model_auto_compact_token_limit",
+            "model_catalog_json",
+            "web_search",
+            "model_supports_reasoning_summaries",
+            "model_reasoning_summary",
+        ] {
+            assert_eq!(toml_read_top(&restored, key), "", "{key} was not removed");
+        }
+        assert_eq!(
+            toml_read_table_value(&restored, "desktop", "enabled-reasoning-efforts"),
+            ""
+        );
+    }
+
+    #[test]
+    fn api_to_official_round_trip_keeps_one_user_profile() {
+        let fixture =
+            std::env::temp_dir().join(format!("codex-route-round-trip-{}", uuid::Uuid::new_v4()));
+        let codex_dir = fixture.join("codex");
+        let state_dir = fixture.join("state");
+        fs::create_dir_all(&codex_dir).unwrap();
+        let config_path = codex_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            r#"model_provider = "openai"
+
+[desktop]
+theme = "dark"
+followUpQueueMode = "queue"
+
+[projects.fixture]
+trust_level = "trusted"
+
+[mcp_servers.files]
+command = "files-server"
+"#,
+        )
+        .unwrap();
+
+        let model: ModelInfo = serde_json::from_value(serde_json::json!({
+            "model": "provider-model",
+            "baseUrl": "https://provider.example/v1",
+            "apiKey": "fixture-key"
+        }))
+        .unwrap();
+        let applied = apply_codex_at("codex", &model, &codex_dir, &state_dir);
+        assert!(applied.success, "{}", applied.message);
+        assert_eq!(
+            toml_read_table_value(
+                &fs::read_to_string(&config_path).unwrap(),
+                "model_providers.OpenAI",
+                "base_url"
+            ),
+            "https://provider.example/v1"
+        );
+
+        assert!(restore_codex_config_at(&config_path).unwrap());
+        let restored = fs::read_to_string(&config_path).unwrap();
+        assert_eq!(toml_read_top(&restored, "model_provider"), "OpenAI");
+        assert_eq!(toml_read_table_value(&restored, "desktop", "theme"), "dark");
+        assert_eq!(
+            toml_read_table_value(&restored, "desktop", "followUpQueueMode"),
+            "queue"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "projects.fixture", "trust_level"),
+            "trusted"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "mcp_servers.files", "command"),
+            "files-server"
+        );
+        assert_eq!(
+            toml_read_table_value(&restored, "model_providers.OpenAI", "base_url"),
+            ""
+        );
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn restoring_an_already_official_route_does_not_rewrite_config() {
+        let fixture =
+            std::env::temp_dir().join(format!("codex-official-noop-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("config.toml");
+        let content =
+            "model_provider = \"openai\"\nmodel = \"gpt-5.2\"\n\n[desktop]\ntheme = \"dark\"\n";
+        fs::write(&path, content).unwrap();
+
+        assert!(!restore_codex_config_at(&path).unwrap());
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn invalid_config_is_not_rewritten_when_restoring_official() {
+        let fixture =
+            std::env::temp_dir().join(format!("codex-official-invalid-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&fixture).unwrap();
+        let path = fixture.join("config.toml");
+        let content = "model_provider = [";
+        fs::write(&path, content).unwrap();
+
+        let error = restore_codex_config_at(&path).unwrap_err();
+        assert!(error.contains("not valid TOML"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), content);
+        fs::remove_dir_all(fixture).unwrap();
     }
 }

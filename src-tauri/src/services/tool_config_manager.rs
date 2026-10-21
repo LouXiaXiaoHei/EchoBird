@@ -630,6 +630,10 @@ fn toml_write_table_value_raw(content: &str, table: &str, key: &str, value: &str
     }
 }
 
+fn toml_delete_table_value(content: &str, table: &str, key: &str) -> String {
+    toml::write(content, table, key, None)
+}
+
 pub(crate) fn toml_read_table_value(content: &str, table: &str, key: &str) -> String {
     toml::read(content, table, key)
 }
