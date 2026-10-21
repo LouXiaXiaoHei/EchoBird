@@ -18,6 +18,26 @@ function buttons(node: ReactNode): ReactElement<React.ButtonHTMLAttributes<HTMLB
 }
 
 describe('ModelListCard', () => {
+  it.each(['smart-router', 'smart-router-734b8fb0-218f-4eb7-ac33-57901df8f983'])(
+    'keeps router %s out of model edit, delete and quota controls',
+    (internalId) => {
+      const card = ModelListCard({
+        model: { ...model, internalId },
+        selection: null,
+        onSelect: vi.fn(),
+        onRefreshUsage: vi.fn(),
+        onEditModel: vi.fn(),
+        onDeleteModel: vi.fn(),
+        usage: { quotas: [{ balance: 12.34, percentage: 80, resetAt: 0 }] },
+        t: (key) => key,
+      });
+      expect(buttons(card)).toHaveLength(1);
+      const markup = renderToStaticMarkup(card);
+      expect(markup).toContain('lucide-waypoints');
+      expect(markup).not.toContain('12.34');
+    }
+  );
+
   it('keeps actions usable on a model already selected in the router without selecting it again', () => {
     const onSelect = vi.fn();
     const onRefreshUsage = vi.fn();

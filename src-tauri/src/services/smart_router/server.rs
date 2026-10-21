@@ -17,13 +17,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::{
-    api_key_for_use, request_config_for_use, PublicActivity, SMART_ROUTER_INTERNAL_ID,
-    SMART_ROUTER_MODEL_ID,
-};
+use super::{PublicActivity, SMART_ROUTER_INTERNAL_ID, SMART_ROUTER_MODEL_ID};
 use crate::models::model::AccountProvider;
 use crate::services::model_manager;
-use crate::utils::platform::echobird_dir;
 
 #[path = "zen_free.rs"]
 mod zen_free;
@@ -52,7 +48,26 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 static ROUTE_MEMORY: OnceLock<Arc<Mutex<RouteMemory>>> = OnceLock::new();
 static ROUTE_MEMORY_WRITERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
-static ROUTE_ACTIVITY: OnceLock<Mutex<RouteActivity>> = OnceLock::new();
+static ROUTE_ACTIVITY: OnceLock<Arc<Mutex<RouteActivity>>> = OnceLock::new();
+static GROUP_ACTIVITY: OnceLock<Mutex<HashMap<String, Arc<Mutex<RouteActivity>>>>> =
+    OnceLock::new();
+static GROUP_MEMORY: OnceLock<Mutex<HashMap<String, Arc<Mutex<RouteMemory>>>>> = OnceLock::new();
+
+fn shared_activity() -> Arc<Mutex<RouteActivity>> {
+    let id = super::profiles::current_id();
+    if id == SMART_ROUTER_INTERNAL_ID {
+        return ROUTE_ACTIVITY
+            .get_or_init(|| Arc::new(Mutex::new(RouteActivity::default())))
+            .clone();
+    }
+    GROUP_ACTIVITY
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .entry(id)
+        .or_insert_with(|| Arc::new(Mutex::new(RouteActivity::default())))
+        .clone()
+}
 
 #[derive(Default)]
 struct RouteActivity {
@@ -105,16 +120,23 @@ impl RouteActivity {
 
 struct RouteActivityGuard {
     attempt_id: Option<u64>,
+    activity: Arc<Mutex<RouteActivity>>,
 }
 
 impl RouteActivityGuard {
+    #[cfg(test)]
     fn begin(candidate_id: &str) -> Self {
-        let attempt_id = ROUTE_ACTIVITY
-            .get_or_init(|| Mutex::new(RouteActivity::default()))
+        Self::begin_for(candidate_id, shared_activity())
+    }
+    fn begin_for(candidate_id: &str, activity: Arc<Mutex<RouteActivity>>) -> Self {
+        let attempt_id = activity
             .lock()
             .ok()
             .map(|mut activity| activity.begin(candidate_id, now_ms()));
-        Self { attempt_id }
+        Self {
+            attempt_id,
+            activity,
+        }
     }
 }
 
@@ -123,18 +145,14 @@ impl Drop for RouteActivityGuard {
         let Some(attempt_id) = self.attempt_id else {
             return;
         };
-        let Some(activity) = ROUTE_ACTIVITY.get() else {
-            return;
-        };
-        if let Ok(mut activity) = activity.lock() {
+        if let Ok(mut activity) = self.activity.lock() {
             activity.end(attempt_id, now_ms());
         }
     }
 }
 
 pub(crate) fn public_activity() -> PublicActivity {
-    ROUTE_ACTIVITY
-        .get_or_init(|| Mutex::new(RouteActivity::default()))
+    shared_activity()
         .lock()
         .map(|activity| activity.snapshot())
         .unwrap_or(PublicActivity {
@@ -148,6 +166,9 @@ pub(crate) fn public_activity() -> PublicActivity {
 
 #[derive(Clone)]
 struct AppState {
+    config_path: PathBuf,
+    model_id: String,
+    activity: Arc<Mutex<RouteActivity>>,
     http_client: reqwest::Client,
     route_memory: Arc<Mutex<RouteMemory>>,
     route_memory_path: Option<PathBuf>,
@@ -167,6 +188,10 @@ struct AuthenticationFixture {
 }
 
 impl AppState {
+    fn supports_model(&self, model: &str) -> bool {
+        model == self.model_id
+            || (self.model_id == SMART_ROUTER_MODEL_ID && is_supported_router_model(model))
+    }
     fn new() -> Result<Self, String> {
         let http_client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
@@ -174,6 +199,9 @@ impl AppState {
             .build()
             .map_err(|e| format!("reqwest client build failed: {e}"))?;
         Ok(Self {
+            config_path: super::config_path(),
+            model_id: SMART_ROUTER_MODEL_ID.into(),
+            activity: shared_activity(),
             http_client,
             route_memory: shared_route_memory(),
             route_memory_path: Some(route_memory_path()),
@@ -192,6 +220,9 @@ impl AppState {
             .build()
             .map_err(|e| format!("reqwest client build failed: {e}"))?;
         Ok(Self {
+            config_path: super::config_path(),
+            model_id: SMART_ROUTER_MODEL_ID.into(),
+            activity: shared_activity(),
             http_client,
             route_memory: Arc::new(Mutex::new(RouteMemory::default())),
             route_memory_path: None,
@@ -337,12 +368,22 @@ fn route_memory_version() -> u32 {
 }
 
 fn route_memory_path() -> PathBuf {
-    echobird_dir()
+    super::profiles::root()
         .join("config")
-        .join("smart-router-state.json")
+        .join(format!("{}-state.json", super::profiles::current_id()))
 }
 
 fn shared_route_memory() -> Arc<Mutex<RouteMemory>> {
+    let id = super::profiles::current_id();
+    if id != SMART_ROUTER_INTERNAL_ID {
+        return GROUP_MEMORY
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap()
+            .entry(id)
+            .or_insert_with(|| Arc::new(Mutex::new(load_route_memory(&route_memory_path()))))
+            .clone();
+    }
     ROUTE_MEMORY
         .get_or_init(|| Arc::new(Mutex::new(load_route_memory(&route_memory_path()))))
         .clone()
@@ -478,33 +519,40 @@ pub(super) fn start(
     Ok(super::runtime::ServerControl::start(listener, app))
 }
 
-async fn handle_health() -> Response {
-    let config = match super::get_public_config() {
+fn config_for_request(state: &AppState) -> Result<super::RequestConfig, String> {
+    super::request_config_from_loader(|| {
+        let bytes = fs::read(&state.config_path).map_err(|error| error.to_string())?;
+        serde_json::from_slice(&bytes).map_err(|error| error.to_string())
+    })
+}
+
+async fn handle_health(State(state): State<AppState>) -> Response {
+    let config = match config_for_request(&state) {
         Ok(config) => config,
         Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
     Json(json!({
         "status": "ok",
-        "model": SMART_ROUTER_MODEL_ID,
+        "model": config.model_id,
         "candidates": config.candidate_ids.len(),
-        "usableCandidates": config.usable_candidate_count,
+        "usableCandidates": super::usable_candidate_count(&config.candidate_ids),
     }))
     .into_response()
 }
 
-async fn handle_models(headers: HeaderMap) -> Response {
-    let expected_key = match api_key_for_use() {
-        Ok(key) => key,
+async fn handle_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let config = match config_for_request(&state) {
+        Ok(config) => config,
         Err(e) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
-    if !is_authorized(&headers, &expected_key) {
+    if !is_authorized(&headers, &config.api_key) {
         return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
 
     Json(json!({
         "object": "list",
         "data": [{
-            "id": SMART_ROUTER_MODEL_ID,
+            "id": config.model_id,
             "object": "model",
             "created": 0,
             "owned_by": "echobird"
@@ -514,7 +562,7 @@ async fn handle_models(headers: HeaderMap) -> Response {
 }
 
 async fn handle_chat(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -525,7 +573,7 @@ async fn handle_chat(
         }
         Err(error) => return error.into_response(),
     };
-    let request_config = match request_config_for_use() {
+    let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(e) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
@@ -537,7 +585,8 @@ async fn handle_chat(
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !is_supported_router_model(requested_model) {
+    state.model_id = request_config.model_id;
+    if !state.supports_model(requested_model) {
         return openai_error(
             StatusCode::NOT_FOUND,
             &format!("Unknown router model: {requested_model}"),
@@ -556,7 +605,7 @@ fn is_supported_router_model(model_id: &str) -> bool {
 }
 
 async fn handle_responses(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -567,14 +616,15 @@ async fn handle_responses(
         }
         Err(error) => return error.into_response(),
     };
-    let request_config = match request_config_for_use() {
+    let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
     if !is_authorized(&headers, &request_config.api_key) {
         return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
-    if !is_supported_router_model(body["model"].as_str().unwrap_or_default()) {
+    state.model_id = request_config.model_id;
+    if !state.supports_model(body["model"].as_str().unwrap_or_default()) {
         return openai_error(StatusCode::NOT_FOUND, "Unknown router model");
     }
     route_responses_with_candidates(
@@ -587,7 +637,7 @@ async fn handle_responses(
 }
 
 async fn handle_messages(
-    State(state): State<AppState>,
+    State(mut state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -598,7 +648,7 @@ async fn handle_messages(
         }
         Err(error) => return error.into_response(),
     };
-    let request_config = match request_config_for_use() {
+    let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(e) => return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
@@ -606,6 +656,7 @@ async fn handle_messages(
         return anthropic_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
 
+    state.model_id = request_config.model_id;
     route_messages_with_candidates(
         &state,
         &headers,
@@ -623,14 +674,14 @@ async fn route_messages_with_candidates(
 ) -> Response {
     let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     let mut openai_body = crate::services::local_llm::proxy::anthropic_to_openai(&body);
-    openai_body["model"] = Value::String(SMART_ROUTER_MODEL_ID.to_string());
+    openai_body["model"] = Value::String(state.model_id.clone());
     let response = route_chat_with_candidates(state, headers, openai_body, candidates).await;
 
     if !response.status().is_success() {
         return openai_error_to_anthropic(response).await;
     }
     if stream_requested {
-        openai_stream_to_anthropic(response)
+        openai_stream_to_anthropic_for_model(response, state.model_id.clone())
     } else {
         openai_response_to_anthropic(response).await
     }
@@ -1163,7 +1214,8 @@ async fn route_with_policy(
             begin_attempt(state, &mut candidate);
         }
         upstream_body["model"] = Value::String(candidate.model_id.clone());
-        let activity_guard = RouteActivityGuard::begin(&candidate.internal_id);
+        let activity_guard =
+            RouteActivityGuard::begin_for(&candidate.internal_id, state.activity.clone());
         let first_content_deadline = tokio::time::Instant::now() + policy.first_content_timeout;
         let sent = tokio::time::timeout(
             if stream_requested {
@@ -1811,6 +1863,7 @@ struct ToolCallBuffer {
 }
 
 struct AnthropicSseAdapter {
+    model_id: String,
     parser: crate::services::account_proxy::SseParser,
     google_thought: crate::services::account_proxy::GoogleThought,
     message_id: String,
@@ -1826,6 +1879,7 @@ struct AnthropicSseAdapter {
 impl AnthropicSseAdapter {
     fn new() -> Self {
         Self {
+            model_id: SMART_ROUTER_MODEL_ID.into(),
             parser: crate::services::account_proxy::SseParser::default(),
             google_thought: crate::services::account_proxy::GoogleThought::default(),
             message_id: format!("msg_{}", chrono::Utc::now().timestamp_millis()),
@@ -1849,7 +1903,7 @@ impl AnthropicSseAdapter {
                     "type": "message",
                     "role": "assistant",
                     "content": [],
-                    "model": SMART_ROUTER_MODEL_ID,
+                    "model": self.model_id,
                     "stop_reason": null,
                     "stop_sequence": null,
                     "usage": {"input_tokens": 0, "output_tokens": 0}
@@ -2108,13 +2162,19 @@ fn anthropic_sse_event(event: &str, data: Value) -> Bytes {
     Bytes::from(format!("event: {event}\ndata: {data}\n\n"))
 }
 
+#[cfg(test)]
 fn openai_stream_to_anthropic(response: Response) -> Response {
+    openai_stream_to_anthropic_for_model(response, SMART_ROUTER_MODEL_ID.into())
+}
+
+fn openai_stream_to_anthropic_for_model(response: Response, model_id: String) -> Response {
     let routed_via = response.headers().get("X-EchoBird-Routed-Via").cloned();
     let mut source = response.into_body().into_data_stream();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
     tokio::spawn(async move {
         let mut adapter = AnthropicSseAdapter::new();
+        adapter.model_id = model_id;
         if tx.send(Ok(adapter.start_event())).await.is_err() {
             return;
         }
@@ -3355,6 +3415,9 @@ fn copy_response_headers(response: &mut Response, headers: &HeaderMap) {
 }
 
 fn is_authorized(headers: &HeaderMap, expected_key: &str) -> bool {
+    if expected_key.trim().is_empty() {
+        return false;
+    }
     let bearer_matches = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -3927,6 +3990,63 @@ mod tests {
     }
 
     #[test]
+    fn authorization_requires_a_nonempty_expected_key_and_matching_credentials() {
+        let mut headers = HeaderMap::new();
+        assert!(!is_authorized(&headers, ""));
+        assert!(!is_authorized(&headers, " \t\r\n"));
+        assert!(!is_authorized(&headers, "fixture-key"));
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer "));
+        assert!(!is_authorized(&headers, ""));
+        headers.insert("x-api-key", HeaderValue::from_static(""));
+        assert!(!is_authorized(&headers, ""));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer fixture-key"),
+        );
+        assert!(is_authorized(&headers, "fixture-key"));
+        headers.remove(header::AUTHORIZATION);
+        headers.insert("x-api-key", HeaderValue::from_static("fixture-key"));
+        assert!(is_authorized(&headers, "fixture-key"));
+        assert!(!is_authorized(&headers, "different-key"));
+    }
+
+    #[test]
+    fn groups_keep_activity_memory_and_custom_stream_model_ids_separate() {
+        let first_id = format!("smart-router-{}", uuid::Uuid::new_v4());
+        let second_id = format!("smart-router-{}", uuid::Uuid::new_v4());
+        let first_activity = super::super::profiles::with(&first_id, shared_activity);
+        let second_activity = super::super::profiles::with(&second_id, shared_activity);
+        let first_memory = super::super::profiles::with(&first_id, shared_route_memory);
+        let second_memory = super::super::profiles::with(&second_id, shared_route_memory);
+        assert!(!Arc::ptr_eq(&first_memory, &second_memory));
+        first_memory.lock().unwrap().revision = 73;
+        assert_eq!(second_memory.lock().unwrap().revision, 0);
+        let activity = RouteActivityGuard::begin_for("first-candidate", first_activity.clone());
+        assert!(first_activity
+            .lock()
+            .unwrap()
+            .active_attempts
+            .values()
+            .any(|id| id == "first-candidate"));
+        assert!(second_activity.lock().unwrap().active_attempts.is_empty());
+        drop(activity);
+        assert!(first_activity.lock().unwrap().active_attempts.is_empty());
+        assert_ne!(
+            super::super::profiles::with(&first_id, route_memory_path),
+            super::super::profiles::with(&second_id, route_memory_path)
+        );
+
+        let mut state = AppState::for_tests().unwrap();
+        state.model_id = "custom-router".into();
+        assert!(state.supports_model("custom-router"));
+        assert!(!state.supports_model("auto"));
+        let mut adapter = AnthropicSseAdapter::new();
+        adapter.model_id = state.model_id;
+        let event = String::from_utf8(adapter.start_event().to_vec()).unwrap();
+        assert!(event.contains(r#""model":"custom-router""#));
+    }
+
+    #[test]
     fn appends_chat_completions_once() {
         assert_eq!(
             chat_completions_url("https://example.com/v1"),
@@ -4157,6 +4277,7 @@ mod tests {
             http_client: state.http_client.clone(),
             route_memory: Arc::new(Mutex::new(restored)),
             route_memory_path: None,
+            ..state.clone()
         };
         let available = prioritized_candidates(&restored_state, vec![first, second]);
         assert_eq!(available.len(), 1);

@@ -1,3 +1,4 @@
+import { isSmartRouterId } from '../../utils/smartRouter';
 // Model Nexus Page — Model cards, debug console, add/edit modal
 // Extracted from App.tsx with Provider pattern for shared state
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -34,7 +35,7 @@ export const isVolcengineUrl = (baseUrl: string, anthropicUrl?: string | null) =
 
 const visibleModelNexusModels = (models: ModelConfig[]) =>
   models.filter(
-    (model) => model.internalId !== 'local-server' && model.internalId !== 'smart-router'
+    (model) => model.internalId !== 'local-server' && !isSmartRouterId(model.internalId)
   );
 
 export function ModelNexusProvider({ children }: { children: React.ReactNode }) {

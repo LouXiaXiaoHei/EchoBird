@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../hooks/useI18n';
+import { ViewModeTabGroup } from '../../components/ViewModeTabGroup';
 import { CareerTooltip } from './CareerTooltip';
 import { localDayKey, type DayBuckets } from './heatmapData';
 
@@ -114,7 +115,7 @@ export function DailyActivityChart({
             {t('aiCareer.output')}
           </span>
         </div>
-        <div
+        <ViewModeTabGroup
           role="tablist"
           className="view-mode-tabs flex flex-shrink-0 border border-cyber-border rounded-button overflow-hidden"
         >
@@ -152,7 +153,7 @@ export function DailyActivityChart({
               {t(mode === 'messages' ? 'aiCareer.chartMessages' : 'aiCareer.chartTokens')}
             </button>
           ))}
-        </div>
+        </ViewModeTabGroup>
       </div>
       <div
         role="tabpanel"

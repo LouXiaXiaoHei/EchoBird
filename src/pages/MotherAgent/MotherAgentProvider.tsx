@@ -1,3 +1,4 @@
+import { isSmartRouterId } from '../../utils/smartRouter';
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useI18n } from '../../hooks/useI18n';
 import * as api from '../../api/tauri';
@@ -39,7 +40,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   const { routerEnabled } = useFreeModels();
   const [savedModels, setModels] = useState<ModelConfig[]>([]);
   const models = useMemo(
-    () => savedModels.filter((model) => model.internalId !== 'smart-router' || routerEnabled),
+    () => savedModels.filter((model) => !isSmartRouterId(model.internalId) || routerEnabled),
     [savedModels, routerEnabled]
   );
   const [agentModel, setAgentModelRaw] = useState<string | null>(() =>
@@ -51,7 +52,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     else localStorage.removeItem('echobird_agent_model');
   }, []);
   useEffect(() => {
-    if (!routerEnabled && agentModel === 'smart-router') {
+    if (!routerEnabled && isSmartRouterId(agentModel)) {
       // Drop the saved selection when the shared router switch makes it unavailable.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setAgentModel(null);
@@ -326,11 +327,14 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
   );
 
   // Load models from config — refresh on mount and on window focus
+  const modelLoadRequest = useRef(0);
   const loadModels = useCallback(() => {
     if (!api.getModels) return;
+    const request = ++modelLoadRequest.current;
     api
       .getModels()
       .then((loaded) => {
+        if (request !== modelLoadRequest.current) return;
         setModels(loaded);
         if (agentModel && loaded.length > 0 && !loaded.some((m) => m.internalId === agentModel)) {
           setAgentModel(null);
@@ -348,6 +352,7 @@ export function MotherAgentProvider({ children }: { children: React.ReactNode })
     return () => {
       window.removeEventListener('focus', loadModels);
       window.removeEventListener('models-changed', loadModels);
+      modelLoadRequest.current += 1;
     };
   }, [loadModels]);
 

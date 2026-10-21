@@ -34,7 +34,12 @@ vi.mock('../ModelNexus/context', () => {
   const userModels: never[] = [];
   return { useModelNexus: () => ({ userModels }) };
 });
-vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => ({ routerEnabled: false }) }));
+const routerState = vi.hoisted(() => ({ routerEnabled: false, routers: [] as { id: string }[] }));
+vi.mock('../FreeModels/provider', () => ({ useFreeModels: () => routerState }));
+afterEach(() => {
+  routerState.routerEnabled = false;
+  routerState.routers = [];
+});
 vi.mock('./useClaudeCodeAccounts', async () => {
   const { useState } = await import('react');
   return {
@@ -821,6 +826,33 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search preference', (tool) =>
       tool,
       expect.objectContaining({ model: 'fixture-model', webSearch: true })
     );
+  });
+
+  it('preserves the applied router selection while disabled and clears it only after its group is deleted', async () => {
+    routerState.routers = [{ id: 'smart-router' }];
+    await mount();
+    act(() => context.handleSelectModel(tool, 'smart-router'));
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    routerState.routerEnabled = true;
+    await act(async () =>
+      renderer.update(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      )
+    );
+    expect(context.toolModelConfig[tool]).toBe('smart-router');
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    routerState.routers = [];
+    await act(async () =>
+      renderer.update(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      )
+    );
+    expect(context.toolModelConfig[tool]).toBeNull();
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
   });
   it('keeps navigation passive and preserves off across repeat apply, tool switches and remounts', async () => {
     await mount();

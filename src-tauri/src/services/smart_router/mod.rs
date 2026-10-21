@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod account_cleanup_tests;
+pub(crate) mod profiles;
 mod runtime;
 mod server;
 
-pub(crate) use server::forget_account_authentication;
 pub(crate) use server::{cancel_probe, probe_candidate, ProbeResult};
 
 #[cfg(test)]
@@ -13,7 +13,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use rand::rngs::OsRng;
@@ -27,19 +26,28 @@ use crate::utils::platform::echobird_dir;
 pub const SMART_ROUTER_PORT: u16 = 53683;
 pub const SMART_ROUTER_INTERNAL_ID: &str = "smart-router";
 pub const SMART_ROUTER_MODEL_ID: &str = "auto";
+const PORT_IN_USE: &str = "SMART_ROUTER_PORT_IN_USE";
+const PORT_UNAVAILABLE: &str = "SMART_ROUTER_PORT_UNAVAILABLE";
 
 static CONFIG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static RUNNING: AtomicBool = AtomicBool::new(false);
-static PORT: AtomicU16 = AtomicU16::new(SMART_ROUTER_PORT);
-static SERVER: tokio::sync::Mutex<Option<runtime::ServerControl>> =
-    tokio::sync::Mutex::const_new(None);
+static SERVER: OnceLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, runtime::ServerControl>>,
+> = OnceLock::new();
+
+fn servers(
+) -> &'static tokio::sync::Mutex<std::collections::HashMap<String, runtime::ServerControl>> {
+    SERVER.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+}
 
 pub fn port() -> u16 {
-    PORT.load(Ordering::Relaxed)
+    profiles::current_port().unwrap_or(SMART_ROUTER_PORT)
 }
 
 pub(crate) fn is_router_url(raw: &str) -> bool {
-    is_loopback_url_on_port(raw, port()) || is_loopback_url_on_port(raw, SMART_ROUTER_PORT)
+    is_loopback_url_on_port(raw, SMART_ROUTER_PORT)
+        || profiles::all_ports()
+            .iter()
+            .any(|port| is_loopback_url_on_port(raw, *port))
 }
 
 fn is_loopback_url_on_port(raw: &str, port: u16) -> bool {
@@ -52,6 +60,12 @@ fn is_loopback_url_on_port(raw: &str, port: u16) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredConfig {
+    #[serde(default = "default_name")]
+    name: String,
+    #[serde(default = "default_model_id")]
+    model_id: String,
+    #[serde(default)]
+    port: Option<u16>,
     #[serde(default = "default_enabled")]
     enabled: bool,
     #[serde(default = "default_version")]
@@ -69,6 +83,9 @@ struct StoredConfig {
 impl Default for StoredConfig {
     fn default() -> Self {
         Self {
+            name: default_name(),
+            model_id: default_model_id(),
+            port: None,
             enabled: true,
             version: default_version(),
             candidate_ids: Vec::new(),
@@ -103,6 +120,10 @@ impl StoredConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicConfig {
+    pub id: String,
+    pub name: String,
+    pub master_enabled: bool,
+    pub group_enabled: bool,
     pub enabled: bool,
     pub candidate_ids: Vec<String>,
     pub disabled_candidate_ids: Vec<String>,
@@ -126,13 +147,19 @@ pub struct PublicActivity {
 fn default_version() -> u32 {
     1
 }
+fn default_name() -> String {
+    "Auto Router".into()
+}
+fn default_model_id() -> String {
+    SMART_ROUTER_MODEL_ID.into()
+}
 
 fn default_enabled() -> bool {
     true
 }
 
 fn config_path() -> PathBuf {
-    echobird_dir().join("config").join("smart-router.json")
+    profiles::path_for(&profiles::current_id())
 }
 
 fn config_lock() -> &'static Mutex<()> {
@@ -185,8 +212,15 @@ fn load_config_unlocked() -> Result<StoredConfig, String> {
         serde_json::from_str(&content)
             .map_err(|e| format!("parse {} failed: {e}", path.display()))?
     } else {
+        if profiles::current_id() != SMART_ROUTER_INTERNAL_ID {
+            return Err("Smart router configuration is missing".into());
+        }
         let mut config = StoredConfig::default();
-        if let Some(models) = model_manager::prepare_initial_router_defaults()? {
+        if let Some(models) = if profiles::current_id() == SMART_ROUTER_INTERNAL_ID {
+            model_manager::prepare_initial_router_defaults()?
+        } else {
+            None
+        } {
             config.candidate_ids = models.into_iter().map(|model| model.internal_id).collect();
             config.defaults_initialization_pending = true;
             save_config_unlocked(&config)?;
@@ -194,10 +228,15 @@ fn load_config_unlocked() -> Result<StoredConfig, String> {
         config
     };
 
-    if config.api_key.is_empty() {
+    if config.port.is_none() {
+        config.port = Some(profiles::legacy_port()?);
+        save_config_unlocked(&config)?;
+    }
+
+    if config.api_key.trim().is_empty() {
         config.api_key = model_manager::encrypt_key_for_storage(&generate_api_key());
         save_config_unlocked(&config)?;
-    } else if !config.api_key.starts_with("enc:v1:") {
+    } else if !config.api_key.is_empty() && !config.api_key.starts_with("enc:v1:") {
         config.api_key = model_manager::encrypt_key_for_storage(&config.api_key);
         save_config_unlocked(&config)?;
     }
@@ -222,14 +261,18 @@ fn public_config(config: StoredConfig) -> PublicConfig {
     let port = port();
     let usable_candidate_count = usable_candidate_count(&config.active_candidate_ids());
     PublicConfig {
-        enabled: config.enabled,
+        id: profiles::current_id(),
+        name: config.name,
+        master_enabled: profiles::master_enabled(),
+        group_enabled: config.enabled,
+        enabled: config.enabled && profiles::master_enabled(),
         candidate_ids: config.candidate_ids,
         disabled_candidate_ids: config.disabled_candidate_ids,
         usable_candidate_count,
         base_url: format!("http://127.0.0.1:{port}/v1"),
-        model_id: SMART_ROUTER_MODEL_ID.to_string(),
+        model_id: config.model_id,
         port,
-        running: RUNNING.load(Ordering::Relaxed),
+        running: profiles::is_running(&profiles::current_id()),
     }
 }
 
@@ -280,7 +323,7 @@ fn prepare_candidate_ids(
     let mut seen = HashSet::new();
     let candidate_ids: Vec<String> = candidate_ids
         .into_iter()
-        .filter(|id| id != SMART_ROUTER_INTERNAL_ID)
+        .filter(|id| !profiles::is_router_id(id))
         .filter(|id| seen.insert(id.clone()))
         .collect();
     for id in &candidate_ids {
@@ -334,7 +377,7 @@ pub fn get_candidate_models() -> Vec<ModelConfig> {
 }
 
 fn model_is_routable(model: &ModelConfig) -> bool {
-    model.internal_id != SMART_ROUTER_INTERNAL_ID
+    !profiles::is_router_id(&model.internal_id)
         && model
             .model_id
             .as_deref()
@@ -396,7 +439,10 @@ pub fn remove_candidate(internal_id: &str) -> Result<PublicConfig, String> {
         .filter(|id| id != internal_id)
         .collect();
     let config = set_candidate_ids(remaining)?;
-    if delete_owned_model && !model_manager::delete_model(internal_id) {
+    if delete_owned_model
+        && !profiles::candidate_used_elsewhere(internal_id)
+        && !model_manager::delete_model(internal_id)
+    {
         return Err(format!("Smart Router candidate not found: {internal_id}"));
     }
     Ok(config)
@@ -445,21 +491,50 @@ pub(crate) fn remove_account_candidates(
     let _guard = config_lock()
         .lock()
         .map_err(|_| "smart router config lock poisoned".to_string())?;
-    if let Some(remaining) = remove_account_candidates_at(
-        &config_path(),
-        &model_manager::get_user_models(),
-        source,
-        |id| {
-            model_manager::delete_model(id);
-        },
-    )? {
-        server::retain_candidate_memory(&remaining);
+    let models = model_manager::get_user_models();
+    for id in profiles::ids() {
+        profiles::with(&id, || -> Result<(), String> {
+            if let Some(remaining) =
+                remove_account_candidates_at(&config_path(), &models, source, |id| {
+                    model_manager::delete_model(id);
+                })?
+            {
+                server::retain_candidate_memory(&remaining);
+            }
+            Ok(())
+        })?;
     }
     Ok(())
 }
 
 pub(crate) fn forget_candidate_memory(internal_id: &str) {
-    server::forget_candidate_memory(internal_id);
+    for id in profiles::ids() {
+        profiles::with(&id, || server::forget_candidate_memory(internal_id));
+    }
+}
+
+pub(crate) fn forget_account_authentication(
+    provider: crate::models::model::AccountProvider,
+    account_id: &str,
+) {
+    for id in profiles::ids() {
+        profiles::with(&id, || {
+            server::forget_account_authentication(provider, account_id)
+        });
+    }
+}
+
+pub(crate) fn remove_candidate_everywhere(internal_id: &str) -> Result<(), String> {
+    for id in profiles::ids() {
+        profiles::with(&id, || {
+            let remaining = candidate_ids()
+                .into_iter()
+                .filter(|id| id != internal_id)
+                .collect();
+            set_candidate_ids(remaining)
+        })?;
+    }
+    Ok(())
 }
 
 pub(crate) fn candidate_ids() -> Vec<String> {
@@ -471,12 +546,14 @@ pub(crate) fn candidate_ids() -> Vec<String> {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn api_key_for_use() -> Result<String, String> {
     request_config_for_use().map(|config| config.api_key)
 }
 
 pub(super) struct RequestConfig {
     pub api_key: String,
+    pub model_id: String,
     pub candidate_ids: Vec<String>,
 }
 
@@ -485,31 +562,33 @@ fn request_config_from_loader(
 ) -> Result<RequestConfig, String> {
     let config = load()?;
     let api_key = model_manager::decrypt_key_for_use(&config.api_key);
-    if api_key.is_empty() {
+    if api_key.trim().is_empty() {
         Err("smart router API key could not be decrypted".to_string())
     } else {
         Ok(RequestConfig {
             api_key,
+            model_id: config.model_id.clone(),
             candidate_ids: config.active_candidate_ids(),
         })
     }
 }
 
+#[cfg(test)]
 pub(super) fn request_config_for_use() -> Result<RequestConfig, String> {
     request_config_from_loader(load_config)
 }
 
 pub fn model_config() -> Option<ModelConfig> {
-    let port = port();
     let config = load_config().ok()?;
+    let port = port();
     if usable_candidate_count(&config.candidate_ids) == 0 {
         return None;
     }
 
     Some(ModelConfig {
-        internal_id: SMART_ROUTER_INTERNAL_ID.to_string(),
-        name: "Auto Router".to_string(),
-        model_id: Some(SMART_ROUTER_MODEL_ID.to_string()),
+        internal_id: profiles::current_id(),
+        name: config.name,
+        model_id: Some(config.model_id),
         base_url: format!("http://127.0.0.1:{port}/v1"),
         api_key: config.api_key,
         account_source: None,
@@ -524,62 +603,28 @@ pub fn model_config() -> Option<ModelConfig> {
 }
 
 pub fn spawn_proxy_task() {
-    if let Err(error) = tauri::async_runtime::block_on(async {
-        let mut server = SERVER.lock().await;
-        PORT.store(
-            super::local_proxy::saved_port("smart-router", SMART_ROUTER_PORT)?,
-            Ordering::Relaxed,
-        );
-        if load_config()?.enabled {
-            *server = Some(start_server()?);
-        }
-        Ok::<_, String>(())
-    }) {
+    if let Err(error) = tauri::async_runtime::block_on(profiles::start_all()) {
         log::error!("[SmartRouter] {error}");
     }
 }
 
-fn start_server() -> Result<runtime::ServerControl, String> {
-    let listener = super::local_proxy::bind("smart-router", SMART_ROUTER_PORT)?;
-    PORT.store(
-        listener.local_addr().expect("bound listener").port(),
-        Ordering::Relaxed,
-    );
-    server::start(listener)
-}
-
-fn save_enabled(enabled: bool) -> Result<(), String> {
-    let _guard = config_lock()
-        .lock()
-        .map_err(|_| "smart router config lock poisoned".to_string())?;
-    let mut config = load_config_unlocked()?;
-    config.enabled = enabled;
-    save_config_unlocked(&config)
-}
-
-pub async fn set_enabled(enabled: bool) -> Result<PublicConfig, String> {
-    let mut server = SERVER.lock().await;
-    if enabled {
-        if !RUNNING.load(Ordering::Relaxed) {
-            if let Some(previous) = server.take() {
-                previous.stop().await;
-            }
-            let started = start_server()?;
-            if let Err(error) = save_enabled(true) {
-                started.stop().await;
-                return Err(error);
-            }
-            *server = Some(started);
-        } else {
-            save_enabled(true)?;
-        }
+fn port_bind_error(error: std::io::Error) -> String {
+    log::warn!("[SmartRouter] Loopback port binding failed: {error}");
+    if error.kind() == std::io::ErrorKind::AddrInUse {
+        PORT_IN_USE.into()
     } else {
-        save_enabled(false)?;
-        if let Some(previous) = server.take() {
-            previous.stop().await;
-        }
+        PORT_UNAVAILABLE.into()
     }
-    get_public_config()
+}
+
+fn start_server() -> Result<runtime::ServerControl, String> {
+    let config = load_config()?;
+    let port = config.port.ok_or("Smart router port is missing")?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).map_err(port_bind_error)?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    server::start(listener)
 }
 
 #[cfg(test)]
@@ -687,7 +732,7 @@ mod tests {
 
     #[test]
     fn request_snapshot_rejects_unusable_entry_keys() {
-        for api_key in ["", "enc:v1:zz"] {
+        for api_key in ["", " \t\r\n", "enc:v1:zz"] {
             let result = request_config_from_loader(|| {
                 Ok(StoredConfig {
                     api_key: api_key.into(),
@@ -706,6 +751,14 @@ mod tests {
                 .as_deref(),
             Some("unreadable config")
         );
+        assert!(request_config_from_loader(|| {
+            serde_json::from_value(serde_json::json!({
+                "apiKey": "",
+                "apiKeyInitialized": true
+            }))
+            .map_err(|error| error.to_string())
+        })
+        .is_err());
     }
 
     #[test]

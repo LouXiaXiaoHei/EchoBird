@@ -59,6 +59,7 @@ vi.mock('@dnd-kit/sortable', async (original) => ({
 }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
+  listSmartRouters: async () => [await api.getSmartRouterConfig()],
   getSmartRouterCandidates: vi.fn(),
   getSmartRouterActivity: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
@@ -84,6 +85,10 @@ describe('Remove router candidates by dragging', () => {
 
   function config() {
     return {
+      id: 'smart-router',
+      name: 'Auto Router',
+      masterEnabled: enabled,
+      groupEnabled: true,
       enabled,
       candidateIds: [...savedOrder],
       disabledCandidateIds: [...paused],
@@ -389,6 +394,7 @@ describe('Remove router candidates by dragging', () => {
     }));
     savedOrder = savedModels.map((model) => model.internalId);
     let stageWidth = width;
+    let hubOffset = 0;
     const getTotalLength = vi.fn().mockReturnValue(measuredLength);
     const glowStyle = new Map<string, string>();
     const frames = new Map<number, FrameRequestCallback>();
@@ -448,7 +454,10 @@ describe('Remove router candidates by dragging', () => {
             return { getBoundingClientRect: () => rect(40, 50, stageWidth, 620) };
           }
           if (className.includes('free-model-router-hub')) {
-            return { getBoundingClientRect: () => rect(40 + stageWidth / 2 - 190, 50, 380, 140) };
+            return {
+              getBoundingClientRect: () =>
+                rect(40 + stageWidth / 2 - 190 + hubOffset, 50, 380, 140),
+            };
           }
           const model = element.props.children?.props?.children?.props?.model;
           if (className === 'min-w-0' && model) {
@@ -470,6 +479,11 @@ describe('Remove router candidates by dragging', () => {
       flushFrames,
       getTotalLength,
       glowStyle,
+      moveHub: async (offset: number) => {
+        hubOffset = offset;
+        await act(async () => [...observers].forEach((callback) => callback()));
+        await flushFrames();
+      },
       resize: async (nextWidth: number) => {
         stageWidth = nextWidth;
         await act(async () => [...observers].forEach((callback) => callback()));
@@ -484,6 +498,17 @@ describe('Remove router candidates by dragging', () => {
       .filter((node) => node.props.className === 'free-model-route-path')
       .map((node) => node.props.d as string);
   }
+
+  it('keeps the routing diagram fixed when the upper card moves horizontally', async () => {
+    const geometry = await openGeometry(2);
+    const original = visiblePaths();
+    await geometry.moveHub(272);
+    expect(visiblePaths()).toEqual(original);
+    await geometry.moveHub(-272);
+    expect(visiblePaths()).toEqual(original);
+    await geometry.resize(600);
+    expect(visiblePaths()).not.toEqual(original);
+  });
 
   it('omits a paused tail and the separate lines inside paused cards', async () => {
     paused = ['geometry-4', 'geometry-5'];
@@ -790,7 +815,7 @@ describe('Remove router candidates by dragging', () => {
     expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
   });
 
-  it('disables routing when its last candidate is removed and retains its saved configuration', async () => {
+  it('keeps the master switch unchanged when the current group becomes empty', async () => {
     enabled = true;
     savedOrder = ['model-two'];
     await open();
@@ -798,10 +823,10 @@ describe('Remove router candidates by dragging', () => {
     await start();
     await end(REMOVE_TARGET);
     expect(api.removeSmartRouterCandidate).toHaveBeenCalledExactlyOnceWith('model-two');
-    expect(api.setSmartRouterEnabled).toHaveBeenCalledExactlyOnceWith(false);
+    expect(api.setSmartRouterEnabled).not.toHaveBeenCalled();
     expect([...context.selectedIds]).toEqual([]);
     expect(context.customModels).toEqual([]);
-    expect(context.routerEnabled).toBe(false);
+    expect(context.routerEnabled).toBe(true);
     expect(savedModels).toHaveLength(3);
     expect(api.deleteModel).not.toHaveBeenCalled();
     expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();

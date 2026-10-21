@@ -593,9 +593,7 @@ pub fn get_models() -> Vec<ModelConfig> {
         Vec::new()
     };
 
-    let smart_router_models: Vec<ModelConfig> = crate::services::smart_router::model_config()
-        .into_iter()
-        .collect();
+    let smart_router_models = crate::services::smart_router::profiles::model_configs();
 
     // Order: local → smart router → user → built-in, then apply the user's drag-reorder
     let mut all = Vec::new();

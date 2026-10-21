@@ -19,9 +19,10 @@ describe('explicit Smart Router response tests', () => {
   let hook: ReturnType<typeof useRouteResponseTests>;
   let models: RouteModelNode[];
   let active: boolean;
+  let routerId: string;
   let replies: ((result: api.SmartRouterProbeResult) => void)[];
   function Harness() {
-    hook = useRouteResponseTests(models, active);
+    hook = useRouteResponseTests(models, active, routerId);
     return null;
   }
   async function render() {
@@ -36,6 +37,7 @@ describe('explicit Smart Router response tests', () => {
   beforeEach(() => {
     renderer = undefined as unknown as ReactTestRenderer;
     active = true;
+    routerId = 'first';
     models = ['api', 'account', 'keyless'].map((id) => ({
       id,
       internalId: id,
@@ -51,6 +53,31 @@ describe('explicit Smart Router response tests', () => {
       () => new Promise((resolve) => replies.push(resolve))
     );
     vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  it('cancels probes and ignores late results when switching groups with the same candidates', async () => {
+    models = [models[0]];
+    await render();
+    await act(async () => {
+      void hook.test();
+    });
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.testSmartRouterCandidate).mock.calls[0][4]).toBe('first');
+    routerId = 'second';
+    await render();
+    expect(api.cancelSmartRouterProbe).toHaveBeenCalledOnce();
+    expect(hook.isTesting).toBe(false);
+    await reply(0, { latencyMs: 42, error: null });
+    expect(hook.results).toEqual({});
+    await act(async () => {
+      void hook.test();
+    });
+    expect(vi.mocked(api.testSmartRouterCandidate).mock.calls[1][4]).toBe('second');
+    await reply(1, { latencyMs: 18, error: null });
+    expect(hook.results.api.latencyMs).toBe(18);
+    routerId = 'first';
+    await render();
+    expect(hook.results).toEqual({});
   });
   afterEach(async () => {
     if (renderer) await act(async () => renderer.unmount());
@@ -79,7 +106,8 @@ describe('explicit Smart Router response tests', () => {
       'account',
       'account-model',
       expect.any(String),
-      expect.any(String)
+      expect.any(String),
+      'first'
     );
     await reply(1, { latencyMs: null, error: 'HTTP 401' });
     await reply(2, { latencyMs: null, error: 'timeout' });
@@ -103,27 +131,59 @@ describe('explicit Smart Router response tests', () => {
     ).toBe(5);
   });
 
-  it('cancels on leaving the list, stops queued requests and ignores late results', async () => {
+  it('keeps the default router lookup when no group ID was supplied', async () => {
+    routerId = '';
+    models = [models[2]];
     await render();
     await act(async () => {
       void hook.test();
     });
-    const ids = vi.mocked(api.testSmartRouterCandidate).mock.calls.map((call) => call[2]);
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledExactlyOnceWith(
+      'keyless',
+      'keyless-model',
+      expect.any(String),
+      expect.any(String),
+      undefined
+    );
+    await reply(0, { latencyMs: 12, error: null });
+    expect(hook.results.keyless.latencyMs).toBe(12);
+  });
+
+  it('continues the same round while hidden and retains results when returning', async () => {
+    await render();
+    await act(async () => {
+      void hook.test();
+    });
+    const batch = vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3];
     active = false;
     await render();
-    expect(vi.mocked(api.cancelSmartRouterProbe).mock.calls.map((call) => call[0])).toEqual(ids);
-    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(
-      vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3]
-    );
-    await reply(0, { latencyMs: 100, error: null });
-    await reply(1, { latencyMs: 200, error: null });
+    expect(api.cancelSmartRouterProbe).not.toHaveBeenCalled();
+    expect(finishConnectionTestBatch).not.toHaveBeenCalled();
+    expect(hook.isTesting).toBe(true);
+    await act(async () => hook.test());
     expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(2);
-    expect(hook.results).toEqual({});
-    expect(hook.isTesting).toBe(false);
-    expect(finishConnectionTestBatch).toHaveBeenCalledTimes(1);
+    await reply(0, { latencyMs: 100, error: null });
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(api.testSmartRouterCandidate).mock.calls[2][3]).toBe(batch);
+    expect(hook.results.api.latencyMs).toBe(100);
     active = true;
     await render();
-    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(2);
+    expect(hook.pendingIds).toEqual(new Set(['account', 'keyless']));
+    await act(async () => hook.test());
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    active = false;
+    await render();
+    await reply(1, { latencyMs: 200, error: null });
+    await reply(2, { latencyMs: null, error: 'timeout' });
+    expect(hook.isTesting).toBe(false);
+    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(batch);
+    active = true;
+    await render();
+    expect(hook.results.api.latencyMs).toBe(100);
+    expect(hook.results.account.latencyMs).toBe(200);
+    expect(hook.results.keyless.error).toBe('timeout');
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    expect(api.cancelSmartRouterProbe).not.toHaveBeenCalled();
   });
 
   it.each(['model', 'account', 'endpoint', 'remove'])(
@@ -175,9 +235,7 @@ describe('explicit Smart Router response tests', () => {
       void hook.test();
     });
     const firstBatch = vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3];
-    active = false;
-    await render();
-    active = true;
+    models = models.map((model) => ({ ...model, baseUrl: `${model.baseUrl}/changed` }));
     await render();
     await act(async () => {
       void hook.test();

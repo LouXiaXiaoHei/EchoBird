@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 
 use axum::serve::Listener;
 use tokio::net::{TcpListener, TcpStream};
@@ -7,6 +6,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct ServerControl {
+    id: String,
     shutdown: CancellationToken,
     stopped: oneshot::Receiver<()>,
     #[cfg(windows)]
@@ -15,6 +15,8 @@ pub(super) struct ServerControl {
 
 impl ServerControl {
     pub(super) fn start(listener: TcpListener, app: axum::Router) -> Self {
+        let id = super::profiles::current_id();
+        let task_id = id.clone();
         #[cfg(windows)]
         let addr = listener.local_addr().expect("bound listener");
         let shutdown = CancellationToken::new();
@@ -24,20 +26,21 @@ impl ServerControl {
             listener: Some(listener),
             released: Some(released),
         };
-        super::RUNNING.store(true, Ordering::Relaxed);
+        super::profiles::set_running(&id, true);
         tauri::async_runtime::spawn(async move {
             let result = axum::serve(listener, app)
                 .with_graceful_shutdown(signal.clone().cancelled_owned())
                 .await;
             // A previous server may finish draining after a new one has started.
             if !signal.is_cancelled() {
-                super::RUNNING.store(false, Ordering::Relaxed);
+                super::profiles::set_running(&task_id, false);
             }
             if let Err(error) = result {
                 log::error!("[SmartRouter] serve failed: {error}");
             }
         });
         Self {
+            id,
             shutdown,
             stopped,
             #[cfg(windows)]
@@ -49,7 +52,7 @@ impl ServerControl {
         self.shutdown.cancel();
         // Wait for the listening socket; in-flight responses drain independently.
         let _ = self.stopped.await;
-        super::RUNNING.store(false, Ordering::Relaxed);
+        super::profiles::set_running(&self.id, false);
         // Windows may still be processing canceled socket I/O after Drop.
         #[cfg(windows)]
         if let Err(error) = wait_for_port_release(self.addr).await {

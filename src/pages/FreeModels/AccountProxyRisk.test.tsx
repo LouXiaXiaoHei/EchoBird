@@ -48,6 +48,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: openExternal }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
+  listSmartRouters: async () => [await api.getSmartRouterConfig()],
   getSmartRouterCandidates: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
   setSmartRouterCandidates: vi.fn(),
@@ -137,6 +138,10 @@ beforeEach(async () => {
   vi.stubGlobal('fetch', fetch);
   useNavigationStore.setState({ activePage: 'freeModels' });
   vi.mocked(api.getSmartRouterConfig).mockResolvedValue({
+    id: 'smart-router',
+    name: 'Auto Router',
+    masterEnabled: false,
+    groupEnabled: true,
     enabled: false,
     candidateIds: [],
     usableCandidateCount: 0,

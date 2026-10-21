@@ -23,6 +23,14 @@ const SCAN_COMPLETE_MS = 320;
 const ROUTER_LAYOUT_KEY = 'echobird-router-layout';
 
 interface FreeModelsContextValue {
+  routers: api.SmartRouterConfig[];
+  activeRouterId: string;
+  activeRouterEnabled: boolean;
+  groupPending: boolean;
+  selectRouter: (id: string) => Promise<void>;
+  saveRouter: (settings: api.SmartRouterSettings) => Promise<void>;
+  deleteRouter: (id: string) => Promise<void>;
+  setGroupEnabled: (id: string, enabled: boolean) => Promise<void>;
   layout: 'cards' | 'list';
   setLayout: (layout: 'cards' | 'list') => void;
   activeDragId: string | null;
@@ -141,7 +149,15 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   const [scanProgress, setScanProgress] = useState(0);
   const [routerBaseUrl, setRouterBaseUrl] = useState('127.0.0.1:53683/v1');
   const [routerEnabled, setRouterEnabledState] = useState(true);
+  const [routers, setRouters] = useState<api.SmartRouterConfig[]>([]);
+  const [activeRouterId, setActiveRouterId] = useState('smart-router');
+  const activeRouterRef = useRef('smart-router');
+  const [groupPending, setGroupPending] = useState(false);
+  const groupTransition = useRef(false);
+  const routerArgs = (): [] | [string] =>
+    activeRouterRef.current === 'smart-router' ? [] : [activeRouterRef.current];
   const [routerTogglePending, setRouterTogglePending] = useState(false);
+  const routerTogglePendingRef = useRef(false);
   const [routerLoaded, setRouterLoaded] = useState(false);
   const [pausedIds, setPausedIds] = useState<Set<string>>(() => new Set());
   const [candidateTogglePending, setCandidateTogglePending] = useState<Set<string>>(
@@ -199,14 +215,19 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const loadRouter = useCallback(async () => {
+  const loadRouter = useCallback(async (preferredId = activeRouterRef.current) => {
     routerLoadedRef.current = false;
-    const [loadedRouter, configuredModels] = await Promise.all([
-      api.getSmartRouterConfig(),
-      api.getSmartRouterCandidates(),
-    ]);
+    const groups = await api.listSmartRouters();
+    const router = groups.find((group) => group.id === preferredId) ?? groups[0];
+    if (!router) throw new Error('No smart router configured');
+    const configuredModels = await api.getSmartRouterCandidates(
+      ...(router.id === 'smart-router' ? [] : [router.id])
+    );
+    activeRouterRef.current = router.id;
+    setRouters(groups);
+    setActiveRouterId(router.id);
     const modelsById = new Map(configuredModels.map((model) => [model.internalId, model]));
-    const routeModels = loadedRouter.candidateIds.flatMap((internalId) => {
+    const routeModels = router.candidateIds.flatMap((internalId) => {
       const model = modelsById.get(internalId);
       if (!model) return [];
       return [
@@ -223,10 +244,6 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
         },
       ];
     });
-    const router =
-      loadedRouter.enabled && routeModels.length === 0
-        ? await api.setSmartRouterEnabled(false)
-        : loadedRouter;
     setCustomModels(routeModels);
     // Deleted models have no visible row and must not occupy an addition slot.
     // Keep the local server configured while it is temporarily offline.
@@ -245,30 +262,107 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
       return next;
     });
     setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
-    setRouterEnabledState(router.enabled);
+    setRouterEnabledState(router.masterEnabled);
     setPausedIds(new Set(router.disabledCandidateIds ?? []));
     setRouterLoaded(true);
     routerLoadedRef.current = true;
   }, []);
 
+  const changeGroup = useCallback(async (change: () => Promise<void>) => {
+    if (groupTransition.current) return;
+    groupTransition.current = true;
+    setGroupPending(true);
+    const operation = routerMutationRef.current.catch(() => undefined).then(change);
+    routerMutationRef.current = operation;
+    try {
+      await operation;
+    } finally {
+      groupTransition.current = false;
+      setGroupPending(false);
+    }
+  }, []);
+
+  const selectRouter = useCallback(
+    async (id: string) => {
+      try {
+        await changeGroup(() => loadRouter(id));
+      } catch (error) {
+        console.error('Load smart router failed:', error);
+        showToast('error', t('error.requestFailed'));
+      }
+    },
+    [changeGroup, loadRouter, showToast, t]
+  );
+
+  const saveRouter = useCallback(
+    async (settings: api.SmartRouterSettings) => {
+      await changeGroup(async () => {
+        const saved = await api.saveSmartRouter(settings);
+        try {
+          await loadRouter(saved.id);
+        } catch (error) {
+          console.error('Refresh saved smart router failed:', error);
+          showToast('error', t('error.requestFailed'));
+        }
+      });
+    },
+    [changeGroup, loadRouter, showToast, t]
+  );
+
+  const deleteRouter = useCallback(
+    async (id: string) => {
+      await changeGroup(async () => {
+        await api.deleteSmartRouter(id);
+        try {
+          await loadRouter();
+        } catch (error) {
+          console.error('Refresh deleted smart router failed:', error);
+          showToast('error', t('error.requestFailed'));
+        }
+      });
+    },
+    [changeGroup, loadRouter, showToast, t]
+  );
+
+  const setGroupEnabled = useCallback(
+    async (id: string, enabled: boolean) => {
+      try {
+        await changeGroup(async () => {
+          const saved = await api.setSmartRouterGroupEnabled(id, enabled);
+          setRouters((current) =>
+            current.map((router) => (router.id === saved.id ? saved : router))
+          );
+        });
+      } catch (error) {
+        console.error('Toggle smart router group failed:', error);
+        showToast('error', t('error.requestFailed'));
+      }
+    },
+    [changeGroup, showToast, t]
+  );
+
   useEffect(() => {
     if (routerLoadedRef.current && activePage !== 'freeModels') return;
     // Keep reads and their state updates in the mutation queue, so a late
     // page-entry response cannot overwrite a newer addition or priority order.
-    const load = routerMutationRef.current.catch(() => undefined).then(loadRouter);
+    const load = routerMutationRef.current.catch(() => undefined).then(() => loadRouter());
     routerMutationRef.current = load;
     void load.catch((error) => console.error('Load smart router config failed:', error));
   }, [activePage, loadRouter]);
 
   const setRouterEnabled = useCallback(
     async (enabled: boolean) => {
+      if (routerTogglePendingRef.current) return;
+      routerTogglePendingRef.current = true;
       setRouterTogglePending(true);
       const change = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
-          const router = await api.setSmartRouterEnabled(enabled);
-          setRouterEnabledState(router.enabled);
-          setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
+          await api.setSmartRouterEnabled(enabled);
+          const groups = await api.listSmartRouters();
+          const masterEnabled = groups[0].masterEnabled;
+          setRouters(groups);
+          setRouterEnabledState(masterEnabled);
         });
       routerMutationRef.current = change;
       try {
@@ -277,6 +371,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
         console.error('Toggle smart router failed:', error);
         showToast('error', t('error.requestFailed'));
       } finally {
+        routerTogglePendingRef.current = false;
         setRouterTogglePending(false);
       }
     },
@@ -285,13 +380,17 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const setCandidateEnabled = useCallback(
     async (id: string, enabled: boolean) => {
+      if (groupTransition.current) return;
       if (candidateTogglePendingRef.current.has(id)) return;
+      const routerId = activeRouterRef.current;
       candidateTogglePendingRef.current.add(id);
       setCandidateTogglePending(new Set(candidateTogglePendingRef.current));
       const change = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
-          const router = await api.setSmartRouterCandidateEnabled(id, enabled);
+          if (activeRouterRef.current !== routerId)
+            throw new Error('Smart router selection changed');
+          const router = await api.setSmartRouterCandidateEnabled(id, enabled, ...routerArgs());
           setPausedIds(new Set(router.disabledCandidateIds ?? []));
         });
       routerMutationRef.current = change;
@@ -346,6 +445,8 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const addSelectedModel = useCallback(
     async (model: RouteModelInput) => {
+      if (groupTransition.current) throw new Error('Smart router selection is changing');
+      const routerId = activeRouterRef.current;
       const id = model.internalId;
       const addition = routerMutationRef.current
         .catch(() => undefined)
@@ -353,8 +454,10 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           // Retry a failed initial/refresh read before constructing a full-list
           // write. An unread configuration must never be treated as an empty one.
           if (!routerLoadedRef.current) await loadRouter();
+          if (activeRouterRef.current !== routerId)
+            throw new Error('Smart router selection changed');
           const candidateIds = [...new Set([...selectedIdsRef.current, id])];
-          const router = await api.setSmartRouterCandidates(candidateIds);
+          const router = await api.setSmartRouterCandidates(candidateIds, ...routerArgs());
           if (!router.candidateIds.includes(id)) {
             throw new Error(`Smart Router rejected candidate: ${id}`);
           }
@@ -387,6 +490,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const updateSelectedModel = useCallback(
     (model: RouteModelInput) => {
+      if (groupTransition.current) return;
       routerMutationRef.current = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
@@ -415,13 +519,17 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const changeSelectedModel = useCallback(
     async (id: string, modelId: string) => {
+      if (groupTransition.current) return;
       if (savingModelIdsRef.current.has(id)) return;
+      const routerId = activeRouterRef.current;
       savingModelIdsRef.current.add(id);
       setSavingModelIds(new Set(savingModelIdsRef.current));
       const change = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
           if (!routerLoadedRef.current) await loadRouter();
+          if (activeRouterRef.current !== routerId)
+            throw new Error('Smart router selection changed');
           if (!selectedIdsRef.current.has(id))
             throw new Error(`Smart router model not found: ${id}`);
           const updated = await api.updateModel(id, { modelId });
@@ -449,20 +557,21 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const removeSelectedModel = useCallback(
     async (id: string) => {
+      if (groupTransition.current) return;
+      const routerId = activeRouterRef.current;
       const removal = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
           if (!routerLoadedRef.current) await loadRouter();
-          let router = await api.removeSmartRouterCandidate(id);
-          if (router.enabled && router.candidateIds.length === 0) {
-            router = await api.setSmartRouterEnabled(false);
-          }
+          if (activeRouterRef.current !== routerId)
+            throw new Error('Smart router selection changed');
+          const router = await api.removeSmartRouterCandidate(id, ...routerArgs());
           const nextIds = new Set(router.candidateIds);
           selectedIdsRef.current = nextIds;
           setSelectedIds(nextIds);
           setCustomModels((current) => current.filter((model) => model.id !== id));
           setRouterBaseUrl(router.baseUrl.replace(/^https?:\/\//, ''));
-          setRouterEnabledState(router.enabled);
+          setRouters((groups) => groups.map((group) => (group.id === router.id ? router : group)));
           setPausedIds(new Set(router.disabledCandidateIds ?? []));
         });
       routerMutationRef.current = removal;
@@ -478,10 +587,14 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
 
   const reorderSelectedModel = useCallback(
     async (activeId: string, overId: string) => {
+      if (groupTransition.current) return;
+      const routerId = activeRouterRef.current;
       const reorder = routerMutationRef.current
         .catch(() => undefined)
         .then(async () => {
           if (!routerLoadedRef.current) await loadRouter();
+          if (activeRouterRef.current !== routerId)
+            throw new Error('Smart router selection changed');
           const previous = selectedIdsRef.current;
           const ids = [...previous];
           const from = ids.indexOf(activeId);
@@ -490,7 +603,7 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
           const candidateIds = arrayMove(ids, from, to);
           setSelectedIds(new Set(candidateIds));
           try {
-            const router = await api.setSmartRouterCandidates(candidateIds);
+            const router = await api.setSmartRouterCandidates(candidateIds, ...routerArgs());
             const next = new Set(router.candidateIds);
             selectedIdsRef.current = next;
             setSelectedIds(next);
@@ -513,6 +626,14 @@ export function FreeModelsProvider({ children }: { children: ReactNode }) {
   return (
     <FreeModelsContext.Provider
       value={{
+        routers,
+        activeRouterId,
+        activeRouterEnabled: routers.find((group) => group.id === activeRouterId)?.enabled ?? false,
+        groupPending,
+        selectRouter,
+        saveRouter,
+        deleteRouter,
+        setGroupEnabled,
         layout,
         setLayout,
         activeDragId,

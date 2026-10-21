@@ -58,16 +58,20 @@ pub(crate) async fn probe_candidate(
     model_id: &str,
     request_id: &str,
     batch_id: Option<&str>,
+    router_id: Option<String>,
 ) -> ProbeResult {
     let cancel = cancellation(request_id);
     let _guard = ProbeGuard(request_id);
     let request = async {
-        let Some(model) = crate::services::smart_router::get_candidate_models()
-            .into_iter()
-            .find(|model| {
-                model.internal_id == internal_id && model.model_id.as_deref() == Some(model_id)
-            })
-        else {
+        let Ok(models) = crate::services::smart_router::profiles::checked(
+            router_id,
+            crate::services::smart_router::get_candidate_models,
+        ) else {
+            return ProbeResult::failure("unavailable");
+        };
+        let Some(model) = models.into_iter().find(|model| {
+            model.internal_id == internal_id && model.model_id.as_deref() == Some(model_id)
+        }) else {
             return ProbeResult::failure("unavailable");
         };
         let endpoint = if let Some(source) = &model.account_source {

@@ -92,6 +92,7 @@ vi.mock('../../api/models', () => ({
 }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
+  listSmartRouters: async () => [await api.getSmartRouterConfig()],
   getSmartRouterCandidates: vi.fn(),
   getSmartRouterActivity: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
@@ -167,6 +168,10 @@ describe('Direct route card model selection', () => {
 
   function config() {
     return {
+      id: 'smart-router',
+      name: 'Auto Router',
+      masterEnabled: false,
+      groupEnabled: true,
       enabled: false,
       candidateIds: [...savedOrder],
       usableCandidateCount: savedOrder.length,

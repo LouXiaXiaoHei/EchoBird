@@ -17,7 +17,7 @@ function binding(model: RouteModelNode) {
   ]);
 }
 
-export function useRouteResponseTests(models: RouteModelNode[], active: boolean) {
+export function useRouteResponseTests(models: RouteModelNode[], active: boolean, routerId = '') {
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
   const [savedResults, setSavedResults] = useState<
     Record<string, { binding: string; result: SmartRouterProbeResult }>
@@ -26,7 +26,8 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
   const running = useRef(false);
   const requests = useRef(new Map<string, string>());
   const batchId = useRef<string | null>(null);
-  const bindings = new Map(models.map((model) => [model.id, binding(model)]));
+  const scopedBinding = (model: RouteModelNode) => JSON.stringify([routerId, binding(model)]);
+  const bindings = new Map(models.map((model) => [model.id, scopedBinding(model)]));
   const bindingsKey = JSON.stringify([...bindings].sort(([a], [b]) => a.localeCompare(b)));
 
   const cancel = useCallback(() => {
@@ -43,7 +44,7 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
     setPendingIds(new Set());
   }, []);
 
-  useLayoutEffect(() => cancel, [active, bindingsKey, cancel]);
+  useLayoutEffect(() => cancel, [bindingsKey, routerId, cancel]);
 
   const test = async () => {
     if (!active || running.current || models.length === 0) return;
@@ -51,7 +52,7 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
     const attempt = ++generation.current;
     const batch = crypto.randomUUID();
     batchId.current = batch;
-    const queue = models.map((model) => ({ model, binding: binding(model) }));
+    const queue = models.map((model) => ({ model, binding: scopedBinding(model) }));
     let next = 0;
     setPendingIds(new Set(models.map((model) => model.id)));
     const worker = async () => {
@@ -66,7 +67,8 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean)
             model.internalId,
             model.modelId,
             requestId,
-            batch
+            batch,
+            routerId || undefined
           );
         } catch {
           result = { latencyMs: null, error: 'request_failed' };

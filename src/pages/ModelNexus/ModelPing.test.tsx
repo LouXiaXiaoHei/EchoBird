@@ -5,6 +5,8 @@ import * as api from '../../api/tauri';
 import { ModelCard } from '../../components/cards/ModelCard';
 import { ModelNexusProvider } from './provider';
 import { useModelNexus } from './context';
+import { useNavigationStore } from '../../stores/navigationStore';
+import { OnFirstVisit } from '../../components/OnFirstVisit';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../components/Toast', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
@@ -31,9 +33,70 @@ function Harness() {
   );
 }
 beforeEach(() => {
+  useNavigationStore.setState({ activePage: 'models' });
   vi.mocked(api.getModels).mockResolvedValue([
     { internalId: 'fixture', name: 'Fixture', baseUrl: 'https://fixture.test/v1', apiKey: '' },
   ]);
+});
+
+it('continues queued model speed tests while another page is shown and retains results on return', async () => {
+  const replies: ((result: Awaited<ReturnType<typeof api.pingModel>>) => void)[] = [];
+  vi.mocked(api.getModels).mockResolvedValue([
+    { internalId: 'fixture', name: 'Fixture', baseUrl: 'https://fixture.test/v1', apiKey: '' },
+    { internalId: 'second', name: 'Second', baseUrl: 'https://second.test/v1', apiKey: '' },
+  ]);
+  vi.mocked(api.pingModel).mockImplementation(
+    () => new Promise((resolve) => replies.push(resolve))
+  );
+  function ModelPage() {
+    const active = useNavigationStore((state) => state.activePage === 'models');
+    return (
+      <div hidden={!active}>
+        <OnFirstVisit active={active}>
+          <Harness />
+        </OnFirstVisit>
+      </div>
+    );
+  }
+  await act(async () => {
+    renderer = create(
+      <ModelNexusProvider>
+        <ModelPage />
+      </ModelNexusProvider>
+    );
+  });
+  expect(api.pingModel).not.toHaveBeenCalled();
+  let round!: Promise<void>;
+  await act(async () => {
+    round = context.pingAllModels();
+  });
+  const batch = vi.mocked(api.pingModel).mock.calls[0][1];
+  await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
+  expect(context.isTesting).toBe(true);
+  expect(api.finishConnectionTestBatch).not.toHaveBeenCalled();
+  await act(async () => {
+    replies[0]({ success: true, latency: 123, url: 'https://fixture.test' });
+  });
+  expect(api.pingModel).toHaveBeenNthCalledWith(2, 'second', batch);
+  await act(async () => useNavigationStore.getState().setActivePage('models'));
+  expect(context.pingingModelIds).toEqual(new Set(['second']));
+  expect(context.modelLatencies.fixture).toBe(123);
+  await act(async () => context.pingAllModels());
+  expect(api.pingModel).toHaveBeenCalledTimes(2);
+  await act(async () => useNavigationStore.getState().setActivePage('apps'));
+  await act(async () => {
+    replies[1]({ success: false, latency: -1, error: 'timeout', url: 'https://second.test' });
+    await round;
+  });
+  await act(async () => useNavigationStore.getState().setActivePage('models'));
+  expect(context.modelLatencies).toEqual({ fixture: 123, second: -2 });
+  expect(context.isTesting).toBe(false);
+  expect(context.pingingModelIds.size).toBe(0);
+  expect(api.pingModel).toHaveBeenCalledTimes(2);
+  expect(api.finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(batch);
+  expect(api.testModel).not.toHaveBeenCalled();
+  expect(api.queryModelUsage).not.toHaveBeenCalled();
+  expect(api.updateModel).not.toHaveBeenCalled();
 });
 afterEach(() => {
   act(() => renderer?.unmount());

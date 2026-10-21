@@ -62,10 +62,13 @@ describe('daily activity chart', () => {
   function render(data: DayBuckets, overrides: Partial<ChartProps> = {}) {
     act(() => {
       renderer = create(<DailyActivityChart {...chartProps(data, overrides)} />, {
-        createNodeMock: () => ({
-          offsetWidth: tooltipWidth,
-          getBoundingClientRect: () => ({ left: 100, top: 20, width: 100 }),
-        }),
+        createNodeMock: (node) =>
+          node.props.className?.includes('view-mode-tabs')
+            ? null
+            : {
+                offsetWidth: tooltipWidth,
+                getBoundingClientRect: () => ({ left: 100, top: 20, width: 100 }),
+              },
       });
     });
     return renderer.root.findAllByProps({ role: 'img' });
@@ -121,7 +124,8 @@ describe('daily activity chart', () => {
     });
     await act(async () => {
       renderer = create(<AiCareerMain />, {
-        createNodeMock: () => ({ offsetWidth: 100 }),
+        createNodeMock: (node) =>
+          node.props.className?.includes('view-mode-tabs') ? null : { offsetWidth: 100 },
       });
     });
     const columns = renderer.root.findAllByProps({ role: 'img' });

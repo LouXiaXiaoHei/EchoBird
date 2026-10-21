@@ -1,3 +1,5 @@
+import { ViewModeTabGroup } from './ViewModeTabGroup';
+
 export function ViewModeTabs<T extends string>({
   value,
   options,
@@ -8,7 +10,7 @@ export function ViewModeTabs<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
+    <ViewModeTabGroup className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
       {options.map((option) => (
         <button
           key={option.value}
@@ -24,6 +26,6 @@ export function ViewModeTabs<T extends string>({
           {option.label}
         </button>
       ))}
-    </div>
+    </ViewModeTabGroup>
   );
 }

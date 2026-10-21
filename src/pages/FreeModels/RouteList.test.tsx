@@ -85,6 +85,7 @@ vi.mock('../../api/accountProxy', async (original) => ({
 }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
+  listSmartRouters: async () => [await api.getSmartRouterConfig()],
   getSmartRouterCandidates: vi.fn(),
   getSmartRouterActivity: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
@@ -108,6 +109,10 @@ describe('Smart Router list layout and candidate pause', () => {
   let appManager: AppManagerContextType | null;
   function config() {
     return {
+      id: 'smart-router',
+      name: 'Auto Router',
+      masterEnabled: true,
+      groupEnabled: true,
       enabled: true,
       running: true,
       candidateIds: [...order],
@@ -167,7 +172,11 @@ describe('Smart Router list layout and candidate pause', () => {
     );
   }
   function switches() {
-    return renderer.root.findAllByProps({ role: 'switch' });
+    return renderer.root
+      .findAllByProps({ role: 'switch' })
+      .filter((node) =>
+        String(node.props['aria-label']).startsWith('freeModels.router.candidateEnabled')
+      );
   }
   function buttons(prefix: string) {
     return renderer.root
@@ -238,6 +247,7 @@ describe('Smart Router list layout and candidate pause', () => {
     });
     vi.mocked(modelApi.getCachedUpstreamModelCatalog).mockResolvedValue(null);
     vi.mocked(modelApi.finishConnectionTestBatch).mockResolvedValue(undefined);
+    vi.mocked(routerProbe.cancelSmartRouterProbe).mockResolvedValue(undefined);
     vi.mocked(accountApi.listProxyAccounts).mockResolvedValue([
       {
         source: { provider: 'codex', accountId: 'account-one' },
@@ -322,6 +332,7 @@ describe('Smart Router list layout and candidate pause', () => {
     const button = renderer.root
       .findAllByType('button')
       .find((node) => node.props['aria-label'] === 'btn.pingAll')!;
+    expect(button.findByType('span').children).toEqual(['btn.pingAll']);
     await act(async () => button.props.onClick());
     expect(
       vi.mocked(routerProbe.testSmartRouterCandidate).mock.calls.map((call) => call.slice(0, 2))
@@ -341,6 +352,50 @@ describe('Smart Router list layout and candidate pause', () => {
     expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
     expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
+    noModelWrites();
+  });
+
+  it('keeps speed tests running through page and layout switches and restores their results', async () => {
+    const replies: ((result: routerProbe.SmartRouterProbeResult) => void)[] = [];
+    vi.mocked(routerProbe.testSmartRouterCandidate).mockImplementation(
+      () => new Promise((resolve) => replies.push(resolve))
+    );
+    await open();
+    await layout('list');
+    await act(async () => buttons('btn.pingAll')[0].props.onClick());
+    expect(replies).toHaveLength(2);
+    const batch = vi.mocked(routerProbe.testSmartRouterCandidate).mock.calls[0][3];
+    await act(async () => useNavigationStore.getState().setActivePage('models'));
+    expect(routerProbe.cancelSmartRouterProbe).not.toHaveBeenCalled();
+    expect(modelApi.finishConnectionTestBatch).not.toHaveBeenCalled();
+    await act(async () => replies[0]({ latencyMs: 123, error: null }));
+    expect(replies).toHaveLength(3);
+    await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
+    expect(buttons('btn.pingAll')[0].props['aria-busy']).toBe(true);
+    await layout('cards');
+    await layout('list');
+    expect(buttons('btn.pingAll')[0].props['aria-busy']).toBe(true);
+    expect(routerProbe.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    await act(async () => useNavigationStore.getState().setActivePage('apps'));
+    await act(async () => {
+      replies[1]({ latencyMs: 234, error: null });
+      replies[2]({ latencyMs: null, error: 'timeout' });
+    });
+    expect(modelApi.finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(batch);
+    await act(async () => useNavigationStore.getState().setActivePage('freeModels'));
+    expect(buttons('btn.pingAll')[0].props['aria-busy']).toBeUndefined();
+    const slots = renderer.root.findAllByProps({
+      'aria-label': 'freeModels.router.responseLatency',
+    });
+    expect(slots[0].findByProps({ className: 'text-green-500' }).children.join('')).toBe('123ms');
+    expect(slots[1].findByProps({ className: 'text-yellow-500' }).children.join('')).toBe('234ms');
+    expect(slots[2].findByProps({ className: 'text-red-500' }).children.join('')).toBe(
+      'freeModels.router.testTimeout'
+    );
+    expect(routerProbe.cancelSmartRouterProbe).not.toHaveBeenCalled();
+    expect(routerProbe.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
     noModelWrites();
   });
 
@@ -376,8 +431,12 @@ describe('Smart Router list layout and candidate pause', () => {
 
   it('places the only icon layout switch between privacy and help in the title bar', async () => {
     await open();
-    const group = renderer.root.findByProps({ 'aria-label': 'freeModels.layout.label' });
-    const titleGroups = renderer.root.findByType('header').findAllByProps({ role: 'group' });
+    const group = renderer.root.find(
+      (node) => node.type === 'div' && node.props['aria-label'] === 'freeModels.layout.label'
+    );
+    const titleGroups = renderer.root
+      .findByType('header')
+      .findAll((node) => node.type === 'div' && node.props.role === 'group');
     expect(titleGroups).toHaveLength(1);
     expect(titleGroups[0]).toBe(group);
     const controls = renderer.root.findByType('header').findAllByType('button');
@@ -751,31 +810,40 @@ describe('Smart Router list layout and candidate pause', () => {
     noModelWrites();
   });
 
-  it('shows the saved router status and both endpoint copy actions in the list hub bar', async () => {
-    vi.mocked(api.getSmartRouterConfig).mockResolvedValueOnce({ ...config(), enabled: false });
-    await open();
-    await layout('list');
-    const hub = renderer.root.find(
-      (node) =>
-        node.type === 'div' && String(node.props.className).includes('free-model-router-hub ')
-    );
-    expect(hub.props.className).toContain('free-model-router-hub-bar');
-    expect(hub.findAll((node) => node.children.includes('freeModels.router.title'))).toHaveLength(
-      0
-    );
-    expect(
-      hub.findAll(
-        (node) => node.type === 'span' && node.children.includes('freeModels.router.disabled')
-      )
-    ).toHaveLength(1);
-    expect(buttons('btn.copy ')).toHaveLength(2);
-    expect(
-      hub.findAll((node) => node.type === 'span' && node.children.includes('127.0.0.1:53683/v1'))
-    ).toHaveLength(1);
-    expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
-    expect(api.setSmartRouterCandidateEnabled).not.toHaveBeenCalled();
-    noModelWrites();
-  });
+  it.each([true, false])(
+    'shows only the group switch and endpoints in the list hub with enabled=%s',
+    async (enabled) => {
+      vi.mocked(api.getSmartRouterConfig).mockResolvedValueOnce({
+        ...config(),
+        groupEnabled: enabled,
+        enabled,
+        running: enabled,
+      });
+      await open();
+      await layout('list');
+      const hub = renderer.root.find(
+        (node) =>
+          node.type === 'div' && String(node.props.className).includes('free-model-router-hub ')
+      );
+      expect(hub.props.className).toContain('free-model-router-hub-bar');
+      expect(hub.findByProps({ role: 'switch' }).props['aria-checked']).toBe(enabled);
+      expect(
+        hub
+          .findAllByType('span')
+          .flatMap((node) => node.children.filter((child) => typeof child === 'string'))
+      ).toEqual(['Auto Router', 'OpenAI', '127.0.0.1:53683/v1', 'Anthropic', '127.0.0.1:53683']);
+      expect(hub.findAllByType('button').map((node) => node.props['aria-label'])).toEqual([
+        'btn.copy OpenAI',
+        'btn.copy Anthropic',
+        'freeModels.router.delete Auto Router',
+        'freeModels.router.edit Auto Router',
+        'Auto Router',
+      ]);
+      expect(api.setSmartRouterCandidates).not.toHaveBeenCalled();
+      expect(api.setSmartRouterCandidateEnabled).not.toHaveBeenCalled();
+      noModelWrites();
+    }
+  );
 
   it('keeps the row disabled during a pending pause and preserves its state on failure', async () => {
     let reject!: (error: Error) => void;
@@ -824,17 +892,29 @@ describe('Smart Router list layout and candidate pause', () => {
     );
     await open();
     await layout('list');
+    const renderedSwitch = switches()[0];
+    const picker = renderer.root.findAllByType(ModelIdCombobox)[0];
+    const renderedPicker = picker.findByType('button');
+    const savedModelId = picker.props.value;
     await act(async () => {
       void context.setCandidateEnabled('one', false);
       void context.setCandidateEnabled('one', false);
     });
     expect(api.setSmartRouterCandidateEnabled).toHaveBeenCalledOnce();
+    expect(switches()[0]).toBe(renderedSwitch);
     expect(switches()[0].props.disabled).toBe(true);
     expect(switches()[0].props['aria-checked']).toBe(true);
     expect(switches()[0].props['aria-busy']).toBe(true);
+    expect(picker.findByType('button')).toBe(renderedPicker);
+    expect(renderedPicker.props.disabled).toBe(true);
+    expect(picker.props.value).toBe(savedModelId);
     await act(async () => resolve({ ...config(), disabledCandidateIds: ['one'] }));
+    expect(switches()[0]).toBe(renderedSwitch);
     expect(switches()[0].props.disabled).toBe(false);
     expect(switches()[0].props['aria-checked']).toBe(false);
+    expect(picker.findByType('button')).toBe(renderedPicker);
+    expect(renderedPicker.props.disabled).toBe(false);
+    expect(picker.props.value).toBe(savedModelId);
     noModelWrites();
   });
 

@@ -1,3 +1,4 @@
+import { isSmartRouterId } from '../../utils/smartRouter';
 import { useCursorAccounts } from './useCursorAccounts';
 import { useAntigravityAccounts } from './useAntigravityAccounts';
 import { useDeepSeekAccounts } from './useDeepSeekAccounts';
@@ -89,7 +90,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   // Nexus changes, including edits/deletes from this panel.
   const [userModels, setUserModels] = useState<ModelConfig[]>([]);
   const { userModels: modelNexusModels } = useModelNexus();
-  const { routerEnabled, routerBaseUrl } = useFreeModels();
+  const { routerEnabled, routerBaseUrl, routers } = useFreeModels();
+  const routerIdsKey = JSON.stringify(routers?.map((router) => router.id) ?? []);
   const userModelsActive = isActive || activePage === 'myProjects';
   useEffect(() => {
     if (!api.getModels) return;
@@ -103,10 +105,12 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         if (ignore) return;
         setUserModels(models);
         setToolModelConfig((prev) => {
+          const configuredRouterIds: string[] = JSON.parse(routerIdsKey);
           const removed = Object.keys(prev).filter(
             (toolId) =>
               prev[toolId] &&
               !isOfficialModelSentinel(prev[toolId]!) &&
+              !configuredRouterIds.includes(prev[toolId]!) &&
               !models.some((model) => model.internalId === prev[toolId])
           );
           if (removed.length === 0) return prev;
@@ -119,7 +123,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     return () => {
       ignore = true;
     };
-  }, [userModelsActive, modelNexusModels, routerEnabled, routerBaseUrl]);
+  }, [userModelsActive, modelNexusModels, routerEnabled, routerBaseUrl, routerIdsKey]);
 
   // AI-installable IDs from bundled install/index.json (offline-first).
   const [aiInstallableIds, setAiInstallableIds] = useState<string[]>([]);
@@ -617,8 +621,9 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           : {}),
         ...(['codex', 'chatgptdesktop'].includes(toolId)
           ? {
-              webSearch:
-                model.internalId === 'smart-router' ? false : (webSearchOverride ?? codexWebSearch),
+              webSearch: isSmartRouterId(model.internalId)
+                ? false
+                : (webSearchOverride ?? codexWebSearch),
             }
           : {}),
       });
@@ -654,7 +659,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
 
   // Restore the shared Web Search preference and apply it on an explicit flip.
   const setCodexWebSearch = (value: boolean) => {
-    if (isLaunching || (selectedTool && toolModelConfig[selectedTool] === 'smart-router')) return;
+    if (isLaunching || (selectedTool && isSmartRouterId(toolModelConfig[selectedTool]))) return;
     setCodexWebSearchRaw(value);
     writeBool('echobird_codex_web_search', value);
     if (!isCodexTool || !selectedTool || !selectedToolData?.installed || selectedCodexAccountId)

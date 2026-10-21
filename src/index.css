@@ -324,8 +324,30 @@
   color: rgb(var(--view-mode-accent-rgb));
 }
 
+.view-mode-tabs {
+  position: relative;
+  isolation: isolate;
+}
+
+.view-mode-tabs[data-sliding='true']::before {
+  content: '';
+  position: absolute;
+  z-index: -1;
+  top: 0;
+  left: 0;
+  width: var(--view-mode-width);
+  height: var(--view-mode-height);
+  transform: translate(var(--view-mode-x), var(--view-mode-y));
+  pointer-events: none;
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .view-mode-tab[aria-pressed='true'],
-.view-mode-tab[aria-selected='true'] {
+.view-mode-tab[aria-selected='true'],
+.view-mode-tabs[data-sliding='true']::before {
   background-color: color-mix(
     in srgb,
     rgb(var(--view-mode-accent-rgb)) 30%,
@@ -346,12 +368,19 @@
 }
 
 :root[data-theme='light'] .view-mode-tab[aria-pressed='true'],
-:root[data-theme='light'] .view-mode-tab[aria-selected='true'] {
+:root[data-theme='light'] .view-mode-tab[aria-selected='true'],
+:root[data-theme='light'] .view-mode-tabs[data-sliding='true']::before {
   background-color: color-mix(
     in srgb,
     rgb(var(--bg-elevated-rgb)) 94%,
     rgb(var(--view-mode-accent-rgb))
   );
+}
+
+.view-mode-tabs[data-sliding='true'] > .view-mode-tab[aria-pressed='true'],
+.view-mode-tabs[data-sliding='true'] > .view-mode-tab[aria-selected='true'] {
+  background: transparent;
+  animation: none;
 }
 
 @keyframes view-mode-gradient-flow {
@@ -369,8 +398,10 @@
 
 @media (prefers-reduced-motion: reduce) {
   .view-mode-tab[aria-pressed='true'],
-  .view-mode-tab[aria-selected='true'] {
+  .view-mode-tab[aria-selected='true'],
+  .view-mode-tabs[data-sliding='true']::before {
     animation: none;
+    transition: none;
   }
 }
 

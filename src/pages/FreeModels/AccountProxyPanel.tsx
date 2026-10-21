@@ -63,6 +63,10 @@ export function AccountProxyPanel({
     };
   }, [activePage]);
 
+  const sortedProviders = [...accountProxyProviders].sort(
+    (a, b) => (accountCounts[b.id] ?? 0) - (accountCounts[a.id] ?? 0)
+  );
+
   return (
     <div className="flex-1 px-2 pt-0.5 pb-2 overflow-y-auto space-y-2">
       <div className="flex items-center justify-between gap-2 pb-1">
@@ -107,7 +111,7 @@ export function AccountProxyPanel({
           </span>
         </label>
       </div>
-      {accountProxyProviders.map((provider) => (
+      {sortedProviders.map((provider) => (
         <button
           key={provider.id}
           type="button"
@@ -126,7 +130,9 @@ export function AccountProxyPanel({
           <span className="flex-1 min-w-0 text-base font-bold text-cyber-text truncate">
             {provider.name}
           </span>
-          {['antigravity', 'claudeCode', 'qoder', 'qoderCn'].includes(provider.id) && (
+          {['antigravity', 'claudeCode', 'qoder', 'qoderCn', 'workBuddy', 'workBuddyAi'].includes(
+            provider.id
+          ) && (
             <span className="shrink-0 whitespace-nowrap font-medium text-cyber-accent text-[10px] leading-none">
               {t('accountProxy.highRisk')}
             </span>

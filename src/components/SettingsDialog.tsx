@@ -15,6 +15,7 @@ import {
 import { getVersion } from '@tauri-apps/api/app';
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
 import { ViewModeTabs } from './ViewModeTabs';
+import { ViewModeTabGroup } from './ViewModeTabGroup';
 import { useBackgroundStore } from '../stores/backgroundStore';
 import { useI18n } from '../hooks/useI18n';
 import * as api from '../api/tauri';
@@ -468,7 +469,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                       {t('settings.closeWindowBehavior')}
                     </span>
                   </div>
-                  <div className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
+                  <ViewModeTabGroup className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
                     {(
                       [
                         [false, t('settings.closeDirectly')],
@@ -489,7 +490,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                         {label}
                       </button>
                     ))}
-                  </div>
+                  </ViewModeTabGroup>
                 </div>
 
                 <div className="h-px bg-cyber-border/50" />
@@ -671,7 +672,7 @@ const ThemeSegmented: React.FC<{
     { id: 'system', label: labels.system },
   ];
   return (
-    <div className="view-mode-tabs flex flex-shrink-0 border border-cyber-border rounded-button overflow-hidden">
+    <ViewModeTabGroup className="view-mode-tabs flex flex-shrink-0 border border-cyber-border rounded-button overflow-hidden">
       {opts.map((o) => {
         const active = value === o.id;
         return (
@@ -690,7 +691,7 @@ const ThemeSegmented: React.FC<{
           </button>
         );
       })}
-    </div>
+    </ViewModeTabGroup>
   );
 };
 

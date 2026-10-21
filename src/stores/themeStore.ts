@@ -61,8 +61,9 @@ const applyColorTheme = (id: ColorThemeId, resolved: Resolved) => {
 const apply = (resolved: Resolved, colorTheme: ColorThemeId, instant: boolean) => {
   if (instant) {
     const kill = document.createElement('style');
+    // Preserve the shared tab background's movement while theme colors swap instantly.
     kill.textContent =
-      '*, *::before, *::after { transition: none !important; animation: none !important; }';
+      '*, *:not(.view-mode-tabs[data-sliding="true"])::before, *::after { transition: none !important; animation: none !important; }';
     document.head.appendChild(kill);
     document.documentElement.dataset.theme = resolved;
     applyColorTheme(colorTheme, resolved);

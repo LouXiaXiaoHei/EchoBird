@@ -47,7 +47,8 @@ pub fn delete_model(internal_id: String) -> bool {
         if let Err(error) = usage_providers::zhipu_team::save_access(&internal_id, None) {
             log::warn!("Failed to clear deleted model's team access: {error}");
         }
-        if let Err(error) = crate::services::smart_router::remove_candidate(&internal_id) {
+        if let Err(error) = crate::services::smart_router::remove_candidate_everywhere(&internal_id)
+        {
             log::warn!("Failed to remove deleted model from Smart Router: {error}");
             crate::services::smart_router::forget_candidate_memory(&internal_id);
         }

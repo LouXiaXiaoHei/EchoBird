@@ -409,6 +409,129 @@ describe('Mother Agent smart router availability', () => {
     vi.mocked(api.getModels).mockResolvedValue([model, router]);
   });
 
+  it('keeps the latest router settings when an earlier model-list response arrives last', async () => {
+    const initial = {
+      ...router,
+      internalId: 'smart-router-7d55a193-322a-46b2-aedb-47dbddcdb877',
+    };
+    const updated = {
+      ...initial,
+      name: 'Updated router',
+      modelId: 'updated-auto',
+      baseUrl: 'http://127.0.0.1:60001/v1',
+      anthropicUrl: 'http://127.0.0.1:60001',
+      apiKey: 'updated-router-key',
+    };
+    stored.set('echobird_agent_model', initial.internalId);
+    vi.mocked(api.getModels).mockResolvedValue([model, initial]);
+    await mount();
+    const previous = deferred<ModelConfig[]>();
+    const latest = deferred<ModelConfig[]>();
+    vi.mocked(api.getModels)
+      .mockReturnValueOnce(previous.promise)
+      .mockReturnValueOnce(latest.promise);
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    act(() => {
+      window.dispatchEvent(new Event('models-changed'));
+    });
+    await act(async () => latest.resolve([model, updated]));
+    await act(async () => previous.resolve([model, initial]));
+    expect(state.models).toEqual([model, updated]);
+    expect(state.agentModel).toBe(updated.internalId);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    await send('Use the current router settings');
+    expect(api.sendAgentMessage).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        model_id: updated.internalId,
+        base_url: updated.baseUrl,
+        api_key: updated.apiKey,
+        model_name: updated.modelId,
+      })
+    );
+  });
+
+  it('does not restore a deleted router from an older model-list response', async () => {
+    stored.set('echobird_agent_model', router.internalId);
+    await mount();
+    const previous = deferred<ModelConfig[]>();
+    const latest = deferred<ModelConfig[]>();
+    vi.mocked(api.getModels)
+      .mockResolvedValue([model])
+      .mockReturnValueOnce(previous.promise)
+      .mockReturnValueOnce(latest.promise);
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    act(() => {
+      window.dispatchEvent(new Event('models-changed'));
+    });
+    await act(async () => latest.resolve([model]));
+    await act(async () => previous.resolve([model, router]));
+    expect(state.models).toEqual([model]);
+    expect(state.agentModel).toBeNull();
+    expect(stored.has('echobird_agent_model')).toBe(false);
+    await send('Do not use the deleted router');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('ignores a late model-list response after unmount without clearing the saved selection', async () => {
+    stored.set('echobird_agent_model', router.internalId);
+    const pending = deferred<ModelConfig[]>();
+    vi.mocked(api.getModels).mockReturnValueOnce(pending.promise);
+    await mount();
+    act(() => renderer!.unmount());
+    renderer = undefined;
+    await act(async () => pending.resolve([]));
+    expect(stored.get('echobird_agent_model')).toBe(router.internalId);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('clears the selected router when a successful model-list refresh is empty', async () => {
+    stored.set('echobird_agent_model', router.internalId);
+    vi.mocked(api.getModels).mockResolvedValue([router]);
+    await mount();
+    expect(state.agentModel).toBe(router.internalId);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    await act(async () => {
+      window.dispatchEvent(new Event('models-changed'));
+    });
+    expect(state.models).toEqual([]);
+    expect(state.agentModel).toBeNull();
+    expect(stored.has('echobird_agent_model')).toBe(false);
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
+    await send('Do not use the empty model list');
+    expect(api.sendAgentMessage).not.toHaveBeenCalled();
+  });
+
+  it('preserves cached routers and selection when a model-list refresh fails', async () => {
+    stored.set('echobird_agent_model', router.internalId);
+    await mount();
+    const cached = state.models;
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      vi.mocked(api.getModels).mockRejectedValueOnce(new Error('Fixture model-list read failure'));
+      await act(async () => {
+        window.dispatchEvent(new Event('models-changed'));
+      });
+      expect(state.models).toBe(cached);
+      expect(state.agentModel).toBe(router.internalId);
+      expect(stored.get('echobird_agent_model')).toBe(router.internalId);
+      expect(api.sendAgentMessage).not.toHaveBeenCalled();
+      expect(confirm).not.toHaveBeenCalled();
+      expect(showToast).not.toHaveBeenCalled();
+      await send('Use the cached router after a read failure');
+      expect(api.sendAgentMessage).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ model_id: router.internalId, base_url: router.baseUrl })
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+
   it('hides a disabled router on entry and clears its remembered selection without choosing another model', async () => {
     routerEnabled = false;
     stored.set('echobird_agent_model', router.internalId);

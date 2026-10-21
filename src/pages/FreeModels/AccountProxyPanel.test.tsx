@@ -96,7 +96,11 @@ it('updates zero, singular, plural and unknown account counts across all languag
         .findAllByType('span')
         .filter((span) => span.children.includes(translate('accountProxy.highRisk', language)));
       expect(labels).toHaveLength(
-        ['antigravity', 'claudeCode', 'qoder', 'qoderCn'].includes(provider.id) ? 1 : 0
+        ['antigravity', 'claudeCode', 'qoder', 'qoderCn', 'workBuddy', 'workBuddyAi'].includes(
+          provider.id
+        )
+          ? 1
+          : 0
       );
     }
   }
@@ -130,6 +134,40 @@ it('counts saved accounts independently, including zero, without reading model c
   expect(context.setModelModalDestination).toHaveBeenCalledWith('freeRouter');
   expect(context.setShowAddModelModal).toHaveBeenCalledWith(true);
   expect(api.listProxyAccounts).toHaveBeenCalledTimes(api.accountProxyProviders.length);
+});
+
+it('puts larger saved-account pools first and preserves catalog order for ties without mutating it', async () => {
+  const originalOrder = api.accountProxyProviders.map((provider) => provider.id);
+  vi.mocked(api.listProxyAccounts).mockImplementation(async (provider) => {
+    if (provider === 'claudeCode') throw new Error('Unreadable store');
+    return accounts(
+      provider,
+      provider === 'workBuddyAi' ? 3 : provider === 'codex' || provider === 'kilo' ? 2 : 0
+    );
+  });
+  await open();
+  const names = renderer.root
+    .findAllByType('button')
+    .filter((button) => button.props['aria-label']?.includes(': '))
+    .map((button) => button.findAllByType('span')[0].children.join(''));
+  expect(names).toEqual([
+    'WorkBuddy AI',
+    'ChatGPT / Codex',
+    'Kilo',
+    ...api.accountProxyProviders
+      .filter((provider) => !['workBuddyAi', 'codex', 'kilo'].includes(provider.id))
+      .map((provider) => provider.name),
+  ]);
+  expect(count('claudeCode')).toBe('—');
+  expect(api.accountProxyProviders.map((provider) => provider.id)).toEqual(originalOrder);
+  expect(api.listProxyAccounts).toHaveBeenCalledTimes(originalOrder.length);
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  expect(context.setNewModelForm).not.toHaveBeenCalled();
+  expect(invoke).not.toHaveBeenCalled();
+  act(() => row('workBuddyAi').props.onClick());
+  expect(context.setNewModelForm).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({ accountSource: { provider: 'workBuddyAi', accountId: '' } })
+  );
 });
 
 it('keeps TRAE regional counts and add sources separate while passive pool navigation performs only saved-list reads', async () => {

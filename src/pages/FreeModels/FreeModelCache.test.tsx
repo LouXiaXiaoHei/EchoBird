@@ -31,6 +31,7 @@ vi.mock('./AccountProxyPanel', () => ({
 }));
 vi.mock('../../api/tauri', () => ({
   getSmartRouterConfig: vi.fn(),
+  listSmartRouters: async () => [await api.getSmartRouterConfig()],
   getSmartRouterCandidates: vi.fn(),
   setSmartRouterEnabled: vi.fn(),
   setSmartRouterCandidates: vi.fn(),
@@ -127,6 +128,10 @@ describe('Free model directory cache', () => {
     useNavigationStore.setState({ activePage: 'freeModels' });
     vi.mocked(api.getCachedFreeModelDirectory).mockResolvedValue(cached);
     vi.mocked(api.getSmartRouterConfig).mockResolvedValue({
+      id: 'smart-router',
+      name: 'Auto Router',
+      masterEnabled: false,
+      groupEnabled: true,
       enabled: false,
       candidateIds: [],
       usableCandidateCount: 0,

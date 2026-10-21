@@ -1,3 +1,4 @@
+import { isSmartRouterId } from '../../utils/smartRouter';
 import { CursorAccountSection } from './CursorAccountSection';
 import { AntigravityAccountSection } from './AntigravityAccountSection';
 import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimitives';
@@ -623,13 +624,13 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
     const compatible = userModels.filter(
       (model) =>
         isModelCompatibleWithTool(model, toolProtocols, selectedTool) &&
-        (model.internalId !== 'smart-router' || smartRouterEnabled)
+        (!isSmartRouterId(model.internalId) || smartRouterEnabled)
     );
     return {
-      smartRouterModels: compatible.filter((m) => m.internalId === 'smart-router'),
+      smartRouterModels: compatible.filter((m) => isSmartRouterId(m.internalId)),
       localModels: compatible.filter((m) => m.internalId === 'local-server'),
       cloudModels: compatible.filter(
-        (m) => m.internalId !== 'local-server' && m.internalId !== 'smart-router'
+        (m) => m.internalId !== 'local-server' && !isSmartRouterId(m.internalId)
       ),
     };
   }, [userModels, toolProtocols, selectedTool, smartRouterEnabled]);
@@ -666,7 +667,7 @@ export const ModelListSection: React.FC<ModelListSectionProps> = ({
         key={model.internalId}
         model={model}
         selected={isSelected}
-        subtitle={model.internalId === 'smart-router' ? apiPath : undefined}
+        subtitle={isSmartRouterId(model.internalId) ? apiPath : undefined}
         onSelect={() => selectedTool && handleSelectModel(selectedTool, model.internalId)}
         selection={
           <div
@@ -947,7 +948,7 @@ export const AppManagerPanel: React.FC = () => {
   const hasVisibleModels = userModels.some(
     (model) =>
       isModelCompatibleWithTool(model, selectedToolProtocols, selectedTool) &&
-      (model.internalId !== 'smart-router' || smartRouterEnabled)
+      (!isSmartRouterId(model.internalId) || smartRouterEnabled)
   );
 
   const showWebSearchToggle = showCodexAccounts || isClaudeDesktopApp || isClaudeCodeApp;
@@ -955,7 +956,7 @@ export const AppManagerPanel: React.FC = () => {
     ? claudeDesktopWebSearch
     : isClaudeCodeApp
       ? claudeCodeWebSearch
-      : toolModelConfig[selectedTool ?? ''] === 'smart-router'
+      : isSmartRouterId(toolModelConfig[selectedTool ?? ''])
         ? false
         : codexWebSearch;
   const routingControls = (show1mToggle || showWebSearchToggle) && (
@@ -968,7 +969,7 @@ export const AppManagerPanel: React.FC = () => {
           checked={webSearchValue}
           disabled={
             isLaunching ||
-            (showCodexAccounts && toolModelConfig[selectedTool ?? ''] === 'smart-router')
+            (showCodexAccounts && isSmartRouterId(toolModelConfig[selectedTool ?? '']))
           }
           onChange={
             showCodexAccounts

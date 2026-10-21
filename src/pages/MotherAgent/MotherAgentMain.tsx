@@ -1,3 +1,4 @@
+import { isSmartRouterId } from '../../utils/smartRouter';
 import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { ArrowUp, ChevronDown, Square } from 'lucide-react';
 import { RemoteModelSelector, type ModelOption } from '../../components/RemoteModelSelector';
@@ -59,7 +60,7 @@ export function MotherAgentMain() {
         id: m.internalId,
         name: m.name,
         icon: getModelIcon('', m.modelId),
-        iconKind: m.internalId === 'smart-router' ? ('router' as const) : undefined,
+        iconKind: isSmartRouterId(m.internalId) ? ('router' as const) : undefined,
       })),
     [models]
   );

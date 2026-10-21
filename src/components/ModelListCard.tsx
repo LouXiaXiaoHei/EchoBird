@@ -5,6 +5,7 @@ import type { ModelUsageData } from '../api/tauri';
 import type { TKey } from '../i18n';
 import { getModelIcon } from './cards';
 import { ModelQuotaSummary } from './ModelQuotaSummary';
+import { isSmartRouterId } from '../utils/smartRouter';
 
 interface ModelListCardProps {
   model: ModelConfig;
@@ -41,7 +42,7 @@ export function ModelListCard({
   onDeleteModel,
   t,
 }: ModelListCardProps) {
-  const isSmartRouter = model.internalId === 'smart-router';
+  const isSmartRouter = isSmartRouterId(model.internalId);
   const isLocalModel = model.internalId === 'local-server' || isSmartRouter;
   const canManage = !isLocalModel && model.modelType !== 'DEMO';
   const iconSrc = isSmartRouter ? null : getModelIcon('', model.modelId || '');

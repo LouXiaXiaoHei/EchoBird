@@ -72,6 +72,7 @@ import { RoutingToggle } from '../../components/RoutingToggle';
 import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { AccountPrivacyButton } from '../../components/AccountPrivacyButton';
 import { PageActionButton } from '../../components/PageActionButton';
+import { ViewModeTabGroup, type ViewModeTabPosition } from '../../components/ViewModeTabGroup';
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useToast } from '../../components/Toast';
 import { useI18n } from '../../hooks/useI18n';
@@ -79,7 +80,6 @@ import { useDocumentVisible } from '../../hooks/useDocumentVisible';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AccountProxyPanel, openAccountModelForm } from './AccountProxyPanel';
-import { copyText } from '../../utils/copyText';
 import { modelLatencyColor } from '../../utils/modelLatency';
 import { useModelNexus } from '../ModelNexus/context';
 import { accountProxyIdentityLabel, accountProxyPlanLabel } from '../AppManager/accountPlanLabel';
@@ -88,6 +88,7 @@ import { AppManagerContext } from '../AppManager/context';
 import './FreeModels.css';
 import { type RouteModelNode, providerRank, useFreeModels } from './provider';
 import { useRouteResponseTests } from './useRouteResponseTests';
+import { RouterGroups } from './RouterGroups';
 export { FreeModelsProvider, useFreeModels } from './provider';
 
 const NODE_COLUMN_GAP = 24;
@@ -177,7 +178,7 @@ export function FreeModelsTitleActions() {
   return (
     <div className="flex shrink-0 items-center gap-3">
       <AccountPrivacyButton />
-      <div
+      <ViewModeTabGroup
         role="group"
         aria-label={t('freeModels.layout.label')}
         className="view-mode-tabs flex h-9 overflow-hidden rounded-button border border-cyber-border"
@@ -200,7 +201,7 @@ export function FreeModelsTitleActions() {
             </button>
           );
         })}
-      </div>
+      </ViewModeTabGroup>
       <PageActionButton icon={CircleHelp} onClick={() => setShowHelp(true)} className="font-mono">
         {t('freeModels.help')}
       </PageActionButton>
@@ -259,88 +260,6 @@ export function FreeModelsTitleActions() {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function RouterHub({
-  title,
-  enabled,
-  baseUrl,
-  hubRef,
-  onCopy,
-  list = false,
-}: {
-  title: string;
-  enabled: boolean;
-  baseUrl: string;
-  hubRef?: ComponentPropsWithRef<'div'>['ref'];
-  onCopy?: (endpoint: string) => void;
-  list?: boolean;
-}) {
-  const { t } = useI18n();
-  const status = (
-    <span
-      className={`free-model-router-status flex items-center gap-1.5 whitespace-nowrap text-xs font-medium leading-none ${enabled ? 'text-green-500 [[data-theme=light]_&]:text-green-800' : 'text-cyber-text-muted'}`}
-    >
-      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />
-      {t(enabled ? 'freeModels.router.enabled' : 'freeModels.router.disabled')}
-    </span>
-  );
-  return (
-    <div
-      ref={hubRef}
-      className={`free-model-router-hub relative z-10 mx-auto ${list ? 'free-model-router-hub-bar rounded-card' : 'w-full max-w-[380px] rounded-xl p-5'}`}
-    >
-      {list ? (
-        <Waypoints size={20} aria-hidden="true" className="text-cyber-accent" />
-      ) : (
-        <div className="free-model-router-heading grid h-8 grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-2">
-          <Waypoints size={22} aria-hidden="true" className="text-cyber-accent" />
-          <div className="min-w-0 truncate text-lg font-semibold leading-none text-cyber-text">
-            {title}
-          </div>
-          {status}
-        </div>
-      )}
-      <div className={`free-model-router-endpoints grid grid-cols-2 gap-3 ${list ? '' : 'mt-4'}`}>
-        {[
-          ['OpenAI', baseUrl],
-          ['Anthropic', baseUrl.replace(/\/v1\/?$/, '')],
-        ].map(([protocol, endpoint]) => {
-          const content = (
-            <>
-              <span
-                className={`${list ? 'shrink-0 text-xs' : 'flex h-5 items-center text-[10px]'} font-semibold text-cyber-text-muted`}
-              >
-                {protocol}
-              </span>
-              <span
-                className={`${list ? 'min-w-0 whitespace-nowrap' : 'mt-1 block break-all'} text-xs font-mono text-cyber-text-secondary`}
-              >
-                {endpoint}
-              </span>
-            </>
-          );
-          const className = `${list ? 'flex items-center gap-2 px-2 py-1' : 'block px-3 py-2'} min-w-0 rounded-button bg-cyber-bg/60 text-left select-none`;
-          return onCopy ? (
-            <button
-              key={protocol}
-              type="button"
-              aria-label={`${t('btn.copy')} ${protocol}`}
-              onClick={() => onCopy(endpoint)}
-              className={className}
-            >
-              {content}
-            </button>
-          ) : (
-            <div key={protocol} className={className}>
-              {content}
-            </div>
-          );
-        })}
-      </div>
-      {list && status}
     </div>
   );
 }
@@ -592,14 +511,14 @@ function RouteModelCard({
           </span>
           {modelPicker}
         </div>
-        <div className="free-model-route-row-actions relative flex shrink-0 items-center gap-1">
+        <div className="free-model-route-row-actions free-model-list-actions relative shrink-0">
           {onRemove && !overlay && (
             <button
               type="button"
               disabled={pending || saving || dragging}
               onClick={onRemove}
               aria-label={`${t('btn.remove')}: ${displayName} (${priority})`}
-              className="flex h-7 w-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-red-500 disabled:opacity-50"
+              className="flex h-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-red-500"
             >
               <Trash2 size={15} />
             </button>
@@ -610,7 +529,7 @@ function RouteModelCard({
               disabled={pending || saving || dragging}
               onClick={onEdit}
               aria-label={`${t('btn.edit')}: ${displayName} (${priority})`}
-              className="flex h-7 w-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-cyber-text disabled:opacity-50"
+              className="flex h-7 items-center justify-center rounded-button text-cyber-text-muted hover:text-cyber-text"
             >
               <SquarePen size={15} />
             </button>
@@ -808,6 +727,25 @@ function routeCatalogBinding(model: RouteModelNode) {
 }
 
 export function FreeModelsMain() {
+  const { activeRouterId } = useFreeModels();
+  const routerFocusRef = useRef(false);
+  const routerTabPositionRef = useRef<ViewModeTabPosition | null>(null);
+  return (
+    <FreeModelsContent
+      key={activeRouterId}
+      routerFocusRef={routerFocusRef}
+      routerTabPositionRef={routerTabPositionRef}
+    />
+  );
+}
+
+function FreeModelsContent({
+  routerFocusRef,
+  routerTabPositionRef,
+}: {
+  routerFocusRef: { current: boolean };
+  routerTabPositionRef: { current: ViewModeTabPosition | null };
+}) {
   const activePage = useNavigationStore((state) => state.activePage);
   const appManager = useContext(AppManagerContext);
   const { t } = useI18n();
@@ -823,8 +761,9 @@ export function FreeModelsMain() {
     customModels,
     proxyAccounts,
     selectedIds,
-    routerBaseUrl,
-    routerEnabled,
+    activeRouterEnabled: routerEnabled,
+    activeRouterId,
+    groupPending,
     removeSelectedModel,
     reorderSelectedModel,
     changeSelectedModel,
@@ -1112,7 +1051,8 @@ export function FreeModelsMain() {
   }, [customModels, selectedIds]);
   const responseTests = useRouteResponseTests(
     selectedModels,
-    activePage === 'freeModels' && layout === 'list'
+    activePage === 'freeModels' && layout === 'list',
+    activeRouterId
   );
   const accountStatusByModel = useMemo(() => {
     const bindings = new Map<
@@ -1191,12 +1131,18 @@ export function FreeModelsMain() {
   const [routeArrow, setRouteArrow] = useState<RouteArrow | null>(null);
   const [canvasSize, setCanvasSize] = useState({ width: 1, height: 1 });
   const [nodeColumns, setNodeColumns] = useState(3);
-  const [routerActivity, setRouterActivity] = useState<api.SmartRouterActivity>({
+  const [savedActivity, setRouterActivity] = useState<
+    api.SmartRouterActivity & { routerId?: string }
+  >({
     candidateId: null,
     active: false,
     sequence: 0,
     updatedAtMs: 0,
   });
+  const routerActivity =
+    savedActivity.routerId === activeRouterId
+      ? savedActivity
+      : { candidateId: null, active: false, sequence: 0, updatedAtMs: 0 };
   const [activityObservedAtMs, setActivityObservedAtMs] = useState(0);
 
   useEffect(() => {
@@ -1208,9 +1154,11 @@ export function FreeModelsMain() {
       if (pending) return;
       pending = true;
       try {
-        const activity = await api.getSmartRouterActivity();
+        const activity = await api.getSmartRouterActivity(
+          ...(activeRouterId === 'smart-router' ? [] : [activeRouterId])
+        );
         if (!cancelled) {
-          setRouterActivity(activity);
+          setRouterActivity({ ...activity, routerId: activeRouterId });
           setActivityObservedAtMs(Date.now());
         }
       } catch (error) {
@@ -1228,7 +1176,7 @@ export function FreeModelsMain() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [routerEnabled, docVisible, activePage]);
+  }, [routerEnabled, docVisible, activePage, activeRouterId]);
 
   const setNodeRef = useCallback((id: string, node: HTMLDivElement | null) => {
     if (node) nodeRefs.current.set(id, node);
@@ -1252,7 +1200,7 @@ export function FreeModelsMain() {
         )
       )
     );
-    const endX = hubBox.left - stageBox.left + hubBox.width / 2;
+    const endX = stageBox.width / 2;
     const endY = hubBox.bottom - stageBox.top;
 
     const allEntries = [...nodeRefs.current].map(([id, node]) => {
@@ -1412,7 +1360,7 @@ export function FreeModelsMain() {
   const routeRowCount = Math.ceil(selectedModels.length / nodeColumns);
   const stageMinHeight = Math.max(
     550,
-    156 +
+    196 +
       HUB_TO_NODE_GAP +
       routeRowCount * 80 +
       Math.max(0, routeRowCount - 1) * NODE_ROW_GAP +
@@ -1425,6 +1373,7 @@ export function FreeModelsMain() {
       className={`free-model-router smart-router flex ${layout === 'list' ? 'min-h-full' : 'h-full'} min-h-[620px] flex-col pb-1`}
     >
       <div
+        aria-busy={groupPending || undefined}
         ref={stageRef}
         className={`relative ${layout === 'list' ? 'grow shrink-0' : 'overflow-hidden flex-1 shrink-0'} ${routerEnabled ? '' : 'is-disabled'}`}
         style={{ minHeight: layout === 'cards' ? stageMinHeight : 550 }}
@@ -1463,50 +1412,42 @@ export function FreeModelsMain() {
           </svg>
         )}
 
-        <RouterHub
+        <RouterGroups
+          key={activePage}
           hubRef={hubRef}
-          list={layout === 'list'}
-          title={t('freeModels.router.title')}
-          enabled={routerEnabled}
-          baseUrl={routerBaseUrl}
-          onCopy={(endpoint) => {
-            void copyText(`http://${endpoint}`).then((ok) =>
-              showToast(
-                ok ? 'success' : 'error',
-                t(ok ? 'feedback.step1.copied' : 'feedback.step1.failed')
-              )
-            );
-          }}
+          restoreFocusRef={routerFocusRef}
+          tabPositionRef={routerTabPositionRef}
+          refreshAction={
+            layout === 'list' ? (
+              <button
+                type="button"
+                onClick={() => void responseTests.test()}
+                disabled={
+                  responseTests.isTesting || selectedModels.length === 0 || savingModelIds.size > 0
+                }
+                aria-label={t('btn.pingAll')}
+                aria-busy={responseTests.isTesting || undefined}
+                className="free-model-router-list-button relative rounded-button px-3 font-mono text-xs text-cyber-text-muted disabled:opacity-50"
+              >
+                <span className={`relative top-px${responseTests.isTesting ? ' invisible' : ''}`}>
+                  {t('btn.pingAll')}
+                </span>
+                {responseTests.isTesting && (
+                  <RefreshCw
+                    size={12}
+                    className="absolute inset-y-0 right-3 my-auto animate-spin"
+                    aria-hidden
+                  />
+                )}
+              </button>
+            ) : undefined
+          }
         />
 
-        {layout === 'list' && (
-          <div className="relative z-10 flex h-[40px] items-center justify-end">
-            <button
-              type="button"
-              onClick={() => void responseTests.test()}
-              disabled={
-                responseTests.isTesting || selectedModels.length === 0 || savingModelIds.size > 0
-              }
-              aria-label={t('btn.pingAll')}
-              aria-busy={responseTests.isTesting || undefined}
-              className="relative flex items-center justify-center px-3 py-1 text-xs font-mono text-cyber-text-muted transition-colors hover:text-cyber-text disabled:opacity-50"
-            >
-              <span className={responseTests.isTesting ? 'invisible' : undefined}>
-                [{t('btn.pingAll')}]
-              </span>
-              {responseTests.isTesting && (
-                <RefreshCw
-                  size={12}
-                  className="absolute inset-y-0 right-3 my-auto animate-spin"
-                  aria-hidden
-                />
-              )}
-            </button>
-          </div>
-        )}
-
         {selectedModels.length === 0 ? (
-          <div className="absolute inset-0 z-10 flex items-center justify-center text-center pointer-events-none">
+          <div
+            className={`absolute inset-x-0 bottom-0 ${layout === 'cards' ? 'top-[196px]' : 'top-24'} z-10 flex items-center justify-center text-center pointer-events-none`}
+          >
             <div>
               <div className="font-medium text-sm text-cyber-text">
                 {t('freeModels.router.emptyTitle')}
@@ -1896,7 +1837,7 @@ export function FreeModelsPanel() {
   return (
     <div className="free-model-router h-full min-h-0 flex flex-col">
       <div className="h-10 shrink-0 px-2 mb-2 flex items-center justify-between gap-2">
-        <div
+        <ViewModeTabGroup
           role="tablist"
           className={`view-mode-tabs min-w-0 flex border border-cyber-border rounded-button overflow-hidden ${compactTabs ? 'flex-1' : ''}`}
         >
@@ -1943,7 +1884,7 @@ export function FreeModelsPanel() {
               )}
             </button>
           ))}
-        </div>
+        </ViewModeTabGroup>
         <button
           type="button"
           disabled={activeTab === 'account' && !accountRiskAcknowledged}
