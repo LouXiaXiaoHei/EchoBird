@@ -391,7 +391,7 @@ pub async fn apply_model_to_tool(tool_id: &str, model_info: ModelInfo) -> ApplyR
         "vibe-trading" => return apply_vibe_trading(&model_info),
 
         // WorkBuddy (Tencent CodeBuddy 办公版): ~/.workbuddy/models.json.
-        "workbuddy" | "workbuddyai" => return apply_workbuddy(tool_id, &model_info),
+        "workbuddy" | "workbuddyai" => return apply_workbuddy(tool_id, &model_info).await,
 
         // Plug-and-play: check config.json custom flag
         _ => {

@@ -49,7 +49,9 @@ vi.mock('./useClaudeCodeAccounts', async () => {
     },
   };
 });
-vi.mock('./useWorkBuddyAccounts', () => ({ useWorkBuddyAccounts: () => ({ accounts: [] }) }));
+vi.mock('./useWorkBuddyAccounts', () => ({
+  useWorkBuddyAccounts: () => ({ accounts: [], select: vi.fn() }),
+}));
 vi.mock('./useDeepSeekAccounts', () => ({
   useDeepSeekAccounts: () => ({ accounts: [], select: vi.fn() }),
 }));
@@ -1758,7 +1760,7 @@ const accountTools = [
   'antigravity',
   'antigravitydesktop',
 ] as const;
-describe('Copilot Desktop pending API apply', () => {
+describe.each(['copilotdesktop', 'workbuddy', 'workbuddyai'])('%s pending API apply', (tool) => {
   let renderer: ReactTestRenderer;
   let context: ReturnType<typeof useAppManager>;
   function Harness() {
@@ -1775,12 +1777,11 @@ describe('Copilot Desktop pending API apply', () => {
     vi.mocked(api.getModels).mockResolvedValue([
       { internalId: 'fixture', name: 'Fixture', baseUrl: 'https://example.com/v1', apiKey: 'key' },
     ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
     useNavigationStore.getState().setActivePage('apps');
     useToolsStore
       .getState()
-      .setDetectedTools([
-        { id: 'copilotdesktop', name: 'GitHub Copilot', category: 'Desktop', installed: true },
-      ]);
+      .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: true }]);
     await act(async () => {
       renderer = create(
         <AppManagerProvider>
@@ -1789,10 +1790,10 @@ describe('Copilot Desktop pending API apply', () => {
       );
     });
     act(() => {
-      context.setSelectedTool('copilotdesktop');
+      context.setSelectedTool(tool);
       context.setAgreedConfigPolicy(true);
       context.setLaunchAfterApply(true);
-      context.handleSelectModel('copilotdesktop', 'fixture');
+      context.handleSelectModel(tool, 'fixture');
     });
   });
   afterEach(() => {
@@ -1840,6 +1841,70 @@ describe('Copilot Desktop pending API apply', () => {
       await pending;
     });
     expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+  });
+  it('retains pending state for configuration-only changes and recovers after success', async () => {
+    act(() => context.setLaunchAfterApply(false));
+    let finishApply!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishApply = resolve;
+      })
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finishApply({ success: true, message: 'ok' });
+      await pending;
+    });
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(context.isLaunching).toBe(false);
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(2);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('releases pending state after configuration failure and allows a retry', async () => {
+    let finishApply!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishApply = resolve;
+      })
+    );
+    let pending!: Promise<void>;
+    await act(async () => {
+      pending = context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(4000);
+    });
+    expect(context.isLaunching).toBe(true);
+    await act(async () => {
+      finishApply({ success: false, message: 'Configuration unavailable' });
+      await pending;
+    });
+    expect(context.isLaunching).toBe(false);
+    expect(context.applyError).toBe('Configuration unavailable');
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(2);
+    expect(api.startTool).toHaveBeenCalledExactlyOnceWith(tool, undefined, undefined);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3000);
     });

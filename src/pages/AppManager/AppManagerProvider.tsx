@@ -785,8 +785,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (
       selectedTool !== 'vscode' &&
       selectedTool !== 'copilotdesktop' &&
+      !workBuddyEdition &&
       !switchingClaudeAccount &&
-      !(workBuddyEdition && workBuddyAccounts.selectedId) &&
       !((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) &&
       !(['minimaxcode', 'minimaxdesktop'].includes(selectedTool) && minimaxAccounts.selectedId) &&
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
@@ -1270,7 +1270,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         }
       }
     }
-    if (selectedTool === 'vscode' || selectedTool === 'copilotdesktop') startCooldown();
+    if (selectedTool === 'vscode' || selectedTool === 'copilotdesktop' || workBuddyEdition)
+      startCooldown();
   };
 
   return (

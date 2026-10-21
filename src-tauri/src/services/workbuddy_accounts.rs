@@ -45,7 +45,7 @@ impl Edition {
             Self::Ai => "workbuddyai",
         }
     }
-    fn auth_path(self) -> Result<PathBuf, String> {
+    pub(crate) fn auth_path(self) -> Result<PathBuf, String> {
         let home = dirs::home_dir().ok_or("accountError.home")?;
         #[cfg(windows)]
         let root = dirs::data_local_dir().ok_or("accountError.home")?;
