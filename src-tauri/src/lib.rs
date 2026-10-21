@@ -15,6 +15,7 @@ mod window_visibility;
 use commands::account_proxy_commands;
 use commands::cline_account_commands;
 use commands::copilot_account_commands;
+use commands::dumate_account_commands;
 use commands::kilo_account_commands;
 use commands::minimax_account_commands;
 use commands::mod_stub;
@@ -86,6 +87,10 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "qwenworkcn",
             include_str!("../../docs/api/tools/install/qwenworkcn.json"),
+        ),
+        (
+            "dumate",
+            include_str!("../../docs/api/tools/install/dumate.json"),
         ),
         (
             "qwenwork",
@@ -1267,6 +1272,14 @@ pub fn run() {
             qoder_account_commands::claim_qoder_daily_credits,
             qoder_account_commands::delete_qoder_account,
             qwenwork_account_commands::list_qwenwork_accounts,
+            dumate_account_commands::list_dumate_accounts,
+            dumate_account_commands::start_dumate_login,
+            dumate_account_commands::poll_dumate_login,
+            dumate_account_commands::cancel_dumate_login,
+            dumate_account_commands::refresh_dumate_account_quota,
+            dumate_account_commands::claim_dumate_daily_credits,
+            dumate_account_commands::delete_dumate_account,
+            dumate_account_commands::switch_dumate_account,
             qwenwork_account_commands::start_qwenwork_login,
             qwenwork_account_commands::poll_qwenwork_login,
             qwenwork_account_commands::cancel_qwenwork_login,

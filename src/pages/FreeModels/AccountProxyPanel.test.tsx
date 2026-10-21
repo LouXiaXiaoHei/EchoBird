@@ -136,6 +136,23 @@ it('counts saved accounts independently, including zero, without reading model c
   expect(api.listProxyAccounts).toHaveBeenCalledTimes(api.accountProxyProviders.length);
 });
 
+it('offers DuMate saved accounts as a router source without starting login or reading models on entry', async () => {
+  await open();
+  expect(count('dumate')).toBe('1 个账号');
+  expect(api.accountProxyProviders.find((p) => p.id === 'dumate')?.icon).toBe('dumate.svg');
+  expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+  act(() => row('dumate').props.onClick());
+  expect(context.setNewModelForm).toHaveBeenCalledExactlyOnceWith(
+    expect.objectContaining({
+      accountSource: { provider: 'dumate', accountId: '' },
+      apiKey: '',
+      baseUrl: '',
+    })
+  );
+  expect(context.setModelModalDestination).toHaveBeenCalledWith('freeRouter');
+  expect(invoke).not.toHaveBeenCalled();
+});
+
 it('puts larger saved-account pools first and preserves catalog order for ties without mutating it', async () => {
   const originalOrder = api.accountProxyProviders.map((provider) => provider.id);
   vi.mocked(api.listProxyAccounts).mockImplementation(async (provider) => {

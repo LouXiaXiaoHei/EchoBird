@@ -332,6 +332,8 @@ export type TKey =
   | 'agent.zcodeTrial'
   | 'agent.zcodeNoPlan'
   | 'agent.qoderTrial'
+  | 'agent.dumateEnterpriseSeat'
+  | 'agent.dumateTrial'
   | 'agent.qwenworkFree'
   | 'agent.qwenworkPlus'
   | 'agent.qwenworkPro'

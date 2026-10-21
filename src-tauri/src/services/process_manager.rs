@@ -1224,7 +1224,7 @@ impl ProcessManager {
 
         // CodeArts Desktop shares its image name with an unrelated native CLI;
         // MiniMax editions and macOS WorkBuddy also need exact executable paths.
-        if matches!(tool_id, "minimaxdesktop" | "codearts")
+        if matches!(tool_id, "minimaxdesktop" | "codearts" | "dumate")
             || (cfg!(target_os = "macos") && matches!(tool_id, "workbuddy" | "workbuddyai"))
         {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
@@ -2095,10 +2095,12 @@ fn appimage_matches(environment: &[u8], executable: &std::path::Path) -> bool {
         })
 }
 
-/// Release native desktop storage before an explicit model change. Uses the same
+/// Release native desktop storage before an explicit model or account change. Uses the same
 /// process scope as launch/restart; it never targets standalone CLI instances.
 pub(crate) async fn stop_desktop_for_config(tool_id: &str) {
-    if !crate::services::tool_manager::is_managed_desktop_tool(tool_id) {
+    // DuMate account changes need closed auth storage, while an ordinary launch
+    // of this no-model-config app should only focus its existing instance.
+    if tool_id != "dumate" && !crate::services::tool_manager::is_managed_desktop_tool(tool_id) {
         return;
     }
     let mgr = get_manager().await;

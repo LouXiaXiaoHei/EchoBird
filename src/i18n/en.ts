@@ -620,6 +620,8 @@ const en: Translations = {
   'status.complete': 'Complete',
   'status.failed': 'Failed',
   'status.notInstalled': 'Not installed',
+  'agent.dumateEnterpriseSeat': 'Enterprise seat',
+  'agent.dumateTrial': 'Trial',
   'agent.qwenworkFree': 'Free',
   'agent.qwenworkPlus': 'Plus',
   'agent.qwenworkPro': 'Pro',

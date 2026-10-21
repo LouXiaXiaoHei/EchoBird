@@ -2,6 +2,7 @@ pub mod account_proxy_commands;
 pub mod cline_account_commands;
 pub mod codearts_account_commands;
 pub mod copilot_account_commands;
+pub mod dumate_account_commands;
 pub mod kilo_account_commands;
 pub mod kimi_account_commands;
 pub mod minimax_account_commands;

@@ -10,6 +10,7 @@ import { OpenDesignAccountSection } from '../AppManager/OpenDesignAccountSection
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 import type { QwenWorkAccount } from '../../api/qwenwork';
+import type { DuMateAccount } from '../../api/dumate';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
@@ -51,6 +52,7 @@ function context() {
     minimaxAccounts: group(),
     qoderAccountGroups: { qoder: group(), qodercn: group() },
     qwenWorkAccountGroups: { qwenwork: group(), qwenworkcn: group() },
+    dumateAccounts: group(),
     grokAccounts: group(),
     kiloAccounts: group(),
     clineAccounts: group(),
@@ -65,6 +67,59 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it('DuMate uses real package and reward capacities without refreshing during rendering', async () => {
+    const state = context();
+    const row: DuMateAccount = {
+      id: 'dumate',
+      name: 'Fixture',
+      enterprise: false,
+      plan: 'pro',
+      expiresAt: null,
+      active: false,
+      remaining: 1350,
+      total: 1600,
+      dailyReward: null,
+      creditBuckets: [
+        {
+          name: 'plan_pro',
+          source: 'subscription',
+          reward: false,
+          remaining: 900,
+          total: 1000,
+          expiresAt: null,
+        },
+        {
+          name: 'plan_point',
+          source: 'purchase',
+          reward: false,
+          remaining: 50,
+          total: 100,
+          expiresAt: null,
+        },
+        {
+          name: 'grant_point',
+          source: 'login_bonus',
+          reward: true,
+          remaining: 400,
+          total: 500,
+          expiresAt: null,
+        },
+      ],
+    };
+    state.dumateAccounts.accounts = [row];
+    const account = providers(state).find((p) => p.id === 'dumate')!.accounts[0];
+    expect(account.plan).toBe('Pro');
+    expect(account.metrics).toMatchObject([
+      { label: 'agent.baseCredits', value: '950', percent: (950 / 1100) * 100, showProgress: true },
+      { label: 'agent.rewardCredits', value: '400', percent: 80, showProgress: true },
+    ]);
+    expect(state.dumateAccounts.refresh).not.toHaveBeenCalled();
+    expect(state.dumateAccounts.claimDaily).not.toHaveBeenCalled();
+    await account.claim!();
+    expect(state.dumateAccounts.claimDaily).toHaveBeenCalledWith(row);
+    row.enterprise = true;
+    expect(providers(state).find((p) => p.id === 'dumate')!.accounts[0].claim).toBeUndefined();
+  });
   it.each(['qwenworkcn', 'qwenwork'] as const)(
     'shows %s identity and edition-specific credit rows without adding organization pools or passive requests',
     (edition) => {

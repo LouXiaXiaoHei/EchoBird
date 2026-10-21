@@ -572,6 +572,8 @@ const zhHant: Partial<Translations> = {
     'Windows 部署 SSH 較為複雜。建議在伺服器端下載安裝 EchoBird，然後透過「AI 助理」部署本機 SSH。',
   'status.running': '執行中',
   'status.notInstalled': '未安裝',
+  'agent.dumateEnterpriseSeat': '企業席位',
+  'agent.dumateTrial': '體驗版',
   'agent.qwenworkFree': '免費版',
   'agent.qwenworkPlus': '個人標準版',
   'agent.qwenworkPro': '個人進階版',

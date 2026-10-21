@@ -1,0 +1,24 @@
+{
+    "id": "dumate",
+    "displayName": "DuMate",
+    "homepage": "https://www.dumate.cn/",
+    "docs": "https://cloud.baidu.com/doc/Dumate/index.html",
+    "kind": "desktop_app",
+    "platforms": ["windows", "macos"],
+    "install": {
+        "note": "Use the current official download at https://www.dumate.cn/. Windows x64 and macOS Apple Silicon are offered; no official Linux desktop package is verified. Do not substitute another product or invent unattended installer flags."
+    },
+    "install_flow": {
+        "summary": "Resolve and verify the official DuMate package for the current platform and architecture, install, then refresh detection.",
+        "agent_steps": [
+            "Read https://www.dumate.cn/ for current HTTPS download links. Confirm the vendor supports the machine's OS and architecture before downloading to Downloads. Verify publisher signature and product identity; preserve the existing installation location.",
+            "Windows: install the signed DuMate x64 package. Use unattended flags only if verified; otherwise open the installer and report remaining user interaction. Resolve DuMate.exe under the installed product root, not dumate-main-server.exe. Verify resources/app.asar package.json name qianfan-desktop-app and version.",
+            "macOS: use the official Apple Silicon package and verify code signature/Gatekeeper. Install DuMate.app in Applications or the user's Applications folder and verify Contents/MacOS/DuMate and Contents/Resources/app.asar package identity. Do not claim Intel or Linux support without a current official package.",
+            "Refresh EchoBird detection and verify the installed executable path and version. A download alone does not establish installation success."
+        ],
+        "tell_user": ["Installed version and path, or the precise remaining installation step."]
+    },
+    "first_run": {
+        "note": "Open DuMate once to initialize native storage. Adding saves an account in EchoBird; applying switches the client. Quota refresh and daily reward claims are explicit actions. Monthly subscription points are issued by the vendor, not a separate EchoBird check-in. Custom model configuration is not supported."
+    }
+}

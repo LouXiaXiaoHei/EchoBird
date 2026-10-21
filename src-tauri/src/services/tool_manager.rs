@@ -1087,6 +1087,13 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
                     }
             }),
             "CodeArts" => codearts_desktop_identity(path),
+            "DuMate" => {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("DuMate"))
+                    && packaged_desktop_metadata(path)
+                        .is_some_and(|value| value["name"] == "qianfan-desktop-app")
+            }
             "Devin" => devin_desktop_identity(path),
             "Devin CLI" => !devin_desktop_identity(path),
             _ => true,
@@ -4441,6 +4448,52 @@ mod tests {
         let global: serde_json::Value =
             serde_json::from_str(include_str!("../../../tools/qwenwork/paths.json")).unwrap();
         assert!(global["paths"]["linux"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn dumate_detection_requires_the_official_package_and_has_no_linux_install_claim() {
+        let pc: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/dumate/paths.json")).unwrap();
+        let root = std::env::temp_dir().join(format!("dumate-detection-{}", uuid::Uuid::new_v4()));
+        let executable = if cfg!(target_os = "macos") {
+            root.join("Contents/MacOS/DuMate")
+        } else {
+            root.join("DuMate.exe")
+        };
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"fixture").unwrap();
+        let resources = qoder_resources(std::env::consts::OS, &executable).unwrap();
+        write_qwenwork_package(&resources, "other-product", "1.0.86");
+        assert!(!valid_executable(&pc, &executable));
+        write_qwenwork_package(&resources, "qianfan-desktop-app", "1.0.86");
+        assert!(valid_executable(&pc, &executable));
+        let uninstaller = executable.with_file_name("Uninstall DuMate.exe");
+        fs::write(&uninstaller, b"fixture").unwrap();
+        assert!(!valid_executable(&pc, &uninstaller));
+        assert_eq!(
+            packaged_desktop_metadata(&executable).unwrap()["version"],
+            "1.0.86"
+        );
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/dumate/paths.json")).unwrap();
+        assert_eq!(catalog["noModelConfig"], true);
+        assert!(!super::is_managed_desktop_tool("dumate"));
+        assert_eq!(catalog["paths"]["linux"], serde_json::json!([]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Read-only detection of the installed official DuMate client"]
+    fn installed_dumate_detection_probe() {
+        let pc: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/dumate/paths.json")).unwrap();
+        let path = super::find_tool_executable(&pc, true).expect("installed DuMate");
+        assert!(valid_executable(&pc, Path::new(&path)));
+        println!(
+            "DuMate {} {}",
+            packaged_desktop_metadata(Path::new(&path)).unwrap()["version"],
+            path
+        );
     }
 
     #[cfg(windows)]

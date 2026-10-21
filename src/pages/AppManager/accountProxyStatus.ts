@@ -19,6 +19,8 @@ export function accountProxyStatus(
   provider: AccountProvider
 ): AccountProxyStatus {
   switch (provider) {
+    case 'dumate':
+      return context.dumateAccounts;
     case 'claudeCode':
       return context.claudeCodeAccounts;
     case 'codex':

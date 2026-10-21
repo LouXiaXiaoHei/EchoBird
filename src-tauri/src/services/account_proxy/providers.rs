@@ -14,6 +14,9 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::{json, Value};
+#[cfg(test)]
+#[path = "providers/dumate_tests.rs"]
+mod dumate_tests;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -320,6 +323,7 @@ pub(super) fn base(provider: AccountProvider, credentials: &Value) -> &str {
     credentials["baseUrl"]
         .as_str()
         .unwrap_or(match provider {
+            AccountProvider::Dumate => "https://dumate-svc.baidu.com/gateway/apis/v1",
             AccountProvider::Codex => CODEX_BASE,
             AccountProvider::Kimi => "https://api.kimi.com/coding/v1",
             AccountProvider::WorkBuddy => "https://copilot.tencent.com",
@@ -354,6 +358,11 @@ fn signed(
 ) -> Result<reqwest::RequestBuilder, ProxyError> {
     let mut request = request.bearer_auth(access_token(credentials)?);
     match provider {
+        AccountProvider::Dumate => {
+            request = request
+                .header("X-Dumate-Client-Type", "web")
+                .header("X-Dumate-Account-Id", "global");
+        }
         AccountProvider::Codex => {
             request = request
                 .header("originator", "codex_cli_rs")
@@ -867,6 +876,9 @@ async fn fetch_models(
 ) -> Result<Vec<String>, ProxyError> {
     let api = base(provider, credentials);
     let value = match provider {
+        // The gateway has no public /models endpoint. This is its verified
+        // native text route, not an alias for a claimed underlying model.
+        AccountProvider::Dumate => return Ok(vec!["model-text".into()]),
         AccountProvider::Antigravity => {
             let (id, tier) = prepared_project(credentials, client, true).await?;
             let mut body = json!({"project":id});
@@ -1346,11 +1358,43 @@ pub(super) async fn route(
     if !status.is_success() {
         let headers = response.headers().clone();
         let value = response.json::<Value>().await.unwrap_or(Value::Null);
+        if provider == AccountProvider::Dumate {
+            return Err(dumate_error(status, &headers, &value));
+        }
         let error = upstream_error(status, &headers, &value);
         forget_failed_metadata(provider, &credentials, &error);
         return Err(error);
     }
+    if provider == AccountProvider::Dumate
+        && !response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/event-stream"))
+    {
+        let headers = response.headers().clone();
+        let value = response.json::<Value>().await.unwrap_or(Value::Null);
+        return Err(dumate_error(status, &headers, &value));
+    }
     converted(response, protocol, model, streaming, true).await
+}
+
+fn dumate_error(status: StatusCode, headers: &HeaderMap, value: &Value) -> ProxyError {
+    let mut error = if status.is_success() {
+        stream_error("error", &value.to_string(), headers)
+            .unwrap_or_else(|| upstream_error(StatusCode::BAD_GATEWAY, headers, value))
+    } else {
+        upstream_error(status, headers, value)
+    };
+    error.message = match error.status {
+        StatusCode::UNAUTHORIZED => "DuMate sign-in has expired",
+        StatusCode::FORBIDDEN => "DuMate account cannot use this model",
+        StatusCode::PAYMENT_REQUIRED => "DuMate credits are exhausted",
+        StatusCode::TOO_MANY_REQUESTS => "DuMate usage limit reached",
+        _ => "DuMate upstream request failed",
+    }
+    .into();
+    error
 }
 
 pub(super) async fn route_responses(

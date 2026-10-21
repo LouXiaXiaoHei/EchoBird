@@ -572,6 +572,8 @@ const zhHans: Partial<Translations> = {
   'aiCareer.timeYesterday': '昨天',
   'aiCareer.timeDaysAgo': '{days}天前',
   'aiCareer.noActivity': '无活动',
+  'agent.dumateEnterpriseSeat': '企业坐席',
+  'agent.dumateTrial': '体验版',
   'agent.qwenworkFree': '免费版',
   'agent.qwenworkPlus': '个人标准版',
   'agent.qwenworkPro': '个人高级版',

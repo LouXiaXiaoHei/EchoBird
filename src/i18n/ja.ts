@@ -597,6 +597,8 @@ const ja: Partial<Translations> = {
   'status.complete': '完了',
   'status.failed': '失敗',
   'status.notInstalled': '未インストール',
+  'agent.dumateEnterpriseSeat': '企業シート',
+  'agent.dumateTrial': '体験版',
   'agent.qwenworkFree': 'Free',
   'agent.qwenworkPlus': 'Plus',
   'agent.qwenworkPro': 'Pro',

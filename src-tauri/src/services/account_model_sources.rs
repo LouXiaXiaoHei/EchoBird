@@ -44,6 +44,12 @@ fn option(
 pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccountOption>, String> {
     use AccountProvider::*;
     let mut accounts: Vec<SavedAccountOption> = match provider {
+        Dumate => super::dumate_accounts::list()
+            .await?
+            .into_iter()
+            .filter(|account| !account.enterprise)
+            .map(|account| option(provider, account.id, account.name, account.plan))
+            .collect(),
         CodeArts => super::codearts_accounts::list_saved_accounts()?
             .into_iter()
             .map(|a| option(provider, a.id, a.email, a.plan))
@@ -239,6 +245,10 @@ fn validate_saved_source(
 pub(crate) async fn connection_endpoint(source: &AccountSource) -> Result<String, String> {
     use AccountProvider::*;
     let metadata = match source.provider {
+        Dumate => {
+            validate_source(source).await?;
+            Value::Null
+        }
         Minimax => {
             let account = minimax_accounts::list_saved_accounts()
                 .await?
@@ -273,6 +283,9 @@ pub(crate) async fn credentials(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        Dumate => {
+            super::dumate_accounts::proxy_credentials(&source.account_id, force_refresh).await
+        }
         CodeArts => {
             super::codearts_accounts::proxy_credentials(&source.account_id, force_refresh).await
         }
@@ -329,6 +342,13 @@ pub(crate) async fn credentials_after_rejection(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        Dumate => {
+            super::dumate_accounts::proxy_credentials_after_rejection(
+                &source.account_id,
+                rejected_credentials,
+            )
+            .await
+        }
         CodeArts => {
             super::codearts_accounts::proxy_credentials_after_rejection(
                 &source.account_id,

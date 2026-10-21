@@ -34,6 +34,7 @@ export interface LocalTool extends DetectedTool {
 // ─── Model Types ───
 
 export type AccountProvider =
+  | 'dumate'
   | 'claudeCode'
   | 'codex'
   | 'workBuddy'

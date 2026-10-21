@@ -25,6 +25,11 @@ import {
 } from '../AppManager/qwenWorkAccountDisplay';
 import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
 import { codeArtsRemainingPercent } from '../AppManager/codeArtsAccountDisplay';
+import {
+  dumateCreditBalances,
+  dumatePlanLabel,
+  dumateRewardStatus,
+} from '../AppManager/dumateAccountDisplay';
 import { devinQuotaLabel } from '../AppManager/devinAccountDisplay';
 
 export interface AccountMetric {
@@ -498,6 +503,44 @@ export function accountCenterProviders(
         ],
       })
     ),
+    ...(context.dumateAccounts
+      ? [
+          provider(
+            'dumate',
+            'DuMate',
+            '/icons/tools/dumate.svg',
+            ['dumate'],
+            context.dumateAccounts,
+            (account) => {
+              const balances = dumateCreditBalances(account);
+              return {
+                identity: account.name || account.id,
+                plan: dumatePlanLabel(account, t),
+                subscriptionEndAt: account.expiresAt ?? undefined,
+                claim: account.enterprise
+                  ? undefined
+                  : () => context.dumateAccounts.claimDaily(account),
+                dailyClaimed: dumateRewardStatus(account) === 'claimed',
+                claimDisabled: dumateRewardStatus(account) === 'unavailable',
+                claimStatusExpiresAt: account.dailyReward?.nextClaimAt,
+                metrics: [
+                  [t('agent.baseCredits'), balances.package] as const,
+                  [t('agent.rewardCredits'), balances.reward] as const,
+                ].map(([label, balance]) => ({
+                  ...credits(label, balance.remaining, balance.total, balance.expiresAt),
+                  showProgress: true,
+                  balanceState:
+                    balance.remaining == null
+                      ? undefined
+                      : balance.remaining > 0
+                        ? ('available' as const)
+                        : ('empty' as const),
+                })),
+              };
+            }
+          ),
+        ]
+      : []),
     ...(['qwenworkcn', 'qwenwork'] as const).map((edition) =>
       provider(
         edition,
