@@ -28,6 +28,7 @@ mod opencode;
 mod opendesign;
 mod openscience;
 mod pi;
+mod provider_selection;
 mod proxy_ports;
 mod qoder;
 mod qwencode;

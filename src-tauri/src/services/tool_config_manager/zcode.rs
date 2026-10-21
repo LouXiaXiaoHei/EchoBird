@@ -7,17 +7,31 @@ use super::{
 use crate::services::{tool_manager, zcode_paths};
 use std::path::Path;
 
+const REASONING_LEVELS: [&str; 5] = ["disabled", "low", "medium", "high", "max"];
+
+// ZCode's generic protocol maps, applied after its model-specific rules so
+// every model supplied through EchoBird exposes the same five levels.
+const OPENAI_REASONING_MAP: &str = r#"{
+  "thinking": {"type": reasoningLevel == "disabled" ? "disabled" : "enabled"},
+  "enable_thinking": reasoningLevel != "disabled",
+  "reasoning_effort": reasoningLevel == "disabled" ? "none" : reasoningLevel,
+  "reasoning": {"effort": reasoningLevel == "disabled" ? "none" : reasoningLevel}
+}"#;
+const ANTHROPIC_REASONING_MAP: &str = r#"reasoningLevel == "disabled"
+  ? {"thinking": {"type": "disabled"}}
+  : {"thinking": {"type": "adaptive"}, "output_config": {"effort": reasoningLevel}}"#;
+
 fn prepare_zcode_personal_config(
     path: &std::path::Path,
     model_id: &str,
+    provider_name: &str,
     api_key: &str,
     base_url: &str,
     protocol: &str,
 ) -> Result<Option<serde_json::Value>, String> {
     if !path.exists() {
-        // ZCode imports config.json when this file is first created. Keeping
-        // the legacy write below is therefore sufficient for a fresh 3.14+
-        // install and remains compatible with older published clients.
+        // Leave first-run migration to ZCode so other legacy providers are
+        // imported too. Older clients continue using config.json below.
         return Ok(None);
     }
     let mut root = read_json_file(path).ok_or_else(|| {
@@ -36,6 +50,21 @@ fn prepare_zcode_personal_config(
         .get_mut("config")
         .and_then(|v| v.as_object_mut())
         .ok_or_else(|| format!("Invalid ZCode provider config: {}", path.display()))?;
+    let api_type = if protocol == "anthropic" {
+        "anthropic-messages"
+    } else {
+        "openai-chat-completions"
+    };
+    let reasoning_level = config
+        .get("defaultModelSelection")
+        .filter(|selection| {
+            selection["providerId"] == "echobird" && selection["modelId"] == model_id
+        })
+        .and_then(|selection| selection.pointer("/options/reasoningLevel"))
+        .and_then(|level| level.as_str())
+        .filter(|level| REASONING_LEVELS.contains(level))
+        .unwrap_or("max")
+        .to_owned();
     let provider_rules = config
         .get_mut("providerConfigRules")
         .and_then(|v| v.get_mut("providerRules"))
@@ -43,15 +72,9 @@ fn prepare_zcode_personal_config(
         .ok_or_else(|| format!("Invalid ZCode provider rules: {}", path.display()))?;
     provider_rules
         .retain(|rule| rule.get("providerId").and_then(|v| v.as_str()) != Some("echobird"));
-
-    let api_type = if protocol == "anthropic" {
-        "anthropic-messages"
-    } else {
-        "openai-chat-completions"
-    };
     provider_rules.push(serde_json::json!({
         "providerId": "echobird",
-        "providerName": "EchoBird",
+        "providerName": provider_name,
         "enabled": true,
         "config": {
             "group": "standard-personal",
@@ -73,9 +96,23 @@ fn prepare_zcode_personal_config(
             .ok_or_else(|| format!("Invalid ZCode model rules: {}", path.display()))?;
         rules.retain(|rule| rule.get("providerId").and_then(|v| v.as_str()) != Some("echobird"));
     }
+    model_rules["providerModelRules"]
+        .as_array_mut()
+        .expect("providerModelRules was validated above")
+        .push(serde_json::json!({
+            "providerId": "echobird",
+            "modelId": model_id,
+            "config": { "optionSpecs": { "reasoningLevel": {
+                "values": REASONING_LEVELS,
+                "map": if protocol == "anthropic" { ANTHROPIC_REASONING_MAP } else { OPENAI_REASONING_MAP }
+            }}}
+        }));
     config.insert(
         "defaultModelSelection".to_string(),
-        serde_json::json!({ "providerId": "echobird", "modelId": model_id }),
+        serde_json::json!({
+            "providerId": "echobird", "modelId": model_id,
+            "options": { "reasoningLevel": reasoning_level }
+        }),
     );
     if let Some(order) = config
         .get_mut("providerOrder")
@@ -154,7 +191,11 @@ fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
     }
 
     let provider_id = "echobird";
-    let display_name = model_info.name.as_deref().unwrap_or(model_id);
+    let display_name = model_info
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(model_id);
     // Resolve the real input modalities for the selected model so ZCode's
     // `modalities.input` reflects image/video support when the model has it,
     // instead of declaring every model text-only.
@@ -183,6 +224,7 @@ fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
     let personal = match prepare_zcode_personal_config(
         &personal_path,
         model_id,
+        display_name,
         &api_key,
         &base_url,
         model_info.protocol.as_deref().unwrap_or("openai"),
@@ -479,6 +521,7 @@ mod tests {
         let updated = prepare_zcode_personal_config(
             &path,
             "vendor/model",
+            "My Provider",
             "secret",
             "https://example.com/v1",
             "openai",
@@ -493,9 +536,18 @@ mod tests {
         assert_eq!(rules.len(), 2);
         assert_eq!(rules[0]["providerId"], "existing");
         assert_eq!(rules[1]["providerId"], "echobird");
+        assert_eq!(rules[1]["providerName"], "My Provider");
+        assert_eq!(
+            updated.pointer("/config/modelConfigRules/providerModelRules/0/config/optionSpecs/reasoningLevel/values").unwrap(),
+            &serde_json::json!(REASONING_LEVELS)
+        );
         assert_eq!(
             updated["config"]["defaultModelSelection"]["modelId"],
             "vendor/model"
+        );
+        assert_eq!(
+            updated["config"]["defaultModelSelection"]["options"]["reasoningLevel"],
+            "max"
         );
 
         std::fs::remove_file(&path).unwrap();
@@ -510,6 +562,7 @@ mod tests {
         let updated = prepare_zcode_personal_config(
             &path,
             "claude-test",
+            "My Anthropic Provider",
             "secret",
             "https://example.com/anthropic",
             "anthropic",
@@ -565,9 +618,28 @@ mod tests {
         .unwrap();
         for protocol in ["openai", "anthropic"] {
             let model: ModelInfo = serde_json::from_value(serde_json::json!({
-                "model":"vendor/fixture", "apiKey":"fixture-key", "baseUrl":"https://example.test/v1", "protocol":protocol
+                "name":"Fixture Supplier", "model":"vendor/fixture", "apiKey":"fixture-key", "baseUrl":"https://example.test/v1", "protocol":protocol
             })).unwrap();
             assert!(apply_zcode_at(&model, dir).success);
+            let config = read_json_file(&dir.join("provider_config.json")).unwrap();
+            assert_eq!(
+                config["config"]["providerConfigRules"]["providerRules"][1]["providerName"],
+                "Fixture Supplier"
+            );
+            let rules = config["config"]["modelConfigRules"]["providerModelRules"]
+                .as_array()
+                .unwrap();
+            assert_eq!(rules.len(), 1);
+            let reasoning = &rules[0]["config"]["optionSpecs"]["reasoningLevel"];
+            assert_eq!(reasoning["values"], serde_json::json!(REASONING_LEVELS));
+            assert_eq!(
+                reasoning["map"],
+                if protocol == "anthropic" {
+                    ANTHROPIC_REASONING_MAP
+                } else {
+                    OPENAI_REASONING_MAP
+                }
+            );
             let before = std::fs::read(dir.join("provider_config.json")).unwrap();
             let read = read_zcode_at(dir).unwrap();
             assert_eq!(read.model.as_deref(), Some("vendor/fixture"));
@@ -593,6 +665,135 @@ mod tests {
         for (path, bytes) in originals {
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_personal_config_fails_before_writing_either_config() {
+        let root = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        let mut invalid = personal_fixture();
+        invalid["config"]["modelConfigRules"]["providerModelRules"] = serde_json::json!({});
+        write_json_file(&root.join("provider_config.json"), &invalid).unwrap();
+        let legacy = serde_json::json!({"untouched":true});
+        write_json_file(&root.join("config.json"), &legacy).unwrap();
+        let personal = std::fs::read(root.join("provider_config.json")).unwrap();
+        let model: ModelInfo = serde_json::from_value(serde_json::json!({
+            "model":"test-model", "apiKey":"fixture"
+        }))
+        .unwrap();
+        assert!(!apply_zcode_at(&model, &root).success);
+        assert_eq!(
+            std::fs::read(root.join("provider_config.json")).unwrap(),
+            personal
+        );
+        assert_eq!(read_json_file(&root.join("config.json")).unwrap(), legacy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uses_model_id_if_name_is_blank_without_requiring_catalog() {
+        let root = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        write_json_file(&root.join("provider_config.json"), &personal_fixture()).unwrap();
+        for name in [None, Some(" ")] {
+            let model: ModelInfo = serde_json::from_value(serde_json::json!({
+                "name":name, "model":"vendor/model", "apiKey":"fixture"
+            }))
+            .unwrap();
+            assert!(apply_zcode_at(&model, &root).success);
+            let config = read_json_file(&root.join("provider_config.json")).unwrap();
+            assert_eq!(
+                config["config"]["providerConfigRules"]["providerRules"][1]["providerName"],
+                "vendor/model"
+            );
+            assert_eq!(
+                config["config"]["modelConfigRules"]["providerModelRules"][0]["config"]
+                    ["optionSpecs"]["reasoningLevel"]["values"],
+                serde_json::json!(REASONING_LEVELS)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reapply_preserves_valid_level_only_for_same_model_and_keeps_other_model_rules() {
+        let root = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        let path = root.join("provider_config.json");
+        for (previous_model, level, expected) in [
+            ("vendor/model", "low", "low"),
+            ("vendor/model", "enabled", "max"),
+            ("another/model", "low", "max"),
+        ] {
+            let mut fixture = personal_fixture();
+            fixture["config"]["defaultModelSelection"] = serde_json::json!({
+                "providerId":"echobird", "modelId":previous_model, "options":{"reasoningLevel":level}
+            });
+            let other = serde_json::json!({"providerId":"existing", "modelId":"keep", "config":{"enabled":false}});
+            for key in ["providerModelRules", "manualProviderModelRules"] {
+                fixture["config"]["modelConfigRules"][key] = serde_json::json!([
+                    other, {"providerId":"echobird", "modelId":"old", "config":{}}
+                ]);
+            }
+            write_json_file(&path, &fixture).unwrap();
+            let updated = prepare_zcode_personal_config(
+                &path,
+                "vendor/model",
+                "Supplier",
+                "fixture",
+                "https://example.test",
+                "anthropic",
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                updated["config"]["defaultModelSelection"]["options"]["reasoningLevel"],
+                expected
+            );
+            assert_eq!(
+                updated["config"]["modelConfigRules"]["providerModelRules"][0],
+                other
+            );
+            assert_eq!(
+                updated["config"]["modelConfigRules"]["providerModelRules"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert_eq!(
+                updated["config"]["modelConfigRules"]["manualProviderModelRules"],
+                serde_json::json!([other])
+            );
+            write_json_file(&path, &updated).unwrap();
+            assert_eq!(
+                prepare_zcode_personal_config(
+                    &path,
+                    "vendor/model",
+                    "Supplier",
+                    "fixture",
+                    "https://example.test",
+                    "anthropic"
+                )
+                .unwrap(),
+                Some(updated)
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_personal_config_keeps_zcode_first_run_migration_available() {
+        let root = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        let legacy = serde_json::json!({"provider":{"existing":{"keep":true}}});
+        write_json_file(&root.join("config.json"), &legacy).unwrap();
+        let model: ModelInfo =
+            serde_json::from_value(serde_json::json!({"model":"test", "apiKey":"fixture"}))
+                .unwrap();
+        assert!(apply_zcode_at(&model, &root).success);
+        assert!(!root.join("provider_config.json").exists());
+        assert_eq!(
+            read_json_file(&root.join("config.json")).unwrap()["provider"]["existing"],
+            legacy["provider"]["existing"]
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 }

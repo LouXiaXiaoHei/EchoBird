@@ -97,6 +97,8 @@ fn write_opencode_native_config(
     }
 
     let provider_id = "echobird";
+    super::provider_selection::enable_provider(&mut config, provider_id);
+    super::provider_selection::allow_provider_policy(&mut config, provider_id);
     config["provider"][provider_id] = serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": provider_name,

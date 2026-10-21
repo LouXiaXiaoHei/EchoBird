@@ -69,6 +69,7 @@ pub(super) fn apply_mimocode(model_info: &ModelInfo) -> ApplyResult {
     }
 
     let provider_id = "echobird";
+    super::provider_selection::enable_provider(&mut config, provider_id);
     config["provider"][provider_id] = serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": model_id,

@@ -117,14 +117,15 @@ fn apply_at(dir: &Path, preferences: Option<&Path>, info: &ModelInfo) -> Result<
     } else {
         config["provider"] = json!({});
     }
+    super::provider_selection::enable_provider(&mut config, PROVIDER);
     config["provider"][PROVIDER] = json!({
-        "npm": "@ai-sdk/openai-compatible", "name": "EchoBird",
+        "npm": "@ai-sdk/openai-compatible", "name": info.name.as_deref().unwrap_or(model),
         "options": {
             "baseURL": info.base_url.as_deref().unwrap_or("https://api.openai.com/v1").trim_end_matches('/'),
             "apiKey": info.api_key.as_deref().unwrap_or("")
         },
         "models": {model: {
-            "name": info.name.as_deref().unwrap_or(model),
+            "name": model,
             "modalities": {"input": model_input_modalities_for(model), "output": ["text"]}
         }}
     });
@@ -356,6 +357,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn model_apply_reenables_only_echobird_for_cli_and_desktop() {
+        for desktop in [false, true] {
+            let dir = temp();
+            let path = dir.join("kilo.jsonc");
+            let prefs = dir.join("preferences.json");
+            write_json_file(
+                &path,
+                &json!({
+                    "disabled_providers": ["echobird", "other"],
+                    "enabled_providers": ["custom"]
+                }),
+            )
+            .unwrap();
+            let info: ModelInfo = serde_json::from_value(json!({
+                "model": "test-model", "name": "Supplier", "apiKey": "fixture"
+            }))
+            .unwrap();
+            apply_at(&dir, desktop.then_some(prefs.as_path()), &info).unwrap();
+            let config = load_object(&path).unwrap();
+            assert_eq!(config["disabled_providers"], json!(["other"]));
+            assert_eq!(config["enabled_providers"], json!(["custom", "echobird"]));
+            assert_eq!(config["provider"][PROVIDER]["name"], "Supplier");
+            assert_eq!(
+                config["provider"][PROVIDER]["models"]["test-model"]["name"],
+                "test-model"
+            );
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
     fn official_account_default_removes_the_cli_echo_bird_launch_override() {
         let config = json!({"model":"echobird/vendor/model"});
         assert_eq!(
@@ -514,6 +546,11 @@ mod tests {
         let config = load_object(&dir.join("kilo.jsonc")).unwrap();
         assert_eq!(config["provider"]["custom"], original["provider"]["custom"]);
         assert_eq!(config["model"], "custom/old");
+        assert_eq!(config["provider"][PROVIDER]["name"], "Test");
+        assert_eq!(
+            config["provider"][PROVIDER]["models"]["vendor/model"]["name"],
+            "vendor/model"
+        );
         assert!(model_info(&config, PROVIDER, "vendor/model").is_some());
         let prefs = load_object(&prefs_path).unwrap();
         assert_eq!(prefs["preferred"]["modelID"], "vendor/model");
