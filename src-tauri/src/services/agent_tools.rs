@@ -115,7 +115,7 @@ fn get_exec_timeout(command: &str) -> u64 {
 // ── Tool Definitions (sent to LLM) ──
 
 pub fn get_tool_definitions() -> Vec<super::llm_client::ToolDef> {
-    vec![
+    let mut tools = vec![
         super::llm_client::ToolDef {
             name: "shell_exec".into(),
             description: "Execute a shell command on the local machine or a remote SSH server. \
@@ -365,7 +365,9 @@ pub fn get_tool_definitions() -> Vec<super::llm_client::ToolDef> {
                 "required": ["remote_path", "local_path", "server_id"]
             }),
         },
-    ]
+    ];
+    tools.extend(super::agent_diagnostics::definitions());
+    tools
 }
 
 // ── Execution ──
@@ -386,6 +388,36 @@ pub async fn execute_tool(
             }
         }
     };
+
+    if super::agent_diagnostics::handles(name) {
+        if session_server_ids
+            .iter()
+            .any(|id| !id.is_empty() && id != "local")
+        {
+            return ToolResult { success: false, output: "Structured diagnostics inspect local files only. The selected target is remote; use the existing SSH shell/file tools with its server_id. No local file was inspected.".into() };
+        }
+        let name = name.to_owned();
+        let scope = output_scope.to_owned();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        return match tokio::task::spawn_blocking(move || {
+            super::agent_diagnostics::execute(
+                &name,
+                args,
+                &scope,
+                &OutputStore::standard(),
+                &cancel,
+            )
+        })
+        .await
+        {
+            Ok(result) => string_tool_result(result),
+            Err(error) => ToolResult {
+                success: false,
+                output: format!("Diagnostic task failed: {error}"),
+            },
+        };
+    }
 
     // Determine effective server_id: if model omitted it (or said "local") but the
     // session targets a remote server, auto-redirect to that server.
@@ -1929,6 +1961,40 @@ mod output_tests {
     use super::*;
     use crate::services::agent_memory::MemoryScope;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn diagnostic_dispatch_works_locally_and_never_falls_back_from_a_remote_target() {
+        let root = std::env::temp_dir().join(format!("mother-dispatch-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("settings.json");
+        std::fs::write(&path, b"{\"model\":\"fixture\"}").unwrap();
+        let scope = uuid::Uuid::new_v4().to_string();
+        let pool = crate::commands::ssh_commands::create_ssh_pool();
+        let args = json!({"paths":[path]}).to_string();
+        let result = execute_tool(
+            "diagnostic_snapshot",
+            &args,
+            &pool,
+            &["local".into()],
+            &scope,
+        )
+        .await;
+        let remote = execute_tool(
+            "diagnostic_snapshot",
+            &args,
+            &pool,
+            &["fixture-remote".into()],
+            &scope,
+        )
+        .await;
+        let _ = OutputStore::standard().clear_scope(&scope);
+        let original = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(result.success, "{}", result.output);
+        assert!(!remote.success);
+        assert!(remote.output.contains("remote"));
+        assert_eq!(original, b"{\"model\":\"fixture\"}");
+    }
 
     #[test]
     fn memory_lookup_is_scoped_read_only_and_writes_belong_to_background_capture() {

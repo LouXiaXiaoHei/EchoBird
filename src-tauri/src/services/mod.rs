@@ -1,6 +1,7 @@
 pub mod account_model_sources;
 pub mod account_proxy;
 pub(crate) mod agent_context;
+pub(crate) mod agent_diagnostics;
 pub(crate) mod agent_history;
 pub mod agent_loop;
 pub(crate) mod agent_memory;

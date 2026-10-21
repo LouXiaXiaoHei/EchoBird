@@ -37,6 +37,12 @@ pub(crate) struct DirectoryLock(PathBuf);
 impl DirectoryLock {
     pub(crate) fn acquire(anchor: &Path) -> Result<Self, String> {
         private_dir(anchor.parent().ok_or("accountError.home")?)?;
+        Self::acquire_existing(anchor)
+    }
+    pub(crate) fn acquire_existing(anchor: &Path) -> Result<Self, String> {
+        if !anchor.parent().is_some_and(Path::is_dir) {
+            return Err("accountError.home".into());
+        }
         let lock = PathBuf::from(format!("{}.lock", anchor.display()));
         fs::create_dir(&lock).map_err(|_| "accountError.busy")?;
         Ok(Self(lock))

@@ -103,17 +103,8 @@ impl OutputStore {
         Ok(id)
     }
 
-    pub fn read(
-        &self,
-        scope: &str,
-        output_id: &str,
-        offset: usize,
-        max_bytes: usize,
-    ) -> Result<String, String> {
+    pub(crate) fn load(&self, scope: &str, output_id: &str) -> Result<OutputRecord, String> {
         validate_id(output_id)?;
-        if max_bytes < 4 {
-            return Err("max_bytes must be at least 4 to fit any UTF-8 character".into());
-        }
         let _guard = STORE_LOCK
             .lock()
             .map_err(|_| "Output store is unavailable")?;
@@ -128,8 +119,20 @@ impl OutputStore {
         if bytes.len() > MAX_RECORD_BYTES {
             return Err("Saved output exceeds the retention limit".into());
         }
-        let record: OutputRecord = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("Saved output cannot be decoded: {e}"))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("Saved output cannot be decoded: {e}"))
+    }
+
+    pub fn read(
+        &self,
+        scope: &str,
+        output_id: &str,
+        offset: usize,
+        max_bytes: usize,
+    ) -> Result<String, String> {
+        if max_bytes < 4 {
+            return Err("max_bytes must be at least 4 to fit any UTF-8 character".into());
+        }
+        let record = self.load(scope, output_id)?;
         let output = record.combined();
         if offset > output.len() {
             return Err(format!(
@@ -167,6 +170,33 @@ impl OutputStore {
             output.len(),
             &output[start..end]
         ))
+    }
+
+    pub(crate) fn ids(&self, scope: &str) -> Result<Vec<String>, String> {
+        let _guard = STORE_LOCK
+            .lock()
+            .map_err(|_| "Output store is unavailable")?;
+        if !self.check_directory()? {
+            return Ok(Vec::new());
+        }
+        let prefix = scope_prefix(scope);
+        let mut ids = Vec::new();
+        for entry in fs::read_dir(&self.root).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name();
+            let Some(name) = name
+                .to_str()
+                .filter(|name| name.starts_with(&prefix) && is_record_name(name))
+            else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+            if metadata.is_file() && !is_link(&metadata) {
+                ids.push(name[prefix.len()..name.len() - 5].to_string());
+            }
+        }
+        ids.sort();
+        Ok(ids)
     }
 
     pub fn clear_scope(&self, scope: &str) -> Result<(), String> {
