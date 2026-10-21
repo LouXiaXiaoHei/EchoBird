@@ -315,15 +315,13 @@ fn request(key: &str, model: &str, body: &Value) -> Result<Vec<u8>, ProxyError> 
                 {
                     last.text.push_str(&text);
                     last.calls.extend(calls);
-                } else {
-                    if !text.is_empty() || !calls.is_empty() {
-                        messages.push(Prompt {
-                            role: 2,
-                            text,
-                            calls,
-                            ..Default::default()
-                        });
-                    }
+                } else if !text.is_empty() || !calls.is_empty() {
+                    messages.push(Prompt {
+                        role: 2,
+                        text,
+                        calls,
+                        ..Default::default()
+                    });
                 }
             }
             Some("tool") => {
