@@ -306,6 +306,7 @@ export function RouterGroups({
     activeRouterId,
     layout,
     groupPending,
+    routerEnabled,
     selectRouter,
     saveRouter,
     deleteRouter,
@@ -445,13 +446,16 @@ export function RouterGroups({
   const hub = (router: api.SmartRouterConfig) => {
     const list = layout === 'list';
     const toggle = (
-      <RoutingToggle
-        hideLabel
-        label={router.name}
-        checked={router.groupEnabled}
-        pending={busy}
-        onChange={(enabled) => void setGroupEnabled(router.id, enabled)}
-      />
+      <div className={routerEnabled ? undefined : 'opacity-50'}>
+        <RoutingToggle
+          hideLabel
+          label={router.name}
+          checked={router.groupEnabled}
+          disabled={!routerEnabled}
+          pending={busy}
+          onChange={(enabled) => void setGroupEnabled(router.id, enabled)}
+        />
+      </div>
     );
     const editButton = (
       <button

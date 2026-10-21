@@ -227,23 +227,45 @@ describe('Independent smart router groups', () => {
     expect(readClipboardText).not.toHaveBeenCalled();
   });
 
-  it('preserves each group switch when toggling the master, including an inactive visible group', async () => {
-    await open();
-    await act(async () => context.selectRouter(secondId));
-    const displayedModels = context.customModels;
-    const candidateReads = vi.mocked(api.getSmartRouterCandidates).mock.calls.length;
-    await act(async () => context.setRouterEnabled(false));
-    expect(context.routers.map((group) => group.groupEnabled)).toEqual([true, false]);
-    await act(async () => context.setRouterEnabled(true));
-    expect(context.routerEnabled).toBe(true);
-    expect(context.activeRouterEnabled).toBe(false);
-    await act(async () => context.setGroupEnabled(secondId, true));
-    expect(context.activeRouterEnabled).toBe(true);
-    expect(api.setSmartRouterGroupEnabled).toHaveBeenCalledExactlyOnceWith(secondId, true);
-    expect(groups[0].groupEnabled).toBe(true);
-    expect(context.customModels).toBe(displayedModels);
-    expect(api.getSmartRouterCandidates).toHaveBeenCalledTimes(candidateReads);
-  });
+  it.each(['cards', 'list'] as const)(
+    'locks %s group switches while the master is off and preserves their saved states',
+    async (layout) => {
+      groups = groups.map((group) => ({
+        ...group,
+        masterEnabled: false,
+        enabled: false,
+        running: false,
+      }));
+      await open();
+      await act(async () => context.setLayout(layout));
+      const toggle = () => renderer.root.findByProps({ role: 'switch' });
+      expect(toggle().props['aria-checked']).toBe(true);
+      expect(toggle().props.disabled).toBe(true);
+      expect(toggle().props.className).toContain('disabled:opacity-50');
+      await act(async () => button('Second').props.onClick());
+      expect(toggle().props['aria-checked']).toBe(false);
+      expect(toggle().props.disabled).toBe(true);
+      expect(api.setSmartRouterEnabled).not.toHaveBeenCalled();
+      expect(api.setSmartRouterGroupEnabled).not.toHaveBeenCalled();
+      const displayedModels = context.customModels;
+      const candidateReads = vi.mocked(api.getSmartRouterCandidates).mock.calls.length;
+      await act(async () => context.setRouterEnabled(true));
+      expect(toggle().props.disabled).toBe(false);
+      expect(toggle().props['aria-checked']).toBe(false);
+      expect(context.activeRouterEnabled).toBe(false);
+      expect(context.routers.map((group) => group.groupEnabled)).toEqual([true, false]);
+      await act(async () => toggle().props.onClick());
+      expect(context.activeRouterEnabled).toBe(true);
+      expect(api.setSmartRouterGroupEnabled).toHaveBeenCalledExactlyOnceWith(secondId, true);
+      expect(groups[0].groupEnabled).toBe(true);
+      await act(async () => context.setRouterEnabled(false));
+      expect(toggle().props.disabled).toBe(true);
+      expect(toggle().props['aria-checked']).toBe(true);
+      expect(context.routers.map((group) => group.groupEnabled)).toEqual([true, true]);
+      expect(context.customModels).toBe(displayedModels);
+      expect(api.getSmartRouterCandidates).toHaveBeenCalledTimes(candidateReads);
+    }
+  );
 
   it('toggles the displayed group without applying models or changing groups', async () => {
     await open();
