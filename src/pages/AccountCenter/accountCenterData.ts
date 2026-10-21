@@ -17,6 +17,12 @@ import {
 } from '../AppManager/qoderAccountDisplay';
 import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyCredits';
 import { clineBalanceLabel } from '../AppManager/clineAccountDisplay';
+import {
+  qwenWorkIdentity,
+  qwenWorkCreditBalances,
+  qwenWorkPlanLabel,
+  qwenWorkRewardStatus,
+} from '../AppManager/qwenWorkAccountDisplay';
 import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
 import { codeArtsRemainingPercent } from '../AppManager/codeArtsAccountDisplay';
 import { devinQuotaLabel } from '../AppManager/devinAccountDisplay';
@@ -28,6 +34,7 @@ export interface AccountMetric {
   resetAt?: number | null;
   resetLabel?: string;
   showProgress?: boolean;
+  balanceState?: 'available' | 'empty';
 }
 
 export interface AccountCardData {
@@ -490,6 +497,58 @@ export function accountCenterProviders(
               : []),
         ],
       })
+    ),
+    ...(['qwenworkcn', 'qwenwork'] as const).map((edition) =>
+      provider(
+        edition,
+        edition === 'qwenworkcn' ? '千问办公' : 'QwenWork',
+        `/icons/tools/${edition}.svg`,
+        [edition],
+        context.qwenWorkAccountGroups[edition],
+        (account) => {
+          const balances = qwenWorkCreditBalances(account);
+          const metric = (
+            label: string,
+            remaining: number | null,
+            total: number | null,
+            resetAt?: number | null
+          ): AccountMetric => ({
+            ...credits(label, remaining, total, resetAt),
+            showProgress: true,
+            balanceState: remaining == null ? undefined : remaining > 0 ? 'available' : 'empty',
+          });
+          return {
+            identity: qwenWorkIdentity(account),
+            plan: qwenWorkPlanLabel(account, t),
+            subscriptionEndAt: account.expiresAt ?? undefined,
+            claim:
+              edition === 'qwenworkcn'
+                ? () => context.qwenWorkAccountGroups[edition].claimDaily(account)
+                : undefined,
+            dailyClaimed: edition === 'qwenworkcn' && qwenWorkRewardStatus(account) === 'claimed',
+            claimDisabled:
+              edition === 'qwenworkcn' && qwenWorkRewardStatus(account) === 'unavailable',
+            claimStatusExpiresAt:
+              edition === 'qwenworkcn'
+                ? (account.dailyReward?.nextClaimAt ??
+                  (account.dailyReward ? account.dailyReward.checkedAt + 300 : undefined))
+                : undefined,
+            metrics: [
+              metric(t('agent.baseCredits'), balances.package.remaining, balances.package.total),
+              ...(balances.reward
+                ? [
+                    metric(
+                      t('agent.rewardCredits'),
+                      balances.reward.remaining,
+                      balances.reward.total,
+                      balances.reward.expiresAt
+                    ),
+                  ]
+                : []),
+            ],
+          };
+        }
+      )
     ),
     ...(['qoder', 'qodercn'] as const).map((edition) =>
       provider(

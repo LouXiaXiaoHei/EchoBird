@@ -572,5 +572,10 @@ const zhHans: Partial<Translations> = {
   'aiCareer.timeYesterday': '昨天',
   'aiCareer.timeDaysAgo': '{days}天前',
   'aiCareer.noActivity': '无活动',
+  'agent.qwenworkFree': '免费版',
+  'agent.qwenworkPlus': '个人标准版',
+  'agent.qwenworkPro': '个人高级版',
+  'agent.qwenworkEnterpriseStandard': '企业标准版',
+  'agent.qwenworkEnterprisePremium': '企业旗舰版',
 };
 export default zhHans;

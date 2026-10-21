@@ -19,6 +19,7 @@ import { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import { useMinimaxAccounts } from './useMinimaxAccounts';
 import { useClineAccounts } from './useClineAccounts';
 import { useQoderAccounts } from './useQoderAccounts';
+import { useQwenWorkAccounts } from './useQwenWorkAccounts';
 import { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
@@ -345,6 +346,30 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
   );
   const qoderAccounts = qoderEdition === 'qodercn' ? qoderCnAccounts : qoderGlobalAccounts;
+  const qwenWorkEdition: api.QwenWorkEdition =
+    selectedTool === 'qwenworkcn' ? 'qwenworkcn' : 'qwenwork';
+  const clearQwenWorkModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, qwenwork: null }));
+  }, []);
+  const clearQwenWorkCnModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, qwenworkcn: null }));
+  }, []);
+  const qwenWorkGlobalAccounts = useQwenWorkAccounts(
+    'qwenwork',
+    accountGroupEnabled('qwenwork'),
+    clearQwenWorkModel,
+    setApplyError,
+    activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
+  );
+  const qwenWorkCnAccounts = useQwenWorkAccounts(
+    'qwenworkcn',
+    accountGroupEnabled('qwenworkcn'),
+    clearQwenWorkCnModel,
+    setApplyError,
+    activePage === 'accounts' ? 'accounts' : (selectedTool ?? '')
+  );
+  const qwenWorkAccounts =
+    qwenWorkEdition === 'qwenworkcn' ? qwenWorkCnAccounts : qwenWorkGlobalAccounts;
 
   const clearDeepSeekModel = useCallback(() => {
     setToolModelConfig((prev) => ({ ...prev, dsh: null }));
@@ -770,6 +795,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if ((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.busy) return;
     if (['minimaxcode', 'minimaxdesktop'].includes(selectedTool) && minimaxAccounts.busy) return;
     if (['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.busy) return;
+    if (['qwenwork', 'qwenworkcn'].includes(selectedTool) && qwenWorkAccounts.busy) return;
     if ((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.busy) return;
     const generation = ++launchGeneration.current;
     const finishLaunch = () => {
@@ -790,6 +816,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !((selectedTool === 'trae' || selectedTool === 'traecn') && traeAccounts.selectedId) &&
       !(['minimaxcode', 'minimaxdesktop'].includes(selectedTool) && minimaxAccounts.selectedId) &&
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
+      !(['qwenwork', 'qwenworkcn'].includes(selectedTool) && qwenWorkAccounts.selectedId) &&
       !((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
       !(selectedTool === 'codearts' && codeArtsAccounts.selectedId) &&
@@ -994,6 +1021,21 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         if (launchAfterApply) await api.startTool(selectedTool, toolData?.startCommand, cwd);
       } catch (error) {
         setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (['qwenwork', 'qwenworkcn'].includes(selectedTool) && qwenWorkAccounts.selectedId) {
+      const navigation = accountNavigation.current;
+      const current = () => accountNavigation.current === navigation;
+      try {
+        await api.switchQwenWorkAccount(qwenWorkEdition, qwenWorkAccounts.selectedId);
+        if (current()) {
+          await qwenWorkAccounts.reload();
+          if (current()) await api.startTool(selectedTool, toolData?.startCommand);
+        }
+      } catch (error) {
+        if (current()) setApplyError(accountError(error, t));
       } finally {
         finishLaunch();
       }
@@ -1360,6 +1402,20 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         qoderAccounts: {
           ...qoderAccounts,
           accounts: orderedAccounts(qoderEdition, qoderAccounts.accounts),
+        },
+        qwenWorkAccounts: {
+          ...qwenWorkAccounts,
+          accounts: orderedAccounts(qwenWorkEdition, qwenWorkAccounts.accounts),
+        },
+        qwenWorkAccountGroups: {
+          qwenwork: {
+            ...qwenWorkGlobalAccounts,
+            accounts: orderedAccounts('qwenwork', qwenWorkGlobalAccounts.accounts),
+          },
+          qwenworkcn: {
+            ...qwenWorkCnAccounts,
+            accounts: orderedAccounts('qwenworkcn', qwenWorkCnAccounts.accounts),
+          },
         },
         qoderAccountGroups: {
           qoder: {

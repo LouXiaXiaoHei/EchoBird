@@ -129,6 +129,7 @@ beforeEach(() => {
     minimaxAccounts: { ...group, region: 'cn', setRegion: vi.fn() },
     qoderAccounts: group,
     qoderAccountGroups: { qoder: group, qodercn: emptyGroup },
+    qwenWorkAccountGroups: { qwenwork: emptyGroup, qwenworkcn: emptyGroup },
     deepSeekAccounts: group,
   } as unknown as AppManagerContextType;
 });

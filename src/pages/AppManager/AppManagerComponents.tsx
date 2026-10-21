@@ -18,6 +18,7 @@ import { KimiAccountSection } from './KimiAccountSection';
 import { CodeArtsAccountSection } from './CodeArtsAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
+import { QwenWorkAccountSection } from './QwenWorkAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { RoutingToggle } from '../../components/RoutingToggle';
@@ -1054,6 +1055,8 @@ export const AppManagerPanel: React.FC = () => {
             <TraeAccountSection />
           ) : selectedTool === 'devin' || selectedTool === 'devincli' ? (
             <DevinAccountSection />
+          ) : selectedTool === 'qwenwork' || selectedTool === 'qwenworkcn' ? (
+            <QwenWorkAccountSection />
           ) : selectedToolData.noModelConfig ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
               <BoxIcon size={28} className="text-cyber-text opacity-25" />
@@ -1167,6 +1170,7 @@ export const AppManagerBottom: React.FC = () => {
     openDesignAccounts,
     minimaxAccounts,
     qoderAccounts,
+    qwenWorkAccounts,
     deepSeekAccounts,
     grokAccounts,
     clineAccounts,
@@ -1201,6 +1205,7 @@ export const AppManagerBottom: React.FC = () => {
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') &&
       !!minimaxAccounts.selectedId) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
+    (['qwenwork', 'qwenworkcn'].includes(selectedTool ?? '') && !!qwenWorkAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
     (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && !!kimiAccounts.selectedId) ||
     (['devin', 'devincli'].includes(selectedTool ?? '') && !!devinAccounts.selectedId) ||
@@ -1245,6 +1250,7 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'opendesign' && openDesignAccounts.busy) ||
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||
+    (['qwenwork', 'qwenworkcn'].includes(selectedTool ?? '') && qwenWorkAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||
     (['cline', 'clinedesktop'].includes(selectedTool ?? '') && clineAccounts.busy) ||
     ((selectedTool === 'kilo' || selectedTool === 'kilodesktop') && kiloAccounts.busy) ||

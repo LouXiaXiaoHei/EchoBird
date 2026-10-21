@@ -1186,7 +1186,7 @@ impl ProcessManager {
         // kill below terminates that process anyway.
         self.processes.remove(tool_id);
 
-        if matches!(tool_id, "qoder" | "qodercn") {
+        if matches!(tool_id, "qoder" | "qodercn" | "qwenwork" | "qwenworkcn") {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
                 return false;
             };
@@ -1897,6 +1897,24 @@ fn qoder_account_instances(
     selected: &std::path::Path,
     processes: Vec<QoderAccountProcess>,
 ) -> Result<Vec<QoderAccountProcess>, String> {
+    if matches!(tool_id, "qwenwork" | "qwenworkcn") {
+        let package = if tool_id == "qwenwork" {
+            "qwen-work"
+        } else {
+            "qwen-work-cn"
+        };
+        let matches = |path: &std::path::Path| {
+            crate::services::tool_manager::packaged_desktop_metadata(path)
+                .is_some_and(|value| value["name"] == package)
+        };
+        if !matches(selected) {
+            return Err("accountError.invalidAccount".into());
+        }
+        return Ok(processes
+            .into_iter()
+            .filter(|process| matches(&process.path))
+            .collect());
+    }
     use crate::services::qoder_accounts::Edition;
     let edition = match tool_id {
         "qoder" => Edition::Qoder,
@@ -1948,7 +1966,7 @@ fn stop_qoder_account_instances(processes: &[QoderAccountProcess]) -> bool {
 /// Account storage must not be replaced while its owning desktop app is alive.
 pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     let path = super::tool_manager::get_tool_exe_path(tool_id).unwrap_or_default();
-    if matches!(tool_id, "qoder" | "qodercn") {
+    if matches!(tool_id, "qoder" | "qodercn" | "qwenwork" | "qwenworkcn") {
         let tool_id = tool_id.to_owned();
         return tokio::task::spawn_blocking(move || {
             let processes = qoder_process_snapshot()?;
@@ -3147,5 +3165,60 @@ $result = @{ handles=$handles; cwd=$PWD.ProviderPath; label=$Label; marker=$env:
         assert!(bob.starts_with(r"C:\OS"));
         assert_ne!(alice, bob);
         assert_eq!(alice.file_name().unwrap().to_string_lossy().len(), 10);
+    }
+
+    #[test]
+    fn qwenwork_process_matching_covers_shared_profile_installs_and_isolates_the_other_edition() {
+        let root = std::env::temp_dir().join(format!("qwenwork-process-{}", uuid::Uuid::new_v4()));
+        let mut paths = vec![];
+        for (install, package) in [
+            ("user", "qwen-work-cn"),
+            ("system", "qwen-work-cn"),
+            ("global", "qwen-work"),
+            ("unrelated", "other-app"),
+        ] {
+            let base = root.join(install);
+            let (exe, resources) = if cfg!(target_os = "macos") {
+                (
+                    base.join("Contents/MacOS/Client"),
+                    base.join("Contents/Resources"),
+                )
+            } else {
+                (base.join("Client.exe"), base.join("resources"))
+            };
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, b"fixture").unwrap();
+            std::fs::create_dir_all(&resources).unwrap();
+            let content =
+                serde_json::to_vec(&serde_json::json!({"name":package,"version":"1.0.0"})).unwrap();
+            let header = serde_json::to_vec(
+                &serde_json::json!({"files":{"package.json":{"offset":"0","size":content.len()}}}),
+            )
+            .unwrap();
+            let size = (header.len() + 11) & !3;
+            let mut bytes = vec![0u8; 8 + size];
+            bytes[0..4].copy_from_slice(&4u32.to_le_bytes());
+            bytes[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+            bytes[12..16].copy_from_slice(&(header.len() as u32).to_le_bytes());
+            bytes[16..16 + header.len()].copy_from_slice(&header);
+            bytes.extend(content);
+            std::fs::write(resources.join("app.asar"), bytes).unwrap();
+            paths.push(exe);
+        }
+        let snapshot = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| super::QoderAccountProcess {
+                pid: i as u32 + 1,
+                path: path.clone(),
+            })
+            .collect();
+        let selected = super::qoder_account_instances("qwenworkcn", &paths[0], snapshot).unwrap();
+        assert_eq!(
+            selected.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(super::qoder_account_instances("qwenwork", &paths[0], vec![]).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

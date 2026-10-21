@@ -1,0 +1,33 @@
+{
+    "id": "qwenwork",
+    "displayName": "QwenWork",
+    "homepage": "https://qwenwork.ai/#download",
+    "docs": "https://docs.qwenwork.ai/",
+    "kind": "desktop_app",
+    "platforms": [
+        "windows",
+        "macos"
+    ],
+    "install": {
+        "windows_download": "https://assets.qwenwork.ai/release/latest/qwenwork-setup-x64.exe",
+        "macos_arm64_download": "https://assets.qwenwork.ai/release/latest/qwenwork-darwin-arm64.dmg",
+        "macos_x64_download": "https://assets.qwenwork.ai/release/latest/qwenwork-darwin-x64.dmg",
+        "note": "Verify current official release, architecture, package identity and signature. Windows requires Windows 10+; macOS requires macOS 14+. Do not substitute the other regional edition or assume undocumented silent installer flags."
+    },
+    "install_flow": {
+        "summary": "Detect regional edition, platform and architecture; verify and install the official package; refresh detection.",
+        "agent_steps": [
+            "Read https://qwenwork.ai/#download if a stable URL changes. Require HTTPS and the matching regional edition. Save packages to Downloads and verify publisher signature and product identity before installation. Preserve an existing installation location.",
+            "Windows: use the official x64 installer. Inspect supported setup options; use a documented unattended mode only when verified. Otherwise open the signed installer and clearly report any remaining user interaction. Read updater.cfg currentVersion and locate that active version's QwenWork.exe beneath the install root, not Launcher.exe or Updater.exe. Verify resources/app.asar package.json name 'qwen-work' and version.",
+            "macOS: use the architecture-matching DMG, verify code signature/Gatekeeper and bundle identifier 'com.qwenwork.desktop.mac', then install QwenWork.app in Applications or the user's Applications folder. Verify Contents/MacOS/QwenWork.",
+            "No official Linux desktop package is confirmed for this edition. Report this limitation instead of installing the domestic edition.",
+            "Refresh EchoBird detection and verify the full executable path and installed version. A downloaded installer alone does not establish installation success."
+        ],
+        "tell_user": [
+            "Installed version and path, or the precise remaining installation step."
+        ]
+    },
+    "first_run": {
+        "note": "Open the installed client once to initialize protected native storage. Accounts are saved in EchoBird separately; applying an account switches the client. Quota refresh is an explicit action. Daily check-in is not exposed for this edition. Custom model configuration is outside this integration."
+    }
+}

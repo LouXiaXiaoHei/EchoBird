@@ -597,5 +597,10 @@ const ja: Partial<Translations> = {
   'status.complete': '完了',
   'status.failed': '失敗',
   'status.notInstalled': '未インストール',
+  'agent.qwenworkFree': 'Free',
+  'agent.qwenworkPlus': 'Plus',
+  'agent.qwenworkPro': 'Pro',
+  'agent.qwenworkEnterpriseStandard': 'Enterprise Standard',
+  'agent.qwenworkEnterprisePremium': 'Enterprise Premium',
 };
 export default ja;

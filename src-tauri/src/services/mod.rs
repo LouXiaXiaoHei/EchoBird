@@ -60,6 +60,7 @@ pub mod process_manager;
 pub mod pulse_archive;
 pub mod qoder_accounts;
 pub(crate) mod qoder_native;
+pub mod qwenwork_accounts;
 pub mod reasoning_effort;
 pub mod self_update;
 pub mod smart_router;

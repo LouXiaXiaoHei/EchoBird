@@ -1,0 +1,36 @@
+{
+    "id": "qwenworkcn",
+    "displayName": "千问办公",
+    "homepage": "https://qwenwork.cn/download",
+    "docs": "https://docs.qwenwork.cn/",
+    "kind": "desktop_app",
+    "platforms": [
+        "windows",
+        "macos",
+        "linux"
+    ],
+    "install": {
+        "windows_download": "https://assets.qwenwork.cn/release/latest/qwenworkcn-setup-x64.exe",
+        "macos_arm64_download": "https://assets.qwenwork.cn/release/latest/qwenworkcn-darwin-arm64.dmg",
+        "macos_x64_download": "https://assets.qwenwork.cn/release/latest/qwenworkcn-darwin-x64.dmg",
+        "linux_deb_download": "https://assets.qwenwork.cn/release/latest/qwenworkcn-linux-amd64.deb",
+        "linux_arm64_deb_download": "https://assets.qwenwork.cn/release/latest/qwenworkcn-linux-arm64.deb",
+        "note": "Verify current official release, architecture, package identity and signature. Windows requires Windows 10+; macOS requires macOS 14+. Do not substitute the other regional edition or assume undocumented silent installer flags."
+    },
+    "install_flow": {
+        "summary": "Detect regional edition, platform and architecture; verify and install the official package; refresh detection.",
+        "agent_steps": [
+            "Read https://qwenwork.cn/download if a stable URL changes. Require HTTPS and the matching regional edition. Save packages to Downloads and verify publisher signature and product identity before installation. Preserve an existing installation location.",
+            "Windows: use the official x64 installer. Inspect supported setup options; use a documented unattended mode only when verified. Otherwise open the signed installer and clearly report any remaining user interaction. Read updater.cfg currentVersion and locate that active version's QwenWorkCN.exe beneath the install root, not Launcher.exe or Updater.exe. Verify resources/app.asar package.json name 'qwen-work-cn' and version.",
+            "macOS: use the architecture-matching DMG, verify code signature/Gatekeeper and bundle identifier 'cn.qwenwork.desktop.mac', then install QwenWorkCN.app in Applications or the user's Applications folder. Verify Contents/MacOS/QwenWorkCN.",
+            "Linux: use only the official architecture-matching Debian package, package name qwen-work-cn. Install with the distribution's package manager. Verify /opt/apps/QwenWorkCN/qwen-work-cn and /usr/share/applications/qwen-work-cn.desktop. Do not create legacy executable aliases.",
+            "Refresh EchoBird detection and verify the full executable path and installed version. A downloaded installer alone does not establish installation success."
+        ],
+        "tell_user": [
+            "Installed version and path, or the precise remaining installation step."
+        ]
+    },
+    "first_run": {
+        "note": "Open the installed client once to initialize protected native storage. Accounts are saved in EchoBird separately; applying an account switches the client. Quota refresh and daily check-in are explicit actions. Custom model configuration is outside this integration."
+    }
+}

@@ -9,6 +9,7 @@ import { AccountSectionRow } from '../AppManager/AccountSectionPrimitives';
 import { OpenDesignAccountSection } from '../AppManager/OpenDesignAccountSection';
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
+import type { QwenWorkAccount } from '../../api/qwenwork';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
@@ -49,6 +50,7 @@ function context() {
     openDesignAccounts: group(),
     minimaxAccounts: group(),
     qoderAccountGroups: { qoder: group(), qodercn: group() },
+    qwenWorkAccountGroups: { qwenwork: group(), qwenworkcn: group() },
     grokAccounts: group(),
     kiloAccounts: group(),
     clineAccounts: group(),
@@ -63,6 +65,194 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it.each(['qwenworkcn', 'qwenwork'] as const)(
+    'shows %s identity and edition-specific credit rows without adding organization pools or passive requests',
+    (edition) => {
+      const state = context();
+      state.qwenWorkAccountGroups[edition].accounts = [
+        {
+          id: edition,
+          edition,
+          name: 'Fixture',
+          email: null,
+          organization: 'Fixture team',
+          plan: 'enterprise_premium',
+          planName: 'Enterprise Premium',
+          expiresAt: null,
+          active: false,
+          remaining: 80,
+          total: 100,
+          creditBuckets: [
+            { name: 'Member', remaining: 80, total: 100, expiresAt: null },
+            { name: 'Organization', remaining: 15, total: null, expiresAt: null },
+          ],
+          dailyReward: null,
+        },
+      ];
+      const account = providers(state).find((provider) => provider.id === edition)!.accounts[0];
+      expect(account.identity).toBe('Fixture · Fixture team');
+      expect(account.detail).toBeUndefined();
+      const provider = providers(state).find((provider) => provider.id === edition)!;
+      const previouslyHidden = useAccountPrivacyStore.getState().hidden;
+      let card!: ReactTestRenderer;
+      try {
+        act(() => {
+          useAccountPrivacyStore.setState({ hidden: false });
+          card = create(<AccountCard provider={provider} account={account} />);
+        });
+        expect(JSON.stringify(card.toJSON())).toContain('Fixture team');
+        act(() => {
+          useAccountPrivacyStore.setState({ hidden: true });
+        });
+        expect(JSON.stringify(card.toJSON())).not.toContain('Fixture team');
+      } finally {
+        act(() => {
+          card?.unmount();
+          useAccountPrivacyStore.setState({ hidden: previouslyHidden });
+        });
+      }
+      expect(account.plan).toBe(
+        edition === 'qwenwork' ? 'Enterprise Premium' : 'agent.qwenworkEnterprisePremium'
+      );
+      expect(account.metrics.map((metric) => metric.value)).toEqual(
+        edition === 'qwenwork' ? ['80'] : ['80', '—']
+      );
+      expect(typeof account.claim).toBe(edition === 'qwenwork' ? 'undefined' : 'function');
+      expect(state.qwenWorkAccountGroups[edition].refresh).not.toHaveBeenCalled();
+      expect(state.qwenWorkAccountGroups[edition].claimDaily).not.toHaveBeenCalled();
+      state.qwenWorkAccountGroups[edition].accounts[0].remaining = null;
+      state.qwenWorkAccountGroups[edition].accounts[0].total = null;
+      state.qwenWorkAccountGroups[edition].accounts[0].creditBuckets = [];
+      expect(
+        providers(state).find((provider) => provider.id === edition)!.accounts[0].metrics[0].value
+      ).toBe('—');
+    }
+  );
+  it.each(['qwenworkcn', 'qwenwork'] as const)(
+    'shows %s package and reward balances without overlap or unsupported reward controls',
+    (edition) => {
+      const state = context();
+      state.qwenWorkAccountGroups[edition].accounts = [
+        {
+          id: edition,
+          edition,
+          name: 'Fixture',
+          email: null,
+          organization: null,
+          plan: 'free',
+          planName: 'Free',
+          expiresAt: null,
+          active: false,
+          remaining: 2099.7501,
+          total: null,
+          creditBuckets: [
+            { name: 'Daily', remaining: 99.7501, total: 100, expiresAt: null },
+            { name: 'Monthly', remaining: 0, total: null, expiresAt: null },
+            { name: 'Long-term', remaining: 2000, total: null, expiresAt: null },
+          ],
+          dailyReward: null,
+        },
+      ];
+      if (edition === 'qwenwork')
+        state.qwenWorkAccountGroups[edition].accounts[0].dailyReward = {
+          status: 'CLAIMABLE',
+          rewardCredits: 200,
+          checkedAt: Date.now() / 1000,
+          nextClaimAt: Date.now() / 1000 + 3600,
+          expiresAt: null,
+        };
+      const provider = providers(state).find((provider) => provider.id === edition)!;
+      const account = provider.accounts[0];
+      expect(account.metrics).toHaveLength(edition === 'qwenwork' ? 1 : 2);
+      expect(account.metrics[0]).toMatchObject({
+        label: 'agent.baseCredits',
+        value: edition === 'qwenwork' ? '2,099.75' : '2,000',
+        percent: undefined,
+        showProgress: true,
+        balanceState: 'available',
+      });
+      if (edition === 'qwenworkcn')
+        expect(account.metrics[1]).toMatchObject({
+          label: 'agent.rewardCredits',
+          value: '99.75',
+          percent: 99.7501,
+          showProgress: true,
+        });
+      const html = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
+      expect(html).not.toContain('Monthly');
+      expect(html).not.toContain('Long-term');
+      expect(html).toContain('border-green-500');
+      if (edition === 'qwenworkcn') expect(html).toContain('role="progressbar"');
+      else {
+        expect(html).not.toContain('text-2xl');
+        expect(html).toContain('>agent.baseCredits</span>');
+        expect(html).not.toContain('agent.rewardCredits');
+        expect(html).not.toContain('agent.claimDailyCredits');
+        expect(html).not.toContain('aria-valuenow=');
+        expect(account.plan).toBe('Free');
+      }
+      expect(state.qwenWorkAccountGroups[edition].claimDaily).not.toHaveBeenCalled();
+      expect(state.qwenWorkAccountGroups[edition].refresh).not.toHaveBeenCalled();
+      state.qwenWorkAccountGroups[edition].accounts[0].creditBuckets[0].total = null;
+      const updated = providers(state).find((p) => p.id === edition)!.accounts[0];
+      if (edition === 'qwenworkcn') {
+        expect(updated.metrics[1].percent).toBeUndefined();
+        const withoutCapacity = renderToStaticMarkup(
+          <AccountCard provider={provider} account={updated} />
+        );
+        expect(withoutCapacity).toContain('border-green-500');
+        expect(withoutCapacity).not.toContain('aria-valuenow=');
+      }
+    }
+  );
+  it('keeps zero and unknown QwenWork balances distinct, and uses real limits for real progress', () => {
+    const state = context();
+    const row: QwenWorkAccount = {
+      id: 'credits',
+      edition: 'qwenworkcn' as const,
+      name: 'Fixture',
+      email: null,
+      organization: null,
+      plan: 'free',
+      planName: 'Free',
+      expiresAt: null,
+      active: false,
+      remaining: 0,
+      total: null,
+      creditBuckets: [
+        { name: 'Daily', remaining: 0, total: null, expiresAt: null },
+        { name: 'Monthly', remaining: 0, total: null, expiresAt: null },
+        { name: 'Long-term', remaining: 0, total: null, expiresAt: null },
+      ],
+      dailyReward: null,
+    };
+    state.qwenWorkAccountGroups.qwenworkcn.accounts = [row];
+    let provider = providers(state).find((p) => p.id === 'qwenworkcn')!;
+    expect(provider.accounts[0].metrics.map((metric) => metric.value)).toEqual(['0', '0']);
+    expect(provider.accounts[0].metrics.map((metric) => metric.balanceState)).toEqual([
+      'empty',
+      'empty',
+    ]);
+    let html = renderToStaticMarkup(
+      <AccountCard provider={provider} account={provider.accounts[0]} />
+    );
+    expect(html).not.toContain('border-green-500');
+    expect(html).not.toContain('aria-valuenow=');
+    row.remaining = 2099.75;
+    row.creditBuckets = [
+      { name: 'Daily', remaining: 99.75, total: 100, expiresAt: null },
+      { name: 'Monthly', remaining: 0, total: 0, expiresAt: null },
+      { name: 'Long-term', remaining: 2000, total: 2000, expiresAt: null },
+    ];
+    provider = providers(state).find((p) => p.id === 'qwenworkcn')!;
+    expect(provider.accounts[0].metrics.map((metric) => metric.percent)).toEqual([100, 99.75]);
+    html = renderToStaticMarkup(<AccountCard provider={provider} account={provider.accounts[0]} />);
+    expect(html.match(/role="progressbar"/g)).toHaveLength(2);
+    row.remaining = null;
+    row.creditBuckets = [];
+    provider = providers(state).find((p) => p.id === 'qwenworkcn')!;
+    expect(provider.accounts[0].metrics.map((metric) => metric.value)).toEqual(['—', '—']);
+  });
   it('shows a Kimi Free account without returned quota as no usage data', () => {
     const state = context();
     state.kimiAccounts.accounts = [

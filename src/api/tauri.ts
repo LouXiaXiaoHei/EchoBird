@@ -18,6 +18,7 @@ export * from './clientAccounts';
 export * from './cline';
 export * from './minimax';
 export * from './qoder';
+export * from './qwenwork';
 export * from './localServer';
 export * from './agent';
 export * from './parasite';

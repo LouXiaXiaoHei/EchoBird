@@ -13,6 +13,7 @@ import type { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import type { useMinimaxAccounts } from './useMinimaxAccounts';
 import type { useClineAccounts } from './useClineAccounts';
 import type { useQoderAccounts } from './useQoderAccounts';
+import type { useQwenWorkAccounts } from './useQwenWorkAccounts';
 import type { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import type { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
 import type { useCodexAccounts } from './useCodexAccounts';
@@ -58,6 +59,8 @@ export interface AppManagerContextType {
   clineAccounts: ReturnType<typeof useClineAccounts>;
   qoderAccounts: ReturnType<typeof useQoderAccounts>;
   qoderAccountGroups: Record<'qoder' | 'qodercn', ReturnType<typeof useQoderAccounts>>;
+  qwenWorkAccounts: ReturnType<typeof useQwenWorkAccounts>;
+  qwenWorkAccountGroups: Record<'qwenwork' | 'qwenworkcn', ReturnType<typeof useQwenWorkAccounts>>;
   deepSeekAccounts: ReturnType<typeof useDeepSeekAccounts>;
   grokAccounts: ReturnType<typeof useGrokAccounts>;
   kiloAccounts: ReturnType<typeof useKiloAccounts>;

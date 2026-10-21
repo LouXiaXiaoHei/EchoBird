@@ -23,6 +23,7 @@ use commands::native_account_commands;
 use commands::process_commands;
 use commands::pulse_commands;
 use commands::qoder_account_commands;
+use commands::qwenwork_account_commands;
 use commands::settings_commands;
 use commands::smart_router_commands;
 use commands::tool_commands;
@@ -81,6 +82,14 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "qodercn",
             include_str!("../../docs/api/tools/install/qodercn.json"),
+        ),
+        (
+            "qwenworkcn",
+            include_str!("../../docs/api/tools/install/qwenworkcn.json"),
+        ),
+        (
+            "qwenwork",
+            include_str!("../../docs/api/tools/install/qwenwork.json"),
         ),
         (
             "claudecode",
@@ -1257,6 +1266,14 @@ pub fn run() {
             qoder_account_commands::refresh_qoder_account_quota,
             qoder_account_commands::claim_qoder_daily_credits,
             qoder_account_commands::delete_qoder_account,
+            qwenwork_account_commands::list_qwenwork_accounts,
+            qwenwork_account_commands::start_qwenwork_login,
+            qwenwork_account_commands::poll_qwenwork_login,
+            qwenwork_account_commands::cancel_qwenwork_login,
+            qwenwork_account_commands::refresh_qwenwork_account_quota,
+            qwenwork_account_commands::claim_qwenwork_daily_credits,
+            qwenwork_account_commands::delete_qwenwork_account,
+            qwenwork_account_commands::switch_qwenwork_account,
             kilo_account_commands::list_kilo_accounts,
             kilo_account_commands::start_kilo_login,
             kilo_account_commands::poll_kilo_login,

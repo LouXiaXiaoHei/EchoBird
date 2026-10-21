@@ -54,7 +54,10 @@ function validAccount(value: CachedAccount): boolean {
         optionalNumber(metric.percent) &&
         optionalNumber(metric.resetAt) &&
         optionalString(metric.resetLabel) &&
-        optionalBoolean(metric.showProgress)
+        optionalBoolean(metric.showProgress) &&
+        (metric.balanceState == null ||
+          metric.balanceState === 'available' ||
+          metric.balanceState === 'empty')
     )
   );
 }
@@ -87,13 +90,14 @@ function summarize(account: AccountCardData): CachedAccount {
     plan: account.plan,
     subscriptionEndAt: account.subscriptionEndAt,
     metrics: account.metrics.map(
-      ({ label, value, percent, resetAt, resetLabel, showProgress }) => ({
+      ({ label, value, percent, resetAt, resetLabel, showProgress, balanceState }) => ({
         label,
         value,
         percent,
         resetAt,
         resetLabel,
         showProgress,
+        balanceState,
       })
     ),
     authorizationFailed: account.authorizationFailed,

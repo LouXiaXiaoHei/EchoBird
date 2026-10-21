@@ -1,8 +1,10 @@
 import { useLayoutEffect } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AccountCardData, AccountProvider } from './accountCenterData';
 import { useAccountCardCache } from './useAccountCardCache';
+import { AccountCard } from './AccountCenter';
 
 const STORAGE_KEY = 'echobird_account_card_cache';
 type Options = { locale: string; active: boolean; toolsReady: boolean; scanning: boolean };
@@ -106,6 +108,53 @@ afterEach(() => {
 });
 
 describe('Account Center card cache', () => {
+  it('preserves balance availability through the displayed snapshot, remount, and explicit refresh', async () => {
+    const row = account('credits');
+    row.metrics = [
+      { label: 'agent.baseCredits', value: '2,000', showProgress: true, balanceState: 'available' },
+      {
+        label: 'agent.rewardCredits',
+        value: '99.75',
+        showProgress: true,
+        balanceState: 'available',
+      },
+    ];
+    const qwen = provider('qwenworkcn', [row]);
+    await mount([qwen]);
+    expect(rows()[0].metrics).toEqual(row.metrics);
+    let html = renderToStaticMarkup(
+      <AccountCard provider={current.providers[0]} account={rows()[0]} />
+    );
+    expect(html.match(/border-green-500/g)).toHaveLength(2);
+    expect(html).not.toContain('aria-valuenow=');
+    act(() => renderer!.unmount());
+    renderer = undefined;
+    await mount([{ ...qwen, accounts: [], loading: true, loaded: false }]);
+    expect(rows()[0].metrics).toEqual(row.metrics);
+    expect(rows()[0].pending).toBe(true);
+    await update([
+      {
+        ...qwen,
+        mutationRevision: 1,
+        accounts: [
+          {
+            ...row,
+            metrics: [
+              { ...row.metrics[0], value: '0', balanceState: 'empty' },
+              { label: 'agent.rewardCredits', value: '—', showProgress: true },
+            ],
+          },
+        ],
+      },
+    ]);
+    html = renderToStaticMarkup(
+      <AccountCard provider={current.providers[0]} account={rows()[0]} />
+    );
+    expect(html).not.toContain('border-green-500');
+    expect(html).toContain('model.noUsageData');
+    expect(row.refresh).not.toHaveBeenCalled();
+  });
+
   it('keeps the first view in its loading state until every provider finishes, then reveals all rows together', async () => {
     const alpha = provider('alpha', [], { loaded: false, loading: true });
     const beta = provider('beta', [], { loaded: false, loading: true });

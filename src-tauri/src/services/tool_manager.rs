@@ -569,7 +569,10 @@ fn registry_display_name_matches(
         return true;
     }
     prefixes_lower.iter().any(|p| {
-        if matches!(p.as_str(), "qoder" | "qoder cn" | "codearts") {
+        if matches!(
+            p.as_str(),
+            "qoder" | "qoder cn" | "codearts" | "qwenwork" | "千问办公"
+        ) {
             return dn_lower == p
                 || dn_lower
                     .strip_prefix(&format!("{p} "))
@@ -1075,6 +1078,14 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
                 super::qoder_native::desktop_edition(path)
                     == Some(super::qoder_accounts::Edition::QoderCn)
             }
+            "QwenWork" | "千问办公" => packaged_desktop_metadata(path).is_some_and(|value| {
+                value["name"]
+                    == if pc.name == "QwenWork" {
+                        "qwen-work"
+                    } else {
+                        "qwen-work-cn"
+                    }
+            }),
             "CodeArts" => codearts_desktop_identity(path),
             "Devin" => devin_desktop_identity(path),
             "Devin CLI" => !devin_desktop_identity(path),
@@ -1118,6 +1129,11 @@ fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String>
     let paths = get_platform_paths(&pc.paths);
     let resolve = |value: &str| {
         let path = expand_path(value);
+        if matches!(pc.name.as_str(), "QwenWork" | "千问办公") && path.is_dir() {
+            if let Some(binary) = qwenwork_versioned_executable(pc, &path) {
+                return Some(binary.to_string_lossy().into_owned());
+            }
+        }
         #[cfg(windows)]
         if pc.name == "Kilo Desktop" {
             let root = if path.is_dir() {
@@ -2130,7 +2146,64 @@ fn qoder_resources(platform: &str, executable: &Path) -> Option<PathBuf> {
     }
 }
 
+pub(crate) fn packaged_desktop_metadata(executable: &Path) -> Option<serde_json::Value> {
+    let executable = fs::canonicalize(executable).ok()?;
+    packaged_metadata(&qoder_resources(std::env::consts::OS, &executable)?)
+}
+
+fn qwenwork_versioned_executable(pc: &PathsConfig, root: &Path) -> Option<PathBuf> {
+    let name = if pc.name == "QwenWork" {
+        "QwenWork.exe"
+    } else {
+        "QwenWorkCN.exe"
+    };
+    let updater = root.join("updater.cfg");
+    if updater.is_file() {
+        if fs::metadata(&updater).ok()?.len() > 65_536 {
+            return None;
+        }
+        let config: serde_json::Value = serde_json::from_slice(&fs::read(updater).ok()?).ok()?;
+        let version = config["currentVersion"].as_str()?;
+        if !version.starts_with(|c: char| c.is_ascii_digit())
+            || !version
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+        {
+            return None;
+        }
+        let executable = root.join(version).join(name);
+        return valid_executable(pc, &executable).then_some(executable);
+    }
+    let mut candidates: Vec<_> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path().join(name))
+        .filter(|path| valid_executable(pc, path))
+        .collect();
+    candidates.sort_by(|a, b| {
+        let version = |path: &Path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("")
+                .split(['.', '-'])
+                .map(|part| part.parse::<u64>().unwrap_or(0))
+                .collect::<Vec<_>>()
+        };
+        version(b).cmp(&version(a))
+    });
+    candidates.into_iter().next()
+}
+
 fn qoder_package_version(resources: &Path) -> Option<String> {
+    let value = packaged_metadata(resources)?;
+    let version = value["version"].as_str()?.trim();
+    (!version.is_empty() && version.len() <= 96 && version.bytes().all(|b| b.is_ascii_graphic()))
+        .then(|| version.to_string())
+}
+
+fn packaged_metadata(resources: &Path) -> Option<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = fs::File::open(resources.join("app.asar")).ok()?;
     let mut prefix = [0u8; 8];
@@ -2155,10 +2228,7 @@ fn qoder_package_version(resources: &Path) -> Option<String> {
     .ok()?;
     let mut bytes = vec![0u8; size as usize];
     file.read_exact(&mut bytes).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let version = value["version"].as_str()?.trim();
-    (!version.is_empty() && version.len() <= 96 && version.bytes().all(|b| b.is_ascii_graphic()))
-        .then(|| version.to_string())
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub(crate) fn get_qoder_campaign_runtime_path(
@@ -4296,5 +4366,145 @@ mod tests {
                 .contains(&serde_json::json!(id)));
         }
         fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(windows)]
+    use super::{find_tool_executable, qwenwork_versioned_executable};
+    use super::{packaged_desktop_metadata, qoder_resources, valid_executable};
+    use std::path::{Path, PathBuf};
+
+    fn write_qwenwork_package(resources: &Path, name: &str, version: &str) {
+        let package =
+            serde_json::to_vec(&serde_json::json!({"name":name,"version":version})).unwrap();
+        let tree = serde_json::to_vec(
+            &serde_json::json!({"files":{"package.json":{"offset":"0","size":package.len()}}}),
+        )
+        .unwrap();
+        let header_size = (tree.len() + 8 + 3) & !3;
+        let mut archive = vec![0u8; 8 + header_size];
+        archive[0..4].copy_from_slice(&4u32.to_le_bytes());
+        archive[4..8].copy_from_slice(&(header_size as u32).to_le_bytes());
+        archive[8..12].copy_from_slice(&((header_size - 4) as u32).to_le_bytes());
+        archive[12..16].copy_from_slice(&(tree.len() as u32).to_le_bytes());
+        archive[16..16 + tree.len()].copy_from_slice(&tree);
+        archive.extend(package);
+        fs::create_dir_all(resources).unwrap();
+        fs::write(resources.join("app.asar"), archive).unwrap();
+    }
+
+    #[test]
+    fn qwenwork_catalog_uses_verified_platform_paths_and_excludes_custom_models() {
+        for (json, name, package) in [
+            (
+                include_str!("../../../tools/qwenwork/paths.json"),
+                "QwenWork",
+                "qwen-work",
+            ),
+            (
+                include_str!("../../../tools/qwenworkcn/paths.json"),
+                "千问办公",
+                "qwen-work-cn",
+            ),
+        ] {
+            let pc: PathsConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(pc.name, name);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(json).unwrap()["noModelConfig"],
+                true
+            );
+            let root =
+                std::env::temp_dir().join(format!("qwenwork-detection-{}", uuid::Uuid::new_v4()));
+            let executable = if cfg!(target_os = "macos") {
+                root.join("Contents/MacOS/Client")
+            } else {
+                root.join("Client.exe")
+            };
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(&executable, b"fixture").unwrap();
+            let resources = qoder_resources(std::env::consts::OS, &executable).unwrap();
+            write_qwenwork_package(&resources, package, "2.10.0");
+            assert!(valid_executable(&pc, &executable));
+            write_qwenwork_package(
+                &resources,
+                if package == "qwen-work" {
+                    "qwen-work-cn"
+                } else {
+                    "qwen-work"
+                },
+                "2.10.0",
+            );
+            assert!(!valid_executable(&pc, &executable));
+            fs::remove_dir_all(root).unwrap();
+        }
+        let cn: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/qwenworkcn/paths.json")).unwrap();
+        assert_eq!(cn["paths"]["linux"][0], "/opt/apps/QwenWorkCN/qwen-work-cn");
+        let global: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tools/qwenwork/paths.json")).unwrap();
+        assert!(global["paths"]["linux"].as_array().unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn qwenwork_versioned_detection_ignores_launchers_and_resolves_the_latest_matching_edition() {
+        let root = std::env::temp_dir().join(format!("qwenwork-versions-{}", uuid::Uuid::new_v4()));
+        let pc: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/qwenwork/paths.json")).unwrap();
+        for (version, package) in [
+            ("2.9.0-1", "qwen-work"),
+            ("2.10.0-2", "qwen-work"),
+            ("3.0.0-1", "qwen-work-cn"),
+        ] {
+            let dir = root.join(version);
+            write_qwenwork_package(&dir.join("resources"), package, version);
+            fs::write(dir.join("QwenWork.exe"), b"fixture").unwrap();
+        }
+        fs::write(root.join("Launcher.exe"), b"launcher").unwrap();
+        assert_eq!(
+            qwenwork_versioned_executable(&pc, &root).unwrap(),
+            root.join("2.10.0-2/QwenWork.exe")
+        );
+        fs::write(root.join("updater.cfg"), br#"{"currentVersion":"2.9.0-1"}"#).unwrap();
+        assert_eq!(
+            qwenwork_versioned_executable(&pc, &root).unwrap(),
+            root.join("2.9.0-1/QwenWork.exe")
+        );
+        fs::write(
+            root.join("updater.cfg"),
+            br#"{"currentVersion":"../outside"}"#,
+        )
+        .unwrap();
+        assert!(qwenwork_versioned_executable(&pc, &root).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Requires explicit paths to the installed QwenWork desktop clients; metadata only"]
+    fn installed_qwenwork_detection_probe() {
+        for (key, json) in [
+            (
+                "ECHOBIRD_QWENWORK_EXE",
+                include_str!("../../../tools/qwenwork/paths.json"),
+            ),
+            (
+                "ECHOBIRD_QWENWORKCN_EXE",
+                include_str!("../../../tools/qwenworkcn/paths.json"),
+            ),
+        ] {
+            let executable = PathBuf::from(std::env::var(key).unwrap());
+            let pc: PathsConfig = serde_json::from_str(json).unwrap();
+            assert!(valid_executable(&pc, &executable));
+            let metadata = packaged_desktop_metadata(&executable).unwrap();
+            println!(
+                "{} {} {}",
+                pc.name,
+                metadata["version"].as_str().unwrap(),
+                executable.display()
+            );
+            #[cfg(windows)]
+            assert_eq!(
+                find_tool_executable(&pc, true).as_deref(),
+                Some(executable.to_string_lossy().as_ref())
+            );
+        }
     }
 }

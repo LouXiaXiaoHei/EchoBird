@@ -78,7 +78,9 @@ export function AccountCard({
   const singleMetric = account.metrics.length === 1;
   const balanceOnly =
     singleMetric &&
-    account.metrics.every((metric) => metric.percent == null && metric.resetAt == null);
+    account.metrics.every(
+      (metric) => metric.percent == null && metric.resetAt == null && metric.balanceState == null
+    );
   const evenlySpaced = !account.authorizationFailed && account.metrics.length === 2 && !balanceOnly;
   const compactMetrics = provider.id === 'minimax' && account.metrics.length > 3;
   return (
@@ -139,7 +141,7 @@ export function AccountCard({
                 </span>
               )}
               {account.plan && (
-                <span className="min-w-0 truncate leading-3">
+                <span className="min-w-0 truncate leading-normal">
                   {provider.id === 'minimax' ? account.plan : accountPlanLabel(account.plan)}
                 </span>
               )}
@@ -239,7 +241,7 @@ export function AccountCard({
                     </span>
                     <span
                       aria-label={hideLabel ? `${metric.label} ${metric.value}` : undefined}
-                      className={`block ${metric.value === '—' ? 'min-w-0 truncate' : 'flex-shrink-0'} ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null ? colors.text : ''}`}
+                      className={`block ${metric.value === '—' ? 'min-w-0 truncate' : 'flex-shrink-0'} ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null ? colors.text : metric.balanceState === 'available' ? quotaColorClasses.healthy.text : ''}`}
                     >
                       {loneBalance && <span className="mr-2">{metric.label}</span>}
                       {metric.value === '—' ? t('model.noUsageData') : metric.value}
@@ -259,6 +261,11 @@ export function AccountCard({
                         style={{ width: `${Math.max(0, Math.min(100, metric.percent))}%` }}
                       />
                     </div>
+                  ) : metric.showProgress && metric.balanceState && metric.value !== '—' ? (
+                    <div
+                      aria-hidden="true"
+                      className={`-my-px h-0 flex-shrink-0 rounded-full border-t-[6px] ${metric.balanceState === 'available' ? quotaColorClasses.healthy.fill : 'border-cyber-border'}`}
+                    />
                   ) : metric.showProgress && metric.value !== '—' && !balanceOnly ? (
                     <div
                       aria-hidden="true"
