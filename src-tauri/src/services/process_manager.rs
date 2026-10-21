@@ -541,6 +541,12 @@ impl ProcessManager {
             })
             .flatten()
             .or_else(|| {
+                if tool_id == "devincli" {
+                    return devin_literal_launch_path(
+                        command,
+                        crate::services::tool_manager::get_tool_exe_path(tool_id),
+                    );
+                }
                 if tool_id != "minimaxcode" {
                     return None;
                 }
@@ -1482,6 +1488,10 @@ fn minimax_literal_launch_path(command: &str, executable: Option<String>) -> Opt
     executable.filter(|path| command == "mcode" || command == path)
 }
 
+fn devin_literal_launch_path(command: &str, executable: Option<String>) -> Option<String> {
+    executable.filter(|path| command == "devin" || command == path)
+}
+
 #[cfg(windows)]
 pub(crate) fn copilot_native_command(executable: &str) -> Command {
     use std::os::windows::process::CommandExt;
@@ -2079,8 +2089,89 @@ pub(crate) async fn stop_desktop_for_config(tool_id: &str) {
     }
 }
 
+/// Close only the desktop executable; the bundled and exported CLI share its leaf name.
+pub(crate) async fn close_devin_desktop() -> Result<(), String> {
+    let path =
+        super::tool_manager::get_tool_exe_path("devin").ok_or("accountError.initializeClient")?;
+    #[cfg(windows)]
+    {
+        let script = "$ErrorActionPreference='Stop'; $exe=$env:ECHOBIRD_DESKTOP_EXE; Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $exe} | ForEach-Object { $p=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if($p -and $p.MainWindowHandle -ne 0){[void]$p.CloseMainWindow()} }; $end=[DateTime]::UtcNow.AddSeconds(10); do { $alive=Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $exe}; if(-not $alive){exit 0}; Start-Sleep -Milliseconds 200 } while([DateTime]::UtcNow -lt $end); exit 1";
+        let status = crate::utils::process::async_command("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("ECHOBIRD_DESKTOP_EXE", path)
+            .status()
+            .await
+            .map_err(|_| "accountError.closeClient")?;
+        if !status.success() {
+            return Err("accountError.closeClient".into());
+        }
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = path;
+        super::cursor_auth::close_client("devin", "Devin").await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let path = std::fs::canonicalize(path).map_err(|_| "accountError.closeClient")?;
+        let matching = || -> Result<Vec<i32>, String> {
+            let mut pids = Vec::new();
+            for entry in std::fs::read_dir("/proc")
+                .map_err(|_| "accountError.closeClient")?
+                .flatten()
+            {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|n| n.parse::<i32>().ok())
+                    .filter(|n| *n > 1)
+                else {
+                    continue;
+                };
+                if entry
+                    .metadata()
+                    .is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
+                    && std::fs::read_link(entry.path().join("exe")).is_ok_and(|p| p == path)
+                {
+                    pids.push(pid);
+                }
+            }
+            Ok(pids)
+        };
+        for pid in matching()? {
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        for _ in 0..50 {
+            if matching()?.is_empty() {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        Err("accountError.closeClient".into())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err("accountError.unavailable".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn devin_cli_launch_uses_resolved_binary_and_preserves_custom_commands() {
+        let path = "C:/Program Files/Devin/resources/app/extensions/windsurf/devin/bin/devin.exe";
+        assert_eq!(
+            super::devin_literal_launch_path("devin", Some(path.into())).as_deref(),
+            Some(path)
+        );
+        assert!(super::devin_literal_launch_path("devin --custom", Some(path.into())).is_none());
+        assert!(super::devin_literal_launch_path("devin", None).is_none());
+    }
     fn qoder_process_fixture(
         root: &std::path::Path,
         name: &str,

@@ -19,6 +19,7 @@ import { traeClaimedToday, traeClaimUnavailable } from '../AppManager/traeDailyC
 import { clineBalanceLabel } from '../AppManager/clineAccountDisplay';
 import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
 import { codeArtsRemainingPercent } from '../AppManager/codeArtsAccountDisplay';
+import { devinQuotaLabel } from '../AppManager/devinAccountDisplay';
 
 export interface AccountMetric {
   label: string;
@@ -726,6 +727,27 @@ export function accountCenterProviders(
           : [credits(t('model.balance'), account.balanceUsd, undefined, undefined, 'USD')],
       })
     ),
+    ...(context.devinAccounts
+      ? [
+          provider(
+            'devin',
+            'Devin',
+            '/icons/tools/devin.png',
+            ['devin', 'devincli'],
+            context.devinAccounts,
+            (account) => ({
+              identity: account.email,
+              plan: account.plan,
+              subscriptionEndAt: account.subscriptionEndAt,
+              metrics: account.quotaWindows.length
+                ? account.quotaWindows.map((window) =>
+                    quota(window.remainingPercent, window.resetAt, devinQuotaLabel(window.label))
+                  )
+                : [credits(t('model.balance'), account.balanceUsd, undefined, undefined, 'USD')],
+            })
+          ),
+        ]
+      : []),
     ...(context.codeArtsAccounts
       ? [
           provider(

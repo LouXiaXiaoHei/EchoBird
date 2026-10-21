@@ -1113,3 +1113,47 @@ pub async fn delete_kiro_account(edition: KiroEdition, account_id: String) -> Re
         kiro_accounts::delete_account(edition, &account_id).await,
     )
 }
+
+#[tauri::command]
+pub async fn list_devin_accounts(
+    tool_id: String,
+) -> Result<Vec<crate::services::devin_accounts::Account>, String> {
+    crate::services::devin_accounts::list(&tool_id).await
+}
+#[tauri::command]
+pub async fn start_devin_login(
+    tool_id: String,
+) -> Result<crate::services::devin_accounts::LoginStart, String> {
+    crate::services::devin_accounts::start_login(&tool_id).await
+}
+#[tauri::command]
+pub async fn poll_devin_login(
+    login_id: String,
+) -> Result<Option<crate::services::devin_accounts::Account>, String> {
+    crate::services::devin_accounts::poll_login(&login_id).await
+}
+#[tauri::command]
+pub fn cancel_devin_login(login_id: String) -> Result<(), String> {
+    crate::services::devin_accounts::cancel_login(&login_id)
+}
+#[tauri::command]
+pub async fn switch_devin_account(
+    account_id: String,
+    tool_id: String,
+) -> Result<crate::services::devin_accounts::Account, String> {
+    crate::services::devin_accounts::switch(&account_id, &tool_id).await
+}
+#[tauri::command]
+pub async fn refresh_devin_account(
+    account_id: String,
+) -> Result<crate::services::devin_accounts::Account, String> {
+    crate::services::devin_accounts::refresh(&account_id).await
+}
+#[tauri::command]
+pub async fn delete_devin_account(account_id: String) -> Result<(), String> {
+    finish_account_deletion(
+        AccountProvider::Devin,
+        &account_id,
+        crate::services::devin_accounts::delete(&account_id).await,
+    )
+}

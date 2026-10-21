@@ -50,6 +50,7 @@ import * as api from '../../api/tauri';
 import type { ModelConfig, LocalTool } from '../../api/types';
 import type { TKey } from '../../i18n';
 import { useAppManager } from './context';
+import { DevinAccountSection } from './DevinAccountSection';
 import { OpenDesignAccountSection } from './OpenDesignAccountSection';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useModelNexus } from '../ModelNexus/context';
@@ -1050,6 +1051,8 @@ export const AppManagerPanel: React.FC = () => {
             <KiroAccountSection />
           ) : selectedTool === 'trae' || selectedTool === 'traecn' ? (
             <TraeAccountSection />
+          ) : selectedTool === 'devin' || selectedTool === 'devincli' ? (
+            <DevinAccountSection />
           ) : selectedToolData.noModelConfig ? (
             <div className="h-full flex flex-col items-center justify-center gap-3 text-center">
               <BoxIcon size={28} className="text-cyber-text opacity-25" />
@@ -1159,6 +1162,7 @@ export const AppManagerBottom: React.FC = () => {
     zcodeAccounts,
     kimiAccounts,
     codeArtsAccounts,
+    devinAccounts,
     openDesignAccounts,
     minimaxAccounts,
     qoderAccounts,
@@ -1198,6 +1202,7 @@ export const AppManagerBottom: React.FC = () => {
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
     (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && !!kimiAccounts.selectedId) ||
+    (['devin', 'devincli'].includes(selectedTool ?? '') && !!devinAccounts.selectedId) ||
     (selectedTool === 'opendesign' && !!openDesignAccounts.selectedId) ||
     ((selectedTool === 'codex' || selectedTool === 'chatgptdesktop') && !!selectedCodexAccountId) ||
     (selectedTool === 'claudecode' && !!claudeCodeAccounts.selectedId) ||
@@ -1235,6 +1240,7 @@ export const AppManagerBottom: React.FC = () => {
     (selectedTool === 'codearts' && codeArtsAccounts.busy) ||
     (selectedTool === 'zcode' && zcodeAccounts.busy) ||
     (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && kimiAccounts.busy) ||
+    (['devin', 'devincli'].includes(selectedTool ?? '') && devinAccounts.busy) ||
     (selectedTool === 'opendesign' && openDesignAccounts.busy) ||
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||

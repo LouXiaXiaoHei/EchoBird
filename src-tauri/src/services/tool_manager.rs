@@ -1076,6 +1076,8 @@ fn valid_executable(pc: &PathsConfig, path: &Path) -> bool {
                     == Some(super::qoder_accounts::Edition::QoderCn)
             }
             "CodeArts" => codearts_desktop_identity(path),
+            "Devin" => devin_desktop_identity(path),
+            "Devin CLI" => !devin_desktop_identity(path),
             _ => true,
         }
 }
@@ -1168,6 +1170,44 @@ fn find_tool_executable(pc: &PathsConfig, include_hints: bool) -> Option<String>
                 valid_executable(pc, &path).then(|| path.to_string_lossy().into_owned())
             })
         })
+        .or_else(|| {
+            if pc.name != "Devin CLI" {
+                return None;
+            }
+            let defs = get_definitions();
+            let desktop = defs.iter().find(|d| d.id == "devin")?;
+            let executable = find_tool_executable(&desktop.paths_config, true)?;
+            devin_bundled_cli(Path::new(&executable), std::env::consts::OS)
+                .filter(|p| p.is_file())
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+}
+
+fn devin_resources(executable: &Path) -> Option<PathBuf> {
+    let dir = executable.parent()?;
+    if dir.file_name().is_some_and(|s| s == "MacOS") {
+        Some(dir.parent()?.join("Resources"))
+    } else {
+        Some(dir.join("resources"))
+    }
+}
+fn devin_desktop_identity(executable: &Path) -> bool {
+    devin_resources(executable)
+        .and_then(|p| fs::read(p.join("app/product.json")).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|p| p["nameShort"] == "Devin" && p["applicationName"] == "devin-desktop")
+}
+fn devin_bundled_cli(executable: &Path, platform: &str) -> Option<PathBuf> {
+    let file = if platform == "windows" {
+        "devin.exe"
+    } else {
+        "devin"
+    };
+    Some(
+        devin_resources(executable)?
+            .join("app/extensions/windsurf/devin/bin")
+            .join(file),
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1432,6 +1472,11 @@ async fn detect_tool(pc: &PathsConfig) -> Option<String> {
     // 0. Built-in tools (always installed)
     if pc.always_installed {
         return Some("built-in".to_string());
+    }
+
+    // Both applications use the devin leaf name; PATH alone cannot identify the GUI.
+    if matches!(pc.name.as_str(), "Devin" | "Devin CLI") {
+        return find_tool_executable(pc, true);
     }
 
     // Store registration is authoritative, even before the first client launch.
@@ -4202,5 +4247,51 @@ mod tests {
         );
         assert!(desktop_exec_program("\"unterminated").is_none());
         assert!(desktop_exec_program(" ").is_none());
+    }
+
+    #[test]
+    fn devin_catalog_identifies_the_gui_and_platform_bundled_cli() {
+        let desktop: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/devin/paths.json")).unwrap();
+        let cli: PathsConfig =
+            serde_json::from_str(include_str!("../../../tools/devincli/paths.json")).unwrap();
+        assert_eq!(cli.start_command.as_deref(), Some("devin"));
+        let root =
+            std::env::temp_dir().join(format!("echobird-devin-detection-{}", uuid::Uuid::new_v4()));
+        for (platform, path, file) in [
+            ("windows", "windows/Devin.exe", "devin.exe"),
+            ("macos", "macos/Devin.app/Contents/MacOS/Electron", "devin"),
+            ("linux", "linux/devin", "devin"),
+        ] {
+            let exe = root.join(path);
+            let resources = super::devin_resources(&exe).unwrap();
+            fs::create_dir_all(resources.join("app")).unwrap();
+            fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            fs::write(&exe, []).unwrap();
+            assert!(!super::valid_executable(&desktop, &exe));
+            fs::write(
+                resources.join("app/product.json"),
+                r#"{"nameShort":"Devin","applicationName":"devin-desktop"}"#,
+            )
+            .unwrap();
+            assert!(super::valid_executable(&desktop, &exe));
+            assert!(!super::valid_executable(&cli, &exe));
+            let bundled = super::devin_bundled_cli(&exe, platform).unwrap();
+            assert_eq!(bundled.file_name().unwrap(), file);
+            fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+            fs::write(&bundled, []).unwrap();
+            assert!(super::valid_executable(&cli, &bundled));
+            assert!(!super::valid_executable(&desktop, &bundled));
+        }
+        let index: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/api/tools/install/index.json"))
+                .unwrap();
+        for id in ["devin", "devincli"] {
+            assert!(index["ids"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(id)));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -48,6 +48,11 @@ pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccount
             .into_iter()
             .map(|a| option(provider, a.id, a.email, a.plan))
             .collect(),
+        Devin => super::devin_accounts::list_saved_accounts()
+            .await?
+            .into_iter()
+            .map(|a| option(provider, a.id, a.email, a.plan))
+            .collect(),
         OpenDesign => super::opendesign_accounts::list_saved_accounts()
             .await?
             .into_iter()
@@ -254,6 +259,7 @@ pub(crate) async fn connection_endpoint(source: &AccountSource) -> Result<String
             trae_accounts::connection_metadata(trae_edition(source.provider), &source.account_id)?
         }
         Copilot => super::copilot_accounts::proxy_credentials(&source.account_id, false).await?,
+        Devin => super::devin_accounts::proxy_credentials(&source.account_id).await?,
         _ => Value::Null,
     };
     super::account_proxy::connection_base(source.provider, &metadata)
@@ -270,6 +276,7 @@ pub(crate) async fn credentials(
         CodeArts => {
             super::codearts_accounts::proxy_credentials(&source.account_id, force_refresh).await
         }
+        Devin => super::devin_accounts::proxy_credentials(&source.account_id).await,
         OpenDesign => super::opendesign_accounts::proxy_credentials(&source.account_id).await,
         ClaudeCode => {
             claude_code_accounts::proxy_credentials(&source.account_id, force_refresh).await
@@ -328,6 +335,13 @@ pub(crate) async fn credentials_after_rejection(
                 rejected_credentials,
             )
             .await
+        }
+        Devin => {
+            let current = super::devin_accounts::proxy_credentials(&source.account_id).await?;
+            if current["accessToken"] == rejected_credentials["accessToken"] {
+                return Err("accountError.loginRequired".into());
+            }
+            Ok(current)
         }
         OpenDesign => {
             let current = super::opendesign_accounts::proxy_credentials(&source.account_id).await?;
@@ -506,6 +520,7 @@ pub async fn list_models(source: &AccountSource) -> Result<Vec<String>, String> 
             if matches!(
                 source.provider,
                 AccountProvider::Trae
+                    | AccountProvider::Devin
                     | AccountProvider::CodeArts
                     | AccountProvider::Traecn
                     | AccountProvider::Minimax

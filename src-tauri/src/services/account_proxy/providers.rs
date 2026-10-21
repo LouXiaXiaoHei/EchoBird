@@ -339,7 +339,8 @@ pub(super) fn base(provider: AccountProvider, credentials: &Value) -> &str {
             | AccountProvider::Qoder
             | AccountProvider::QoderCn
             | AccountProvider::Zcode
-            | AccountProvider::CodeArts => {
+            | AccountProvider::CodeArts
+            | AccountProvider::Devin => {
                 unreachable!("Provider uses its account gateway")
             }
         })
@@ -441,7 +442,8 @@ fn signed(
         | AccountProvider::Qoder
         | AccountProvider::QoderCn
         | AccountProvider::Zcode
-        | AccountProvider::CodeArts => {
+        | AccountProvider::CodeArts
+        | AccountProvider::Devin => {
             unreachable!("Provider uses its account gateway")
         }
     }
@@ -952,7 +954,8 @@ async fn fetch_models(
         | AccountProvider::Qoder
         | AccountProvider::QoderCn
         | AccountProvider::Zcode
-        | AccountProvider::CodeArts => {
+        | AccountProvider::CodeArts
+        | AccountProvider::Devin => {
             unreachable!("Provider uses its account gateway")
         }
     };

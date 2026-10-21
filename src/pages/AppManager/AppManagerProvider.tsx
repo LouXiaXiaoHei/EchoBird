@@ -13,6 +13,7 @@ import { useKimiAccounts } from './useKimiAccounts';
 import { useCodeArtsAccounts } from './useCodeArtsAccounts';
 import { switchCodeArtsAccount } from '../../api/codeArtsAccounts';
 import { switchKimiAccount } from '../../api/kimiAccounts';
+import { useDevinAccounts } from './useDevinAccounts';
 import { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import { useMinimaxAccounts } from './useMinimaxAccounts';
 import { useClineAccounts } from './useClineAccounts';
@@ -494,6 +495,21 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   useEffect(() => {
     codeArtsSelectionRevision.current += 1;
   }, [activePage, selectedTool, codeArtsAccounts.selectedId, codeArtsModel]);
+  const devinTool =
+    selectedTool === 'devincli' ||
+    !detectedTools.some((tool) => tool.id === 'devin' && tool.installed)
+      ? 'devincli'
+      : 'devin';
+  const devinAccounts = useDevinAccounts(
+    devinTool,
+    accountGroupEnabled('devin', 'devincli'),
+    setApplyError,
+    activePage === 'accounts' ? 'devin' : devinTool
+  );
+  const devinRevision = useRef(0);
+  useEffect(() => {
+    devinRevision.current += 1;
+  }, [activePage, selectedTool, devinAccounts.selectedId]);
   const openDesignAccounts = useOpenDesignAccounts(
     accountGroupEnabled('opendesign'),
     !!toolModelConfig.opendesign,
@@ -739,6 +755,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (selectedTool === 'codearts' && codeArtsAccounts.busy) return;
     if (selectedTool === 'zcode' && zcodeAccounts.busy) return;
     if (['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.busy) return;
+    if (['devin', 'devincli'].includes(selectedTool ?? '') && devinAccounts.busy) return;
     if (selectedTool === 'opendesign' && openDesignAccounts.busy) return;
     if (selectedTool === 'claudedesktop' && claudeDesktopAccounts.busy) return;
     if (selectedTool === 'cue' && cueAccounts.busy) return;
@@ -772,6 +789,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
       !(selectedTool === 'codearts' && codeArtsAccounts.selectedId) &&
       !(['kimicode', 'kimidesktop'].includes(selectedTool) && kimiAccounts.selectedId) &&
+      !(['devin', 'devincli'].includes(selectedTool ?? '') && devinAccounts.selectedId) &&
       !(selectedTool === 'opendesign' && openDesignAccounts.selectedId) &&
       !(selectedTool === 'dsh' && deepSeekAccounts.selectedId) &&
       !(selectedTool === 'grok' && grokAccounts.selectedId) &&
@@ -1004,6 +1022,28 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
           await codeArtsAccounts.reload();
         }
         if (launchAfterApply && current())
+          await api.startTool(selectedTool, toolData?.startCommand, cwd);
+      } catch (error) {
+        if (current()) setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (
+      (selectedTool === 'devin' || selectedTool === 'devincli') &&
+      devinAccounts.selectedId
+    ) {
+      const revision = devinRevision.current;
+      const current = () =>
+        revision === devinRevision.current &&
+        accountNavigation.current.tool === selectedTool &&
+        accountNavigation.current.page === activePage;
+      try {
+        const cwd = launchAfterApply || noModelConfig ? await pickWorkingDirectory() : undefined;
+        if (cwd === null || !current()) return;
+        await api.switchDevinAccount(devinAccounts.selectedId, selectedTool);
+        if (current()) await devinAccounts.reload();
+        if ((launchAfterApply || noModelConfig) && current())
           await api.startTool(selectedTool, toolData?.startCommand, cwd);
       } catch (error) {
         if (current()) setApplyError(accountError(error, t));
@@ -1298,6 +1338,10 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         codeArtsAccounts: {
           ...codeArtsAccounts,
           accounts: orderedAccounts('codearts', codeArtsAccounts.accounts),
+        },
+        devinAccounts: {
+          ...devinAccounts,
+          accounts: orderedAccounts('devin', devinAccounts.accounts),
         },
         openDesignAccounts: {
           ...openDesignAccounts,

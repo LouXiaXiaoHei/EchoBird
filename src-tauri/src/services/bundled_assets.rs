@@ -129,6 +129,8 @@ pub fn get_tool_script(name: &str) -> Option<&'static str> {
 /// IDs of every tool with a bundled install reference. Mirrors the keys of
 /// `get_install_ref` so the system prompt and AppManager stay in sync.
 pub const INSTALLABLE_TOOL_IDS: &[&str] = &[
+    "devin",
+    "devincli",
     "codearts",
     "claudecode",
     "codex",

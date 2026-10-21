@@ -9,6 +9,16 @@ import { AppManagerContext, useAppManager } from './context';
 import { AppManagerBottom } from './AppManagerComponents';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import museCodeDefinition from '../../../tools/musecode/paths.json';
+import * as devinApi from '../../api/devin';
+
+vi.mock('../../api/devin', () => ({
+  listDevinAccounts: vi.fn().mockResolvedValue([]),
+  startDevinLogin: vi.fn(),
+  pollDevinLogin: vi.fn(),
+  cancelDevinLogin: vi.fn().mockResolvedValue(undefined),
+  deleteDevinAccount: vi.fn(),
+  refreshDevinAccount: vi.fn(),
+}));
 
 vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('../../utils/platform', () => ({ IS_WINDOWS: false }));
@@ -39,6 +49,7 @@ vi.mock('./useDeepSeekAccounts', () => ({
   useDeepSeekAccounts: () => ({ accounts: [], select: vi.fn() }),
 }));
 vi.mock('../../api/tauri', () => ({
+  switchDevinAccount: vi.fn(),
   listOpenDesignAccounts: vi.fn().mockResolvedValue([]),
   startOpenDesignLogin: vi.fn(),
   pollOpenDesignLogin: vi.fn(),
@@ -148,6 +159,120 @@ vi.mock('../../api/tauri', () => ({
   switchManusAccount: vi.fn(),
   refreshManusAccount: vi.fn(),
 }));
+
+describe('Devin application account apply', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  const account: devinApi.DevinAccount = {
+    id: 'devin-saved',
+    email: 'user@example.test',
+    active: true,
+    plan: 'Free',
+    quotaWindows: [],
+  };
+  function Harness() {
+    const value = useAppManager();
+    useLayoutEffect(() => {
+      context = value;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const storage = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    vi.mocked(devinApi.listDevinAccounts).mockResolvedValue([account]);
+    vi.mocked(api.switchDevinAccount).mockResolvedValue(account);
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools([
+      { id: 'devin', name: 'Devin', category: 'Desktop', installed: true, noModelConfig: true },
+      {
+        id: 'devincli',
+        name: 'Devin CLI',
+        category: 'CLI Code',
+        installed: true,
+        noModelConfig: true,
+        startCommand: 'devin',
+      },
+    ]);
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(devinApi.listDevinAccounts).mockResolvedValue([]);
+  });
+  async function mount(tool: 'devin' | 'devincli') {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    act(() => context.setSelectedTool(tool));
+    await act(async () => {
+      await new Promise((done) => setTimeout(done, 0));
+    });
+  }
+  it.each(['devin', 'devincli'] as const)(
+    '%s applies only on explicit action and follows the native account launch flow',
+    async (tool) => {
+      await mount(tool);
+      expect(context.devinAccounts.selectedId).toBe(account.id);
+      expect(api.switchDevinAccount).not.toHaveBeenCalled();
+      expect(devinApi.refreshDevinAccount).not.toHaveBeenCalled();
+      act(() => context.setLaunchAfterApply(false));
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      expect(api.switchDevinAccount).toHaveBeenCalledExactlyOnceWith(account.id, tool);
+      expect(api.startTool).toHaveBeenCalledWith(
+        tool,
+        tool === 'devincli' ? 'devin' : undefined,
+        tool === 'devincli' ? '/fixture' : undefined
+      );
+      if (tool === 'devin') expect(openDialog).not.toHaveBeenCalled();
+      act(() => context.setLaunchAfterApply(true));
+      await act(async () => {
+        await context.handleLaunch();
+      });
+      expect(api.startTool).toHaveBeenCalledWith(
+        tool,
+        tool === 'devincli' ? 'devin' : undefined,
+        tool === 'devincli' ? '/fixture' : undefined
+      );
+      expect(context.isLaunching).toBe(false);
+    }
+  );
+  it('stops launch on failed switching and ignores a late switch after changing applications', async () => {
+    await mount('devin');
+    vi.mocked(api.switchDevinAccount).mockRejectedValueOnce(new Error('accountError.write'));
+    await act(async () => {
+      await context.handleLaunch();
+    });
+    expect(context.applyError).toBe('accountError.write');
+    expect(api.startTool).not.toHaveBeenCalled();
+    let resolve!: (value: devinApi.DevinAccount) => void;
+    vi.mocked(api.switchDevinAccount).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    );
+    let operation!: Promise<void>;
+    await act(async () => {
+      operation = context.handleLaunch();
+    });
+    act(() => context.setSelectedTool('devincli'));
+    await act(async () => {
+      resolve(account);
+      await operation;
+    });
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+});
 
 describe('Claude Desktop account apply', () => {
   let renderer: ReactTestRenderer;

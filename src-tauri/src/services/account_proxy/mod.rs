@@ -3,6 +3,7 @@
 mod bridge;
 mod cline;
 mod codearts;
+mod devin;
 mod grok;
 mod kiro;
 mod minimax;
@@ -34,6 +35,10 @@ pub(crate) fn connection_base(
     match provider {
         ClaudeCode => Ok("https://api.anthropic.com".into()),
         CodeArts => Ok(codearts::api(metadata).into()),
+        Devin => Ok(metadata["baseUrl"]
+            .as_str()
+            .unwrap_or(crate::services::devin_accounts::SERVER)
+            .into()),
         Grok => grok::base(metadata),
         Kiro => kiro::base(metadata, false),
         Minimax => minimax::base(metadata),
@@ -204,7 +209,9 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if provider == AccountProvider::CodeArts {
+    if provider == AccountProvider::Devin {
+        devin::route(credentials, model, body, client).await
+    } else if provider == AccountProvider::CodeArts {
         codearts::route(credentials, model, body, client).await
     } else if provider == AccountProvider::Grok {
         grok::route(credentials, model, body, client).await
@@ -245,7 +252,9 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if provider == AccountProvider::CodeArts {
+    if provider == AccountProvider::Devin {
+        devin::list_models(credentials, client).await
+    } else if provider == AccountProvider::CodeArts {
         codearts::list_models(credentials, client).await
     } else if provider == AccountProvider::Grok {
         grok::list_models(credentials, client).await

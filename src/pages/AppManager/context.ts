@@ -8,6 +8,7 @@ import type { useKiroAccounts } from './useKiroAccounts';
 import type { useZCodeAccounts } from './useZCodeAccounts';
 import type { useKimiAccounts } from './useKimiAccounts';
 import type { useCodeArtsAccounts } from './useCodeArtsAccounts';
+import type { useDevinAccounts } from './useDevinAccounts';
 import type { useOpenDesignAccounts } from './useOpenDesignAccounts';
 import type { useMinimaxAccounts } from './useMinimaxAccounts';
 import type { useClineAccounts } from './useClineAccounts';
@@ -51,6 +52,7 @@ export interface AppManagerContextType {
   zcodeAccounts: ReturnType<typeof useZCodeAccounts>;
   kimiAccounts: ReturnType<typeof useKimiAccounts>;
   codeArtsAccounts: ReturnType<typeof useCodeArtsAccounts>;
+  devinAccounts: ReturnType<typeof useDevinAccounts>;
   openDesignAccounts: ReturnType<typeof useOpenDesignAccounts>;
   minimaxAccounts: ReturnType<typeof useMinimaxAccounts>;
   clineAccounts: ReturnType<typeof useClineAccounts>;

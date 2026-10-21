@@ -52,7 +52,8 @@ export type AccountProvider =
   | 'zcode'
   | 'kimi'
   | 'openDesign'
-  | 'codeArts';
+  | 'codeArts'
+  | 'devin';
 
 export interface AccountSource {
   provider: AccountProvider;

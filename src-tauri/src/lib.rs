@@ -217,6 +217,14 @@ static BUNDLED: BundledAssets = BundledAssets {
             include_str!("../../docs/api/tools/install/zcode.json"),
         ),
         (
+            "devin",
+            include_str!("../../docs/api/tools/install/devin.json"),
+        ),
+        (
+            "devincli",
+            include_str!("../../docs/api/tools/install/devincli.json"),
+        ),
+        (
             "opendesign",
             include_str!("../../docs/api/tools/install/opendesign.json"),
         ),
@@ -1187,6 +1195,13 @@ pub fn run() {
             commands::kimi_account_commands::refresh_kimi_account,
             commands::kimi_account_commands::switch_kimi_account,
             commands::kimi_account_commands::delete_kimi_account,
+            tool_commands::list_devin_accounts,
+            tool_commands::start_devin_login,
+            tool_commands::poll_devin_login,
+            tool_commands::cancel_devin_login,
+            tool_commands::switch_devin_account,
+            tool_commands::refresh_devin_account,
+            tool_commands::delete_devin_account,
             tool_commands::list_opendesign_accounts,
             tool_commands::start_opendesign_login,
             tool_commands::poll_opendesign_login,

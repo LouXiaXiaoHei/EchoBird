@@ -1,0 +1,34 @@
+{
+    "id": "devin",
+    "displayName": "Devin",
+    "homepage": "https://devin.ai/desktop",
+    "docs": "https://docs.devin.ai/desktop",
+    "kind": "desktop_app",
+    "platforms": [
+        "windows",
+        "macos",
+        "linux"
+    ],
+    "install": {
+        "windows_download": "Download the Windows x64 or arm64 user installer from https://devin.ai/download . Run the installer and verify the installed Devin desktop executable. The desktop includes Devin CLI; detect its bundled executable rather than installing CLI twice.",
+        "macos_download": "Download the Intel or Apple Silicon Devin disk image from https://devin.ai/download and install Devin.app in Applications.",
+        "linux_download": "Use https://devin.ai/download and its official Linux package instructions for the matching distribution and architecture. Verify the installed desktop executable."
+    },
+    "install_flow": {
+        "summary": "Detect existing installations first, install the requested application using the official platform/architecture package, then refresh detection.",
+        "agent_steps": [
+            "Check the requested application and existing desktop/CLI executable paths. A CLI-only installation does not provide Devin desktop.",
+            "Use the official download or installer for the detected OS and architecture. Preserve existing settings and account credentials.",
+            "Complete the installer or interactive setup, then verify the requested executable and version. Do not treat download completion as installation completion.",
+            "Refresh both application cards. The desktop installation also supplies a usable CLI."
+        ]
+    },
+    "network_requirements": {
+        "test_urls": [
+            "https://devin.ai",
+            "https://static.devin.ai",
+            "https://server.codeium.com"
+        ],
+        "mirrors": {}
+    }
+}

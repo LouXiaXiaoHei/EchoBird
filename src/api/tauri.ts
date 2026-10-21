@@ -6,6 +6,7 @@
 // so consumers can continue to use  `import * as api from '../api/tauri'`.
 
 import { invoke } from '@tauri-apps/api/core';
+export { switchDevinAccount } from './devin';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { DetectedTool, ApplyModelInput, AppSettings } from './types';
 

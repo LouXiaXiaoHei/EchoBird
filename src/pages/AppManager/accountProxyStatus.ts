@@ -63,5 +63,7 @@ export function accountProxyStatus(
       return context.openDesignAccounts;
     case 'codeArts':
       return context.codeArtsAccounts;
+    case 'devin':
+      return context.devinAccounts;
   }
 }

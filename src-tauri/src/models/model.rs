@@ -47,6 +47,7 @@ pub enum AccountProvider {
     Zcode,
     Kimi,
     OpenDesign,
+    Devin,
     CodeArts,
 }
 

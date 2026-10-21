@@ -1,0 +1,34 @@
+{
+    "id": "devincli",
+    "displayName": "Devin CLI",
+    "homepage": "https://devin.ai/cli",
+    "docs": "https://docs.devin.ai/cli",
+    "kind": "cli",
+    "platforms": [
+        "windows",
+        "macos",
+        "linux"
+    ],
+    "install": {
+        "windows": "Use the official Windows installer linked at https://docs.devin.ai/cli or the official PowerShell installer https://static.devin.ai/cli/setup.ps1 . The script verifies the bundle hash and ends with interactive devin setup; run the interactive stage in a user-visible terminal. Detect an existing desktop-bundled CLI before downloading.",
+        "macos": "Use brew install --cask devin-cli or the official https://cli.devin.ai/install.sh installer in a visible terminal. Reuse a working desktop-bundled CLI.",
+        "linux": "Run the official https://cli.devin.ai/install.sh installer in a visible terminal. Reuse a working desktop-bundled CLI."
+    },
+    "install_flow": {
+        "summary": "Detect existing installations first, install the requested application using the official platform/architecture package, then refresh detection.",
+        "agent_steps": [
+            "Check the requested application and existing desktop/CLI executable paths. A CLI-only installation does not provide Devin desktop.",
+            "Use the official download or installer for the detected OS and architecture. Preserve existing settings and account credentials.",
+            "Complete the installer or interactive setup, then verify the requested executable and version. Do not treat download completion as installation completion.",
+            "Refresh both application cards. The desktop installation also supplies a usable CLI."
+        ]
+    },
+    "network_requirements": {
+        "test_urls": [
+            "https://devin.ai",
+            "https://static.devin.ai",
+            "https://server.codeium.com"
+        ],
+        "mirrors": {}
+    }
+}
