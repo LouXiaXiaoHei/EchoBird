@@ -492,6 +492,8 @@ mod tests {
         );
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            // tungstenite's callback fixes the error type to its HTTP response.
+            #[allow(clippy::result_large_err)]
             let mut socket=tokio_tungstenite::accept_hdr_async(stream,|request:&tokio_tungstenite::tungstenite::handshake::server::Request,response:tokio_tungstenite::tungstenite::handshake::server::Response|{
                 assert_eq!(request.uri().query(),Some("token=fixture-secret"));
                 Ok(response)

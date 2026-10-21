@@ -311,10 +311,8 @@ fn load_user_path_overrides() -> HashMap<String, Vec<String>> {
         }
         let mut paths: Vec<String> = Vec::new();
         match val {
-            serde_json::Value::String(s) => {
-                if !s.trim().is_empty() {
-                    paths.push(s.clone());
-                }
+            serde_json::Value::String(s) if !s.trim().is_empty() => {
+                paths.push(s.clone());
             }
             serde_json::Value::Array(arr) => {
                 for item in arr {

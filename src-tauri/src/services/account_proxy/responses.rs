@@ -108,10 +108,10 @@ pub(super) fn repair_responses_tool_history(body: &mut Value) {
                     item["type"] == "custom_tool_call",
                 );
             }
-            "function_call_output" | "custom_tool_call_output" => {
-                if !round.answer(item["call_id"].as_str().unwrap_or_default()) {
-                    continue;
-                }
+            "function_call_output" | "custom_tool_call_output"
+                if !round.answer(item["call_id"].as_str().unwrap_or_default()) =>
+            {
+                continue;
             }
             "message" if item["role"] == "user" || round.has_results => {
                 finish_tool_round(&mut round, &mut output, true);

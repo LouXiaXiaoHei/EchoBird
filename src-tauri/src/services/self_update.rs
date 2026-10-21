@@ -101,8 +101,8 @@ async fn download_to(app: &AppHandle, url: &str, dest: &Path) -> Result<(), Stri
         let chunk = chunk.map_err(|e| e.to_string())?;
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
-        if total > 0 {
-            let pct = ((downloaded.saturating_mul(100)) / total).min(100) as u8;
+        if let Some(pct) = downloaded.saturating_mul(100).checked_div(total) {
+            let pct = pct.min(100) as u8;
             if pct != last_pct {
                 last_pct = pct;
                 emit(app, "downloading", pct);
