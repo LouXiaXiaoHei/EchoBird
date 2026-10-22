@@ -69,6 +69,15 @@ const providers = [
     (account) => api.claimDuMateDailyCredits(account.id),
     (account) => canClaimStatus(dumateRewardStatus(account))
   ),
+  ...(['doubaowork', 'dola'] as const).map((edition) =>
+    rewards(
+      edition,
+      [edition],
+      () => api.listDoubaoAccounts(edition),
+      (account) => api.claimDoubaoDailyCredits(edition, account.id),
+      (account) => account.dailyReward?.status !== 'unavailable'
+    )
+  ),
   rewards(
     'qwenworkcn',
     ['qwenworkcn'],

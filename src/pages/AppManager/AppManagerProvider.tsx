@@ -20,6 +20,7 @@ import { useMinimaxAccounts } from './useMinimaxAccounts';
 import { useClineAccounts } from './useClineAccounts';
 import { useQoderAccounts } from './useQoderAccounts';
 import { useDuMateAccounts } from './useDuMateAccounts';
+import { useDoubaoAccounts } from './useDoubaoAccounts';
 import { useQwenWorkAccounts } from './useQwenWorkAccounts';
 import { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
@@ -358,6 +359,38 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     setApplyError,
     activePage === 'freeModels' ? 'dumate' : (selectedTool ?? '')
   );
+  const doubaoEdition: api.DoubaoEdition = selectedTool === 'dola' ? 'dola' : 'doubaowork';
+  const clearDoubaoWorkModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, doubaowork: null }));
+  }, []);
+  const clearDolaModel = useCallback(() => {
+    setToolModelConfig((prev) => ({ ...prev, dola: null }));
+  }, []);
+  const doubaoWorkAccounts = useDoubaoAccounts(
+    'doubaowork',
+    accountGroupEnabled('doubaowork') ||
+      (activePage === 'freeModels' &&
+        detectedTools.some((tool) => tool.id === 'doubaowork' && tool.installed)),
+    !!toolModelConfig.doubaowork,
+    clearDoubaoWorkModel,
+    setApplyError,
+    activePage === 'freeModels' ? 'doubaowork' : (selectedTool ?? '')
+  );
+  const dolaAccounts = useDoubaoAccounts(
+    'dola',
+    accountGroupEnabled('dola') ||
+      (activePage === 'freeModels' &&
+        detectedTools.some((tool) => tool.id === 'dola' && tool.installed)),
+    !!toolModelConfig.dola,
+    clearDolaModel,
+    setApplyError,
+    activePage === 'freeModels' ? 'dola' : (selectedTool ?? '')
+  );
+  const doubaoAccounts = doubaoEdition === 'dola' ? dolaAccounts : doubaoWorkAccounts;
+  const doubaoSelectionRevision = useRef(0);
+  useEffect(() => {
+    doubaoSelectionRevision.current += 1;
+  }, [activePage, selectedTool, doubaoAccounts.selectedId]);
   const qwenWorkEdition: api.QwenWorkEdition =
     selectedTool === 'qwenworkcn' ? 'qwenworkcn' : 'qwenwork';
   const clearQwenWorkModel = useCallback(() => {
@@ -569,6 +602,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       clineAccounts.select(null);
     }
     if (toolId === 'minimaxcode' || toolId === 'minimaxdesktop') minimaxAccounts.select(null);
+    if (toolId === 'doubaowork') doubaoWorkAccounts.select(null);
+    if (toolId === 'dola') dolaAccounts.select(null);
     if (toolId === 'qoder' || toolId === 'qodercn') qoderAccounts.select(null);
     if (toolId === 'zcode') zcodeAccounts.select(null);
     if (toolId === 'kimicode' || toolId === 'kimidesktop') kimiAccounts.select(null);
@@ -808,6 +843,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     if (['minimaxcode', 'minimaxdesktop'].includes(selectedTool) && minimaxAccounts.busy) return;
     if (['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.busy) return;
     if (selectedTool === 'dumate' && dumateAccounts.busy) return;
+    if (['doubaowork', 'dola'].includes(selectedTool) && doubaoAccounts.busy) return;
     if (['qwenwork', 'qwenworkcn'].includes(selectedTool) && qwenWorkAccounts.busy) return;
     if ((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.busy) return;
     const generation = ++launchGeneration.current;
@@ -830,6 +866,7 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       !(['minimaxcode', 'minimaxdesktop'].includes(selectedTool) && minimaxAccounts.selectedId) &&
       !(['qoder', 'qodercn'].includes(selectedTool) && qoderAccounts.selectedId) &&
       !(selectedTool === 'dumate' && dumateAccounts.selectedId) &&
+      !(['doubaowork', 'dola'].includes(selectedTool) && doubaoAccounts.selectedId) &&
       !(['qwenwork', 'qwenworkcn'].includes(selectedTool) && qwenWorkAccounts.selectedId) &&
       !((selectedTool === 'kirocrew' || selectedTool === 'kirocli') && kiroAccounts.selectedId) &&
       !(selectedTool === 'zcode' && zcodeAccounts.selectedId) &&
@@ -1035,6 +1072,24 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         if (launchAfterApply) await api.startTool(selectedTool, toolData?.startCommand, cwd);
       } catch (error) {
         setApplyError(accountError(error, t));
+      } finally {
+        finishLaunch();
+      }
+      return;
+    } else if (['doubaowork', 'dola'].includes(selectedTool) && doubaoAccounts.selectedId) {
+      const navigation = accountNavigation.current;
+      const selectionRevision = doubaoSelectionRevision.current;
+      const current = () =>
+        accountNavigation.current === navigation &&
+        doubaoSelectionRevision.current === selectionRevision;
+      try {
+        await api.switchDoubaoAccount(doubaoEdition, doubaoAccounts.selectedId);
+        if (current()) {
+          await doubaoAccounts.reload();
+          if (current()) await api.startTool(selectedTool, toolData?.startCommand);
+        }
+      } catch (error) {
+        if (current()) setApplyError(accountError(error, t));
       } finally {
         finishLaunch();
       }
@@ -1435,6 +1490,20 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         dumateAccounts: {
           ...dumateAccounts,
           accounts: orderedAccounts('dumate', dumateAccounts.accounts),
+        },
+        doubaoAccounts: {
+          ...doubaoAccounts,
+          accounts: orderedAccounts(doubaoEdition, doubaoAccounts.accounts),
+        },
+        doubaoAccountGroups: {
+          doubaowork: {
+            ...doubaoWorkAccounts,
+            accounts: orderedAccounts('doubaowork', doubaoWorkAccounts.accounts),
+          },
+          dola: {
+            ...dolaAccounts,
+            accounts: orderedAccounts('dola', dolaAccounts.accounts),
+          },
         },
         qwenWorkAccounts: {
           ...qwenWorkAccounts,

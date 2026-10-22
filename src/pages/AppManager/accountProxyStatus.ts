@@ -19,6 +19,9 @@ export function accountProxyStatus(
   provider: AccountProvider
 ): AccountProxyStatus {
   switch (provider) {
+    case 'doubaowork':
+    case 'dola':
+      return context.doubaoAccountGroups[provider];
     case 'dumate':
       return context.dumateAccounts;
     case 'claudeCode':

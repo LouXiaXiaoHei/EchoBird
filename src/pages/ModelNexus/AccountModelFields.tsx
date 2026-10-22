@@ -36,7 +36,12 @@ export function AccountModelFields({
   const [loadedProvider, setLoadedProvider] = useState<AccountProvider | null>(null);
   const loading = loadedProvider !== provider;
   const waitingForLabels =
-    (provider === 'qoder' || provider === 'qoderCn' || provider === 'kiro') && loading;
+    (provider === 'qoder' ||
+      provider === 'qoderCn' ||
+      provider === 'kiro' ||
+      provider === 'doubaowork' ||
+      provider === 'dola') &&
+    loading;
   const [fetching, setFetching] = useState(false);
   const fetchingRef = useRef(false);
   const revision = useRef(0);
@@ -114,6 +119,8 @@ export function AccountModelFields({
         provider === 'qoder' ||
         provider === 'qoderCn' ||
         provider === 'kiro' ||
+        provider === 'doubaowork' ||
+        provider === 'dola' ||
         provider === 'workBuddy' ||
         provider === 'workBuddyAi' ||
         provider === 'kilo' ||

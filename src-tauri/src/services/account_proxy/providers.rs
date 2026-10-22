@@ -337,6 +337,8 @@ pub(super) fn base(provider: AccountProvider, credentials: &Value) -> &str {
                 unreachable!("Trae uses its own gateway")
             }
             AccountProvider::Grok
+            | AccountProvider::DoubaoWork
+            | AccountProvider::Dola
             | AccountProvider::Cline
             | AccountProvider::Kiro
             | AccountProvider::Minimax
@@ -446,6 +448,8 @@ fn signed(
             unreachable!("Trae uses its own gateway")
         }
         AccountProvider::Grok
+        | AccountProvider::DoubaoWork
+        | AccountProvider::Dola
         | AccountProvider::Kiro
         | AccountProvider::Minimax
         | AccountProvider::Qoder
@@ -990,6 +994,8 @@ async fn fetch_models(
             unreachable!("Trae uses its own gateway")
         }
         AccountProvider::Grok
+        | AccountProvider::DoubaoWork
+        | AccountProvider::Dola
         | AccountProvider::Cline
         | AccountProvider::Kiro
         | AccountProvider::Minimax

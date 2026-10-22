@@ -12,6 +12,7 @@ import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
 import { accountCenterProviders } from './accountCenterData';
 import type { QwenWorkAccount } from '../../api/qwenwork';
 import type { DuMateAccount } from '../../api/dumate';
+import type { DoubaoAccount } from '../../api/doubao';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 
@@ -54,6 +55,7 @@ function context() {
     qoderAccountGroups: { qoder: group(), qodercn: group() },
     qwenWorkAccountGroups: { qwenwork: group(), qwenworkcn: group() },
     dumateAccounts: group(),
+    doubaoAccountGroups: { doubaowork: group(), dola: group() },
     grokAccounts: group(),
     kiloAccounts: group(),
     clineAccounts: group(),
@@ -68,6 +70,86 @@ const providers = (state: AppManagerContextType) =>
   accountCenterProviders(state, (key) => key, 'en');
 
 describe('Account Center display data', () => {
+  it('keeps overlapping Doubao windows separate from bonus credits and uses real plan names', () => {
+    const state = context();
+    const row: DoubaoAccount = {
+      id: 'doubao',
+      edition: 'doubaowork',
+      name: 'Fixture',
+      email: null,
+      active: false,
+      plan: '体验套餐',
+      expiresAt: null,
+      remaining: null,
+      total: null,
+      quota: {
+        windows: [
+          {
+            kind: '5h',
+            label: null,
+            remaining: 735,
+            total: 735,
+            usedPercent: 0,
+            resetAt: null,
+            unlimited: false,
+          },
+          {
+            kind: '7d',
+            label: null,
+            remaining: null,
+            total: null,
+            usedPercent: 20,
+            resetAt: 1800000000,
+            unlimited: false,
+          },
+        ],
+        bonus: { remaining: 200, total: 200, usedPercent: 0, expiresAt: 1800100000 },
+      },
+      dailyReward: { status: 'available', scene: 'fixture', nextClaimAt: null },
+    };
+    state.doubaoAccountGroups.doubaowork.accounts = [row];
+    const entry = providers(state).find((p) => p.id === 'doubaowork')!.accounts[0];
+    expect(entry.plan).toBe('体验套餐');
+    expect(entry.metrics).toMatchObject([
+      { label: '5h', value: '735', percent: 100, resetAt: null },
+      { label: '7d', value: '80%', percent: 80, resetAt: 1800000000 },
+      { label: 'agent.rewardCredits', value: '200', percent: 100, resetAt: 1800100000 },
+    ]);
+    expect(entry.subscriptionEndAt).toBeNull();
+    expect(state.doubaoAccountGroups.doubaowork.refresh).not.toHaveBeenCalled();
+    expect(state.doubaoAccountGroups.doubaowork.claimDaily).not.toHaveBeenCalled();
+  });
+  it.each(['doubaowork', 'dola'] as const)(
+    '%s shows only actual plan and quota without rewards or passive refresh',
+    (edition) => {
+      const state = context();
+      const row: DoubaoAccount = {
+        id: edition,
+        edition,
+        name: 'Fixture',
+        email: null,
+        active: false,
+        plan: null,
+        expiresAt: null,
+        remaining: null,
+        total: null,
+      };
+      state.doubaoAccountGroups[edition].accounts = [row];
+      let entry = providers(state).find((p) => p.id === edition)!.accounts[0];
+      expect(entry.plan).toBeNull();
+      expect(entry.metrics).toEqual([
+        { label: 'agent.credits', value: '—', resetAt: undefined, percent: undefined },
+      ]);
+      expect(entry.claim).toBeUndefined();
+      row.plan = 'Pro';
+      row.remaining = 40;
+      row.total = 100;
+      entry = providers(state).find((p) => p.id === edition)!.accounts[0];
+      expect(entry.plan).toBe('Pro');
+      expect(entry.metrics[0]).toMatchObject({ value: '40', percent: 40 });
+      expect(state.doubaoAccountGroups[edition].refresh).not.toHaveBeenCalled();
+    }
+  );
   it('DuMate uses real package and reward capacities without refreshing during rendering', async () => {
     const state = context();
     const row: DuMateAccount = {

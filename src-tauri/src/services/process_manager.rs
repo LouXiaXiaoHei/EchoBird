@@ -1826,9 +1826,33 @@ impl Drop for OwnedDesktopConfigProcess {
 }
 
 pub(crate) fn start_desktop_for_config(tool_id: &str) -> Result<OwnedDesktopConfigProcess, String> {
+    start_desktop_with_config_args(tool_id, &[])
+}
+
+pub(crate) fn start_doubao_account_bridge(
+    tool_id: &str,
+    port: u16,
+) -> Result<OwnedDesktopConfigProcess, String> {
+    if !matches!(tool_id, "doubaowork" | "dola") || port == 0 {
+        return Err("accountError.format".into());
+    }
+    start_desktop_with_config_args(
+        tool_id,
+        &[
+            "--remote-debugging-address=127.0.0.1".into(),
+            format!("--remote-debugging-port={port}"),
+        ],
+    )
+}
+
+fn start_desktop_with_config_args(
+    tool_id: &str,
+    arguments: &[String],
+) -> Result<OwnedDesktopConfigProcess, String> {
     let executable =
         super::tool_manager::get_tool_exe_path(tool_id).ok_or("accountError.initializeClient")?;
     let mut command = crate::utils::process::command(&executable);
+    command.args(arguments);
     if let Some(directory) = std::path::Path::new(&executable).parent() {
         command.current_dir(directory);
     }

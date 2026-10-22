@@ -15,6 +15,7 @@ mod window_visibility;
 use commands::account_proxy_commands;
 use commands::cline_account_commands;
 use commands::copilot_account_commands;
+use commands::doubao_account_commands;
 use commands::dumate_account_commands;
 use commands::kilo_account_commands;
 use commands::minimax_account_commands;
@@ -91,6 +92,14 @@ static BUNDLED: BundledAssets = BundledAssets {
         (
             "dumate",
             include_str!("../../docs/api/tools/install/dumate.json"),
+        ),
+        (
+            "doubaowork",
+            include_str!("../../docs/api/tools/install/doubaowork.json"),
+        ),
+        (
+            "dola",
+            include_str!("../../docs/api/tools/install/dola.json"),
         ),
         (
             "qwenwork",
@@ -1273,6 +1282,14 @@ pub fn run() {
             qoder_account_commands::delete_qoder_account,
             qwenwork_account_commands::list_qwenwork_accounts,
             dumate_account_commands::list_dumate_accounts,
+            doubao_account_commands::list_doubao_accounts,
+            doubao_account_commands::start_doubao_login,
+            doubao_account_commands::poll_doubao_login,
+            doubao_account_commands::cancel_doubao_login,
+            doubao_account_commands::refresh_doubao_account_quota,
+            doubao_account_commands::claim_doubao_daily_credits,
+            doubao_account_commands::delete_doubao_account,
+            doubao_account_commands::switch_doubao_account,
             dumate_account_commands::start_dumate_login,
             dumate_account_commands::poll_dumate_login,
             dumate_account_commands::cancel_dumate_login,

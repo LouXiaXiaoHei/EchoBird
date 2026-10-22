@@ -4,6 +4,7 @@ mod bridge;
 mod cline;
 mod codearts;
 mod devin;
+mod doubao;
 mod grok;
 mod kiro;
 mod minimax;
@@ -39,6 +40,7 @@ pub(crate) fn connection_base(
             .as_str()
             .unwrap_or(crate::services::devin_accounts::SERVER)
             .into()),
+        DoubaoWork | Dola => doubao::base(provider, metadata),
         Grok => grok::base(metadata),
         Kiro => kiro::base(metadata, false),
         Minimax => minimax::base(metadata),
@@ -101,6 +103,22 @@ pub(crate) fn cached_kiro_model_labels(
     account_id: &str,
 ) -> std::collections::BTreeMap<String, String> {
     kiro::cached_model_labels(account_id)
+}
+
+pub(crate) fn cached_doubao_model_labels(
+    provider: AccountProvider,
+    account_id: &str,
+) -> std::collections::BTreeMap<String, String> {
+    doubao::cached_model_labels(provider, account_id)
+}
+
+pub(crate) async fn doubao_account_json(
+    provider: AccountProvider,
+    credentials: &Value,
+    path: &str,
+    body: &Value,
+) -> Result<Value, ProxyError> {
+    doubao::account_json(provider, credentials, path, body).await
 }
 
 pub(crate) fn cached_free_model_ids(provider: AccountProvider, account_id: &str) -> Vec<String> {
@@ -209,7 +227,12 @@ pub async fn route(
     body: Value,
     client: &reqwest::Client,
 ) -> Result<Response, ProxyError> {
-    if provider == AccountProvider::Devin {
+    if matches!(
+        provider,
+        AccountProvider::DoubaoWork | AccountProvider::Dola
+    ) {
+        doubao::route(provider, credentials, model, body, client).await
+    } else if provider == AccountProvider::Devin {
         devin::route(credentials, model, body, client).await
     } else if provider == AccountProvider::CodeArts {
         codearts::route(credentials, model, body, client).await
@@ -252,7 +275,12 @@ pub async fn list_models(
     credentials: Value,
     client: &reqwest::Client,
 ) -> Result<Vec<String>, ProxyError> {
-    if provider == AccountProvider::Devin {
+    if matches!(
+        provider,
+        AccountProvider::DoubaoWork | AccountProvider::Dola
+    ) {
+        doubao::list_models(provider, credentials, client).await
+    } else if provider == AccountProvider::Devin {
         devin::list_models(credentials, client).await
     } else if provider == AccountProvider::CodeArts {
         codearts::list_models(credentials, client).await

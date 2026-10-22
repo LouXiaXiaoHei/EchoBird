@@ -86,7 +86,8 @@ export function AccountCard({
       (metric) => metric.percent == null && metric.resetAt == null && metric.balanceState == null
     );
   const evenlySpaced = !account.authorizationFailed && account.metrics.length === 2 && !balanceOnly;
-  const compactMetrics = provider.id === 'minimax' && account.metrics.length > 3;
+  const compactMetrics =
+    ['minimax', 'doubaowork', 'dola'].includes(provider.id) && account.metrics.length > 3;
   return (
     <article
       aria-label={`${name} ${identity}`}

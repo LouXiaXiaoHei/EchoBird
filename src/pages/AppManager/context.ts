@@ -14,6 +14,7 @@ import type { useMinimaxAccounts } from './useMinimaxAccounts';
 import type { useClineAccounts } from './useClineAccounts';
 import type { useQoderAccounts } from './useQoderAccounts';
 import type { useDuMateAccounts } from './useDuMateAccounts';
+import type { useDoubaoAccounts } from './useDoubaoAccounts';
 import type { useQwenWorkAccounts } from './useQwenWorkAccounts';
 import type { useClaudeCodeAccounts } from './useClaudeCodeAccounts';
 import type { useClaudeDesktopAccounts } from './useClaudeDesktopAccounts';
@@ -61,6 +62,8 @@ export interface AppManagerContextType {
   qoderAccounts: ReturnType<typeof useQoderAccounts>;
   qoderAccountGroups: Record<'qoder' | 'qodercn', ReturnType<typeof useQoderAccounts>>;
   dumateAccounts: ReturnType<typeof useDuMateAccounts>;
+  doubaoAccounts: ReturnType<typeof useDoubaoAccounts>;
+  doubaoAccountGroups: Record<'doubaowork' | 'dola', ReturnType<typeof useDoubaoAccounts>>;
   qwenWorkAccounts: ReturnType<typeof useQwenWorkAccounts>;
   qwenWorkAccountGroups: Record<'qwenwork' | 'qwenworkcn', ReturnType<typeof useQwenWorkAccounts>>;
   deepSeekAccounts: ReturnType<typeof useDeepSeekAccounts>;

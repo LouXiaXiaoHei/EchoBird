@@ -34,6 +34,8 @@ export interface LocalTool extends DetectedTool {
 // ─── Model Types ───
 
 export type AccountProvider =
+  | 'doubaowork'
+  | 'dola'
   | 'dumate'
   | 'claudeCode'
   | 'codex'

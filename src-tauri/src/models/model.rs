@@ -30,6 +30,9 @@ impl ModelScope {
 #[serde(rename_all = "camelCase")]
 pub enum AccountProvider {
     Dumate,
+    #[serde(rename = "doubaowork")]
+    DoubaoWork,
+    Dola,
     ClaudeCode,
     Codex,
     WorkBuddy,

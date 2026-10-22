@@ -38,6 +38,7 @@ pub(crate) mod cursor_usage;
 pub mod datalog;
 pub mod deepseek_accounts;
 pub mod deepseek_oauth;
+pub mod doubao_accounts;
 pub mod dumate_accounts;
 pub(crate) mod electron_storage;
 pub mod free_model_directory;

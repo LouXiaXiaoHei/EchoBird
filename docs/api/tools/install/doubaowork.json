@@ -1,0 +1,24 @@
+{
+    "id": "doubaowork",
+    "displayName": "Doubao Work",
+    "homepage": "https://www.doubao.com/work",
+    "docs": "https://www.doubao.com/work",
+    "kind": "desktop_app",
+    "platforms": ["windows", "macos"],
+    "install": {
+        "note": "Resolve the current official Doubao Work installer from https://www.doubao.com/work. The official page offers Windows and macOS x64/ARM64 variants. No official Linux release is verified. Do not substitute Doubao chat or infer support for another platform."
+    },
+    "install_flow": {
+        "summary": "Download and verify the official package for the user's operating system and architecture, install, then refresh EchoBird detection.",
+        "agent_steps": [
+            "Read https://www.doubao.com/work for current HTTPS installer URLs. Confirm the operating system, architecture, product identity and publisher signature. Preserve an existing installation location.",
+            "Windows: use the official architecture-matching installer. Use unattended flags only when verified; otherwise open the installer and report the remaining interaction. Resolve DoubaoWork.exe, not the browser, proxy, router, repair or updater executables. The observed install root is %LOCALAPPDATA%\\DoubaoWork\\Application.",
+            "macOS: choose the official ARM64, x64 or universal package as appropriate, verify code signature/Gatekeeper, and install DoubaoWork.app in Applications or the user's Applications folder. Verify the bundle's CFBundleExecutable rather than assuming a Windows filename.",
+            "Refresh EchoBird detection and verify the executable path and installed version. A downloaded file alone does not establish successful installation."
+        ],
+        "tell_user": ["Installed version and path, or the exact remaining installation step."]
+    },
+    "first_run": {
+        "note": "Adding an account uses EchoBird's isolated embedded login window and saves the account in EchoBird; applying switches the installed client. Personal Doubao and enterprise Feishu identities have distinct permissions and data. Quota refresh is explicit; overlapping usage windows and bonus credits are shown separately. Daily reward claiming is available only when the account's actual daily task is eligible. Automatic reward claiming is off by default. Custom API model configuration is not provided. Account-backed Smart Access is a separate operation from configuring the client's own model."
+    }
+}

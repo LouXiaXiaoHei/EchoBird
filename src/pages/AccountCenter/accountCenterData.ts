@@ -31,6 +31,7 @@ import {
   dumateRewardStatus,
 } from '../AppManager/dumateAccountDisplay';
 import { devinQuotaLabel } from '../AppManager/devinAccountDisplay';
+import { doubaoRemainingPercent, doubaoWindowLabel } from '../AppManager/doubaoAccountDisplay';
 
 export interface AccountMetric {
   label: string;
@@ -501,6 +502,64 @@ export function accountCenterProviders(
         ],
       })
     ),
+    ...(context.doubaoAccountGroups
+      ? (['doubaowork', 'dola'] as const).map((edition) =>
+          provider(
+            edition,
+            edition === 'doubaowork' ? '豆包工作' : 'Dola',
+            `/icons/tools/${edition}.png`,
+            [edition],
+            context.doubaoAccountGroups[edition],
+            (account) => ({
+              identity: account.name || account.email || account.id,
+              plan: account.plan,
+              subscriptionEndAt: account.expiresAt,
+              claim:
+                account.dailyReward && ['available', 'claimed'].includes(account.dailyReward.status)
+                  ? () => context.doubaoAccountGroups[edition].claimDaily(account)
+                  : undefined,
+              dailyClaimed: account.dailyReward?.status === 'claimed',
+              metrics:
+                account.quota?.windows.length || account.quota?.bonus
+                  ? [
+                      ...(account.quota.windows ?? []).map((window) => ({
+                        ...credits(
+                          doubaoWindowLabel(window, account.quota!.windows, t('agent.baseCredits')),
+                          window.remaining,
+                          window.total,
+                          window.resetAt
+                        ),
+                        value: window.unlimited
+                          ? '∞'
+                          : window.remaining != null
+                            ? number(window.remaining)
+                            : doubaoRemainingPercent(window) == null
+                              ? '—'
+                              : `${Math.round(doubaoRemainingPercent(window)!)}%`,
+                        percent: doubaoRemainingPercent(window),
+                        showProgress: true,
+                      })),
+                      ...(account.quota.bonus
+                        ? [
+                            {
+                              ...credits(
+                                t('agent.rewardCredits'),
+                                account.quota.bonus.remaining,
+                                account.quota.bonus.total,
+                                account.quota.bonus.expiresAt
+                              ),
+                              percent: doubaoRemainingPercent(account.quota.bonus),
+                              resetLabel: t('agent.rewardCreditsNextExpiry'),
+                              showProgress: true,
+                            },
+                          ]
+                        : []),
+                    ]
+                  : [credits(t('agent.credits'), account.remaining, account.total)],
+            })
+          )
+        )
+      : []),
     ...(context.dumateAccounts
       ? [
           provider(

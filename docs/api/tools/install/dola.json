@@ -1,0 +1,24 @@
+{
+    "id": "dola",
+    "displayName": "Dola",
+    "homepage": "https://www.dola.com/download/desktop",
+    "docs": "https://www.dola.com/",
+    "kind": "desktop_app",
+    "platforms": ["windows", "macos"],
+    "install": {
+        "note": "Resolve the current official Dola desktop installer from https://www.dola.com/download/desktop. The official page supports Windows and macOS architecture-specific downloads. No official Linux release is verified. Dola is the SPRING (SG) consumer assistant previously branded Cici, not the unrelated Unreal Engine assistant."
+    },
+    "install_flow": {
+        "summary": "Resolve and verify the official Dola package, install it for the current OS and architecture, then refresh EchoBird detection.",
+        "agent_steps": [
+            "Read https://www.dola.com/download/desktop for current HTTPS download links. Confirm product identity, publisher and architecture before saving to Downloads. Respect the platform's current availability rather than claiming universal regional access.",
+            "Windows: verify publisher SPRING (SG) PTE. LTD. and install the current official package. The observed Dola install root retains the legacy Cici name: %LOCALAPPDATA%\\Cici\\Application. Resolve Cici.exe, not a browser, proxy, updater or repair executable. Do not invent unattended installation flags.",
+            "macOS: select the official ARM64, x64 or universal download supported by the machine and verify code signature/Gatekeeper. The inspected official 2.32.6 ARM64 installer contains Cici.app, identifier com.bot.pc.cici and Contents/MacOS/Cici; the Dola download name does not rename that native bundle. Verify these metadata on the current package and install in Applications or the user's Applications folder. Native account switching still requires validation on a Mac.",
+            "Refresh EchoBird detection and verify installed path and version. A successful download does not by itself mean Dola is installed."
+        ],
+        "tell_user": ["Installed version and path, or the exact remaining installation step."]
+    },
+    "first_run": {
+        "note": "EchoBird adds accounts through an isolated embedded browser and stores them by edition. Applying an account switches Dola; quota refresh is explicit. Plan names and usage limits come from the account's actual response; unknown values remain unknown. Do not assume domestic Doubao reward activities exist in Dola: reward balances and claiming controls appear only when actual account data supports them. Custom API model configuration is not provided. Account-backed Smart Access does not imply that the native app accepts arbitrary third-party model configuration."
+    }
+}

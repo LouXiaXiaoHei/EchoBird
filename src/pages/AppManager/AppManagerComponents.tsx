@@ -19,6 +19,7 @@ import { CodeArtsAccountSection } from './CodeArtsAccountSection';
 import { MinimaxAccountSection } from './MinimaxAccountSection';
 import { QoderAccountSection } from './QoderAccountSection';
 import { DuMateAccountSection } from './DuMateAccountSection';
+import { DoubaoAccountSection } from './DoubaoAccountSection';
 import { QwenWorkAccountSection } from './QwenWorkAccountSection';
 import { ClaudeCodeAccountSection } from './ClaudeCodeAccountSection';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -1056,6 +1057,8 @@ export const AppManagerPanel: React.FC = () => {
             <TraeAccountSection />
           ) : selectedTool === 'devin' || selectedTool === 'devincli' ? (
             <DevinAccountSection />
+          ) : selectedTool === 'doubaowork' || selectedTool === 'dola' ? (
+            <DoubaoAccountSection />
           ) : selectedTool === 'dumate' ? (
             <DuMateAccountSection />
           ) : selectedTool === 'qwenwork' || selectedTool === 'qwenworkcn' ? (
@@ -1174,6 +1177,7 @@ export const AppManagerBottom: React.FC = () => {
     minimaxAccounts,
     qoderAccounts,
     dumateAccounts,
+    doubaoAccounts,
     qwenWorkAccounts,
     deepSeekAccounts,
     grokAccounts,
@@ -1210,6 +1214,7 @@ export const AppManagerBottom: React.FC = () => {
       !!minimaxAccounts.selectedId) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && !!qoderAccounts.selectedId) ||
     (selectedTool === 'dumate' && !!dumateAccounts.selectedId) ||
+    (['doubaowork', 'dola'].includes(selectedTool ?? '') && !!doubaoAccounts.selectedId) ||
     (['qwenwork', 'qwenworkcn'].includes(selectedTool ?? '') && !!qwenWorkAccounts.selectedId) ||
     (selectedTool === 'zcode' && !!zcodeAccounts.selectedId) ||
     (['kimicode', 'kimidesktop'].includes(selectedTool ?? '') && !!kimiAccounts.selectedId) ||
@@ -1256,6 +1261,7 @@ export const AppManagerBottom: React.FC = () => {
     (['minimaxcode', 'minimaxdesktop'].includes(selectedTool ?? '') && minimaxAccounts.busy) ||
     (['qoder', 'qodercn'].includes(selectedTool ?? '') && qoderAccounts.busy) ||
     (selectedTool === 'dumate' && dumateAccounts.busy) ||
+    (['doubaowork', 'dola'].includes(selectedTool ?? '') && doubaoAccounts.busy) ||
     (['qwenwork', 'qwenworkcn'].includes(selectedTool ?? '') && qwenWorkAccounts.busy) ||
     (selectedTool === 'grok' && grokAccounts.busy) ||
     (['cline', 'clinedesktop'].includes(selectedTool ?? '') && clineAccounts.busy) ||

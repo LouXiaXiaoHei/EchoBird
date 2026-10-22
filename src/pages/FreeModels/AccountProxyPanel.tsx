@@ -130,9 +130,16 @@ export function AccountProxyPanel({
           <span className="flex-1 min-w-0 text-base font-bold text-cyber-text truncate">
             {provider.name}
           </span>
-          {['antigravity', 'claudeCode', 'qoder', 'qoderCn', 'workBuddy', 'workBuddyAi'].includes(
-            provider.id
-          ) && (
+          {[
+            'antigravity',
+            'claudeCode',
+            'qoder',
+            'qoderCn',
+            'workBuddy',
+            'workBuddyAi',
+            'doubaowork',
+            'dola',
+          ].includes(provider.id) && (
             <span className="shrink-0 whitespace-nowrap font-medium text-cyber-accent text-[10px] leading-none">
               {t('accountProxy.highRisk')}
             </span>

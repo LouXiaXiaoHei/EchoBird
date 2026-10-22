@@ -44,6 +44,17 @@ fn option(
 pub async fn list_accounts(provider: AccountProvider) -> Result<Vec<SavedAccountOption>, String> {
     use AccountProvider::*;
     let mut accounts: Vec<SavedAccountOption> = match provider {
+        DoubaoWork | Dola => super::doubao_accounts::list(doubao_edition(provider))
+            .await?
+            .into_iter()
+            .map(|account| {
+                let labels =
+                    super::account_proxy::cached_doubao_model_labels(provider, &account.id);
+                let mut saved = option(provider, account.id, account.name, account.plan);
+                saved.model_labels = labels;
+                saved
+            })
+            .collect(),
         Dumate => super::dumate_accounts::list()
             .await?
             .into_iter()
@@ -196,6 +207,14 @@ fn edition(provider: AccountProvider) -> workbuddy_accounts::Edition {
     }
 }
 
+fn doubao_edition(provider: AccountProvider) -> super::doubao_accounts::Edition {
+    if provider == AccountProvider::Dola {
+        super::doubao_accounts::Edition::Dola
+    } else {
+        super::doubao_accounts::Edition::DoubaoWork
+    }
+}
+
 fn trae_edition(provider: AccountProvider) -> trae_accounts::Edition {
     if provider == AccountProvider::Traecn {
         trae_accounts::Edition::Traecn
@@ -245,7 +264,7 @@ fn validate_saved_source(
 pub(crate) async fn connection_endpoint(source: &AccountSource) -> Result<String, String> {
     use AccountProvider::*;
     let metadata = match source.provider {
-        Dumate => {
+        Dumate | DoubaoWork | Dola => {
             validate_source(source).await?;
             Value::Null
         }
@@ -283,6 +302,13 @@ pub(crate) async fn credentials(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        DoubaoWork | Dola => {
+            super::doubao_accounts::proxy_credentials(
+                doubao_edition(source.provider),
+                &source.account_id,
+            )
+            .await
+        }
         Dumate => {
             super::dumate_accounts::proxy_credentials(&source.account_id, force_refresh).await
         }
@@ -342,6 +368,17 @@ pub(crate) async fn credentials_after_rejection(
 ) -> Result<Value, String> {
     use AccountProvider::*;
     match source.provider {
+        DoubaoWork | Dola => {
+            let current = super::doubao_accounts::proxy_credentials(
+                doubao_edition(source.provider),
+                &source.account_id,
+            )
+            .await?;
+            if current["cookieHeader"] == rejected_credentials["cookieHeader"] {
+                return Err("accountError.loginRequired".into());
+            }
+            Ok(current)
+        }
         Dumate => {
             super::dumate_accounts::proxy_credentials_after_rejection(
                 &source.account_id,

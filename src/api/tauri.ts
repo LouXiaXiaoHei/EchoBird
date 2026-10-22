@@ -20,6 +20,7 @@ export * from './minimax';
 export * from './qoder';
 export * from './qwenwork';
 export * from './dumate';
+export * from './doubao';
 export * from './localServer';
 export * from './agent';
 export * from './parasite';

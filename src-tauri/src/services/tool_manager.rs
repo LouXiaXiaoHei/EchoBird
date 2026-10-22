@@ -2158,6 +2158,27 @@ pub(crate) fn packaged_desktop_metadata(executable: &Path) -> Option<serde_json:
     packaged_metadata(&qoder_resources(std::env::consts::OS, &executable)?)
 }
 
+pub(crate) fn doubao_desktop_metadata(tool: &str) -> Option<serde_json::Value> {
+    if !matches!(tool, "doubaowork" | "dola") {
+        return None;
+    }
+    let executable = PathBuf::from(get_tool_exe_path(tool)?);
+    #[cfg(target_os = "macos")]
+    {
+        let info =
+            plist::Value::from_file(executable.parent()?.parent()?.join("Info.plist")).ok()?;
+        let version = info
+            .as_dictionary()?
+            .get("CFBundleShortVersionString")?
+            .as_string()?;
+        Some(serde_json::json!({"version":version}))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        serde_json::from_slice(&fs::read(executable.with_file_name("manifest.json")).ok()?).ok()
+    }
+}
+
 fn qwenwork_versioned_executable(pc: &PathsConfig, root: &Path) -> Option<PathBuf> {
     let name = if pc.name == "QwenWork" {
         "QwenWork.exe"
@@ -4494,6 +4515,36 @@ mod tests {
             packaged_desktop_metadata(Path::new(&path)).unwrap()["version"],
             path
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Read-only detection of the installed Doubao Work and Dola clients"]
+    fn installed_doubao_clients_resolve_the_chromium_runtime() {
+        for (definition, executable, product) in [
+            (
+                include_str!("../../../tools/doubaowork/paths.json"),
+                "DoubaoWork.exe",
+                "DoubaoWork",
+            ),
+            (
+                include_str!("../../../tools/dola/paths.json"),
+                "Cici.exe",
+                "Dola",
+            ),
+        ] {
+            let pc: PathsConfig = serde_json::from_str(definition).unwrap();
+            let detected = super::find_tool_executable(&pc, true).expect("installed client");
+            let path = Path::new(&detected);
+            assert_eq!(path.file_name().unwrap(), executable);
+            assert_eq!(path.parent().unwrap().file_name().unwrap(), "app");
+            assert!(valid_executable(&pc, path));
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(path.with_file_name("manifest.json")).unwrap())
+                    .unwrap();
+            assert_eq!(manifest["productName"], product);
+            println!("{product}: {} at {detected}", manifest["version"]);
+        }
     }
 
     #[cfg(windows)]

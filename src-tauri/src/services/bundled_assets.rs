@@ -153,6 +153,8 @@ pub const INSTALLABLE_TOOL_IDS: &[&str] = &[
     "qodercn",
     "qwenworkcn",
     "dumate",
+    "doubaowork",
+    "dola",
     "qwenwork",
     "kilo",
     "kilodesktop",

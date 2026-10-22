@@ -31,6 +31,28 @@ async function mount() {
 }
 const claims = () => mocks.invoke.mock.calls.filter(([command]) => command.startsWith('claim_'));
 
+it('rechecks Doubao daily eligibility after a cached claim without enabling automatic rewards by default', async () => {
+  rows.doubao = [{ id: 'doubao', edition: 'doubaowork', dailyReward: { status: 'claimed' } }];
+  installed('doubaowork');
+  useToolsStore.setState({ hasScanned: true });
+  await mount();
+  expect(claims()).toHaveLength(0);
+  await act(async () => {
+    useRewardClaimStore.getState().setEnabled(true);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  expect(claims()).toEqual([
+    ['claim_doubao_daily_credits', { edition: 'doubaowork', accountId: 'doubao' }],
+  ]);
+  rows.doubao[0].dailyReward = { status: 'unavailable' };
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+  });
+  expect(claims()).toHaveLength(1);
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date('2026-10-22T06:00:00Z'));

@@ -96,9 +96,16 @@ it('updates zero, singular, plural and unknown account counts across all languag
         .findAllByType('span')
         .filter((span) => span.children.includes(translate('accountProxy.highRisk', language)));
       expect(labels).toHaveLength(
-        ['antigravity', 'claudeCode', 'qoder', 'qoderCn', 'workBuddy', 'workBuddyAi'].includes(
-          provider.id
-        )
+        [
+          'antigravity',
+          'claudeCode',
+          'qoder',
+          'qoderCn',
+          'workBuddy',
+          'workBuddyAi',
+          'doubaowork',
+          'dola',
+        ].includes(provider.id)
           ? 1
           : 0
       );
@@ -152,6 +159,27 @@ it('offers DuMate saved accounts as a router source without starting login or re
   expect(context.setModelModalDestination).toHaveBeenCalledWith('freeRouter');
   expect(invoke).not.toHaveBeenCalled();
 });
+
+it.each(['doubaowork', 'dola'] as const)(
+  'offers %s through the existing account form without loading models or starting login',
+  async (provider) => {
+    await open();
+    expect(api.accountProxyProviders.find((entry) => entry.id === provider)?.icon).toBe(
+      `${provider}.png`
+    );
+    expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+    act(() => row(provider).props.onClick());
+    expect(context.setNewModelForm).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        accountSource: { provider, accountId: '' },
+        apiKey: '',
+        baseUrl: '',
+      })
+    );
+    expect(context.setModelModalDestination).toHaveBeenCalledWith('freeRouter');
+    expect(invoke).not.toHaveBeenCalled();
+  }
+);
 
 it('puts larger saved-account pools first and preserves catalog order for ties without mutating it', async () => {
   const originalOrder = api.accountProxyProviders.map((provider) => provider.id);

@@ -546,6 +546,37 @@ it('renders an old Qoder native selection through cached labels without fetching
   expect(showToast).not.toHaveBeenCalled();
 });
 
+it.each(['doubaowork', 'dola'] as const)(
+  'waits for %s aliases before applying a cached directory and preserves the native model on refresh',
+  async (provider) => {
+    let resolve!: (rows: api.ProxyAccount[]) => void;
+    vi.mocked(api.listProxyAccounts).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    );
+    const source = { provider, accountId: 'saved' };
+    api.cacheAccountProxyModels(source, ['Pro', 'Turbo']);
+    await open('saved', '4', provider);
+    expect(current.modelId).toBe('4');
+    expect(api.getAccountProxyModels).not.toHaveBeenCalled();
+    await act(async () =>
+      resolve([{ source, label: 'Saved', modelLabels: { '4': 'Turbo', '5': 'Pro' } }])
+    );
+    expect(current.modelId).toBe('4');
+    expect(current.modelIdOptions).toEqual(['Pro', '4']);
+    vi.mocked(api.getAccountProxyModels).mockResolvedValueOnce(['Pro', 'Turbo updated']);
+    vi.mocked(api.listProxyAccounts).mockResolvedValueOnce([
+      { source, label: 'Saved', modelLabels: { '4': 'Turbo updated', '5': 'Pro' } },
+    ]);
+    await act(async () => field('model.modelId').props.onRefresh());
+    expect(current.modelId).toBe('4');
+    expect(current.modelIdOptions).toEqual(['Pro', '4']);
+    expect(renderer.root.findByType('input').props.value).toBe('Turbo updated');
+    expect(api.listProxyAccounts).toHaveBeenCalledTimes(2);
+  }
+);
+
 it.each(['qoder', 'kiro'] as const)(
   'refreshes %s labels from local metadata without rewriting an equivalent native selection',
   async (provider) => {

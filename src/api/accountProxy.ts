@@ -7,6 +7,8 @@ export const accountProxyProviders: { id: AccountProvider; name: string; icon: s
   { id: 'workBuddy', name: 'WorkBuddy', icon: 'workbuddy.png' },
   { id: 'workBuddyAi', name: 'WorkBuddy AI', icon: 'workbuddyai.png' },
   { id: 'dumate', name: 'DuMate', icon: 'dumate.svg' },
+  { id: 'doubaowork', name: '豆包工作', icon: 'doubaowork.png' },
+  { id: 'dola', name: 'Dola', icon: 'dola.png' },
   { id: 'antigravity', name: 'Antigravity', icon: 'antigravity.png' },
   { id: 'kiro', name: 'Kiro', icon: 'kirocrew.svg' },
   { id: 'trae', name: 'Trae', icon: 'trae.svg' },
