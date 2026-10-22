@@ -49,13 +49,40 @@ vi.mock('./useClaudeCodeAccounts', async () => {
     },
   };
 });
-vi.mock('./useWorkBuddyAccounts', () => ({
-  useWorkBuddyAccounts: () => ({ accounts: [], select: vi.fn() }),
-}));
-vi.mock('./useDeepSeekAccounts', () => ({
-  useDeepSeekAccounts: () => ({ accounts: [], select: vi.fn() }),
-}));
+vi.mock('./useWorkBuddyAccounts', async () => {
+  const { useState } = await import('react');
+  return {
+    useWorkBuddyAccounts: () => {
+      const [selectedId, select] = useState<string | null>(null);
+      return { accounts: [], selectedId, select };
+    },
+  };
+});
+vi.mock('./useDeepSeekAccounts', async () => {
+  const { useState } = await import('react');
+  return {
+    useDeepSeekAccounts: (_enabled: boolean, _hasModel: boolean, clearModel: () => void) => {
+      const [selectedId, setSelectedId] = useState<string | null>(null);
+      return {
+        accounts: [],
+        selectedId,
+        select: (id: string | null) => {
+          setSelectedId(id);
+          if (id) clearModel();
+        },
+      };
+    },
+  };
+});
 vi.mock('../../api/tauri', () => ({
+  listQoderAccounts: vi.fn().mockResolvedValue([]),
+  startQoderLogin: vi.fn(),
+  refreshQoderAccountQuota: vi.fn(),
+  listMinimaxAccounts: vi
+    .fn()
+    .mockResolvedValue([{ id: 'fixture-account', email: 'fixture@example.test', region: 'cn' }]),
+  startMinimaxLogin: vi.fn(),
+  refreshMinimaxAccount: vi.fn(),
   switchDevinAccount: vi.fn(),
   listOpenDesignAccounts: vi.fn().mockResolvedValue([]),
   startOpenDesignLogin: vi.fn(),
@@ -2378,4 +2405,781 @@ describe.each(['antigravity', 'antigravitydesktop'] as const)('%s account apply'
     expect(launch?.props.disabled).toBe(false);
     act(() => bottom.unmount());
   });
+});
+
+describe.each(['workbuddy', 'workbuddyai'] as const)('%s image capability preference', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  const other = tool === 'workbuddy' ? 'workbuddyai' : 'workbuddy';
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      [tool, other].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      }))
+    );
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'any/model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+  };
+  it('restores preferences across passive navigation and remounts without applying', async () => {
+    storage.set(`echobird_${tool}_image_input`, 'false');
+    storage.set(`echobird_${tool}_1m_mode`, 'true');
+    await mount();
+    expect(context.workBuddyImageInput).toBe(false);
+    expect(context.workBuddy1mMode).toBe(true);
+    await act(async () => context.setSelectedTool(other));
+    expect(context.workBuddyImageInput).toBe(true);
+    expect(context.workBuddy1mMode).toBe(false);
+    act(() => context.setWorkBuddyImageInput(false));
+    expect(storage.get(`echobird_${other}_image_input`)).toBe('false');
+    await act(async () => context.setSelectedTool(tool));
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    expect(context.workBuddyImageInput).toBe(false);
+    act(() => renderer.unmount());
+    await mount();
+    expect(context.workBuddyImageInput).toBe(false);
+    expect(context.workBuddy1mMode).toBe(true);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(context.zcodeImageInput).toBe(true);
+    expect(storage.has('echobird_zcode_image_input')).toBe(false);
+  });
+  it('passes the saved value through normal apply and explicit flips without launching', async () => {
+    vi.useFakeTimers();
+    storage.set(`echobird_${tool}_image_input`, 'false');
+    storage.set(`echobird_${tool}_1m_mode`, 'true');
+    await mount();
+    act(() => {
+      context.handleSelectModel(tool, 'fixture');
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    await act(async () => context.setWorkBuddyImageInput(true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: true, oneMContext: true })
+    );
+    await act(async () => context.setWorkBuddy1mMode(false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: true, oneMContext: false })
+    );
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('false');
+    expect(storage.has(`echobird_${other}_1m_mode`)).toBe(false);
+    expect(storage.get(`echobird_${tool}_image_input`)).toBe('true');
+    expect(storage.has(`echobird_${other}_image_input`)).toBe(false);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('blocks repeated flips while pending and shows explicit failures', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setWorkBuddyImageInput(false));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setWorkBuddyImageInput(true));
+    act(() => context.setWorkBuddy1mMode(true));
+    expect(context.workBuddy1mMode).toBe(false);
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(context.workBuddyImageInput).toBe(false);
+    await act(async () => finish({ success: false, message: 'Fixture apply failed' }));
+    expect(context.isLaunching).toBe(false);
+    expect(context.applyError).toBe('Fixture apply failed');
+    await act(async () => context.setSelectedTool('unrelated'));
+    act(() => context.setWorkBuddyImageInput(true));
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(storage.get(`echobird_${tool}_image_input`)).toBe('false');
+  });
+  it.each(['no-model', 'account', 'uninstalled'])(
+    'only saves preference in %s mode',
+    async (mode) => {
+      await mount();
+      if (mode !== 'no-model') act(() => context.handleSelectModel(tool, 'fixture'));
+      if (mode === 'account') act(() => context.workBuddyAccounts.select('saved'));
+      if (mode === 'uninstalled')
+        act(() =>
+          useToolsStore
+            .getState()
+            .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }])
+        );
+      await act(async () => context.setWorkBuddyImageInput(false));
+      expect(storage.get(`echobird_${tool}_image_input`)).toBe('false');
+      await act(async () => context.setWorkBuddy1mMode(true));
+      expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      expect(api.startTool).not.toHaveBeenCalled();
+    }
+  );
+});
+
+describe.each(['mimocode', 'mimodesktop'] as const)('%s model capabilities', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  const other = tool === 'mimocode' ? 'mimodesktop' : 'mimocode';
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      [tool, other].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      }))
+    );
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'any/model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+  };
+  it('restores isolated values without applying on navigation or remount', async () => {
+    storage.set(`echobird_${tool}_image_input`, 'false');
+    storage.set(`echobird_${tool}_1m_mode`, 'true');
+    await mount();
+    expect(context.mimoImageInput).toBe(false);
+    expect(context.mimo1mMode).toBe(true);
+    await act(async () => context.setSelectedTool(other));
+    expect(context.mimoImageInput).toBe(true);
+    expect(context.mimo1mMode).toBe(false);
+    await act(async () => context.setSelectedTool(tool));
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    act(() => renderer.unmount());
+    await mount();
+    expect(context.mimoImageInput).toBe(false);
+    expect(context.mimo1mMode).toBe(true);
+    expect(context.zcodeImageInput).toBe(true);
+    expect(context.claude1mMode).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('uses both saved values for explicit flips and the normal apply button', async () => {
+    vi.useFakeTimers();
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    await act(async () => context.setMimoCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: false })
+    );
+    await act(async () => context.setMimoCapability('oneMContext', true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(storage.get(`echobird_${tool}_image_input`)).toBe('false');
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    expect(storage.has(`echobird_${other}_1m_mode`)).toBe(false);
+    act(() => {
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('locks both controls while pending and reports failure without launching', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setMimoCapability('oneMContext', true));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setMimoCapability('imageInput', false));
+    expect(context.mimoImageInput).toBe(true);
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ success: false, message: 'Fixture MiMo error' }));
+    expect(context.applyError).toBe('Fixture MiMo error');
+    expect(context.isLaunching).toBe(false);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it.each(['no-model', 'uninstalled'])('only saves preferences with %s', async (mode) => {
+    await mount();
+    if (mode === 'uninstalled') {
+      act(() => context.handleSelectModel(tool, 'fixture'));
+      act(() =>
+        useToolsStore
+          .getState()
+          .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }])
+      );
+    }
+    await act(async () => context.setMimoCapability('oneMContext', true));
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    await act(async () => context.setSelectedTool('unrelated'));
+    act(() => context.setMimoCapability('oneMContext', false));
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+  });
+});
+
+describe.each(['minimaxcode', 'minimaxdesktop'] as const)('%s model capabilities', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  const other = tool === 'minimaxcode' ? 'minimaxdesktop' : 'minimaxcode';
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      [tool, other].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      }))
+    );
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'any/model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+  };
+  it('shares saved capabilities across both entries without applying during navigation', async () => {
+    storage.set('echobird_minimax_image_input', 'false');
+    storage.set('echobird_minimax_1m_mode', 'true');
+    await mount();
+    expect(context.minimaxImageInput).toBe(false);
+    expect(context.minimax1mMode).toBe(true);
+    await act(async () => context.setSelectedTool(other));
+    expect(context.minimaxImageInput).toBe(false);
+    expect(context.minimax1mMode).toBe(true);
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    act(() => renderer.unmount());
+    await mount();
+    expect(context.minimax1mMode).toBe(true);
+    expect(context.mimo1mMode).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+    expect(api.startMinimaxLogin).not.toHaveBeenCalled();
+    expect(api.refreshMinimaxAccount).not.toHaveBeenCalled();
+  });
+  it('passes both flags on flips and normal apply, including through the other entry', async () => {
+    vi.useFakeTimers();
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    await act(async () => context.setMinimaxCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: false })
+    );
+    await act(async () => context.setMinimaxCapability('oneMContext', true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(storage.get('echobird_minimax_image_input')).toBe('false');
+    expect(storage.get('echobird_minimax_1m_mode')).toBe('true');
+    await act(async () => context.setSelectedTool(other));
+    expect(context.minimax1mMode).toBe(true);
+    act(() => {
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      other,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('prevents duplicate flips while pending and exposes an apply failure', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setMinimaxCapability('oneMContext', true));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setMinimaxCapability('imageInput', false));
+    expect(context.minimaxImageInput).toBe(true);
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ success: false, message: 'Fixture MiniMax error' }));
+    expect(context.applyError).toBe('Fixture MiniMax error');
+    expect(context.isLaunching).toBe(false);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it.each(['no-model', 'uninstalled', 'account'])(
+    'only stores preferences for %s',
+    async (mode) => {
+      await mount();
+      if (mode === 'uninstalled') {
+        act(() => context.handleSelectModel(tool, 'fixture'));
+        act(() =>
+          useToolsStore
+            .getState()
+            .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }])
+        );
+      }
+      if (mode === 'account') {
+        await act(async () => context.minimaxAccounts.select('fixture-account'));
+      }
+      await act(async () => context.setMinimaxCapability('oneMContext', true));
+      expect(storage.get('echobird_minimax_1m_mode')).toBe('true');
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      expect(api.startTool).not.toHaveBeenCalled();
+      await act(async () => context.setSelectedTool('unrelated'));
+      act(() => context.setMinimaxCapability('oneMContext', false));
+      expect(storage.get('echobird_minimax_1m_mode')).toBe('true');
+    }
+  );
+});
+
+describe.each(['qoder', 'qodercn'] as const)('%s model capabilities', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  const other = tool === 'qoder' ? 'qodercn' : 'qoder';
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      [tool, other].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      }))
+    );
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'any/model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+  };
+  it('restores isolated values without applying on navigation or remount', async () => {
+    storage.set(`echobird_${tool}_image_input`, 'false');
+    storage.set(`echobird_${tool}_1m_mode`, 'true');
+    await mount();
+    expect(context.qoderImageInput).toBe(false);
+    expect(context.qoder1mMode).toBe(true);
+    await act(async () => context.setSelectedTool(other));
+    expect(context.qoderImageInput).toBe(true);
+    expect(context.qoder1mMode).toBe(false);
+    await act(async () => context.setSelectedTool(tool));
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    act(() => renderer.unmount());
+    await mount();
+    expect(context.qoderImageInput).toBe(false);
+    expect(context.qoder1mMode).toBe(true);
+    expect(context.zcodeImageInput).toBe(true);
+    expect(context.claude1mMode).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('uses both saved values for explicit flips and the normal apply button', async () => {
+    vi.useFakeTimers();
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    await act(async () => context.setQoderCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: false })
+    );
+    await act(async () => context.setQoderCapability('oneMContext', true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(storage.get(`echobird_${tool}_image_input`)).toBe('false');
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    expect(storage.has(`echobird_${other}_1m_mode`)).toBe(false);
+    act(() => {
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(api.startTool).toHaveBeenCalledTimes(1);
+  });
+  it('locks both controls while pending and reports failure without launching', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setQoderCapability('oneMContext', true));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setQoderCapability('imageInput', false));
+    expect(context.qoderImageInput).toBe(true);
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ success: false, message: 'Fixture Qoder error' }));
+    expect(context.applyError).toBe('Fixture Qoder error');
+    expect(context.isLaunching).toBe(false);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it.each(['no-model', 'uninstalled', 'account'])(
+    'only saves preferences with %s',
+    async (mode) => {
+      await mount();
+      if (mode === 'uninstalled') {
+        act(() => context.handleSelectModel(tool, 'fixture'));
+        act(() =>
+          useToolsStore
+            .getState()
+            .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }])
+        );
+      }
+      if (mode === 'account') {
+        act(() => context.handleSelectModel(tool, 'fixture'));
+        await act(async () => context.qoderAccounts.select('fixture-account'));
+        expect(context.qoderAccounts.selectedId).toBe('fixture-account');
+        expect(context.toolModelConfig[tool]).toBeNull();
+      }
+      await act(async () => context.setQoderCapability('oneMContext', true));
+      expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      expect(api.startTool).not.toHaveBeenCalled();
+      await act(async () => context.setSelectedTool('unrelated'));
+      act(() => context.setQoderCapability('oneMContext', false));
+      expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    }
+  );
+});
+
+describe.each(['dsh'] as const)('%s model capabilities', (tool) => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  const other = 'qoder';
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools(
+      [tool, other].map((id) => ({
+        id,
+        name: id,
+        category: 'Desktop',
+        installed: true,
+        apiProtocol: ['openai'],
+      }))
+    );
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'any/model',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool(tool));
+  };
+  it('restores isolated values without applying on navigation or remount', async () => {
+    storage.set(`echobird_${tool}_image_input`, 'false');
+    storage.set(`echobird_${tool}_1m_mode`, 'true');
+    await mount();
+    expect(context.dshImageInput).toBe(false);
+    expect(context.dsh1mMode).toBe(true);
+    await act(async () => context.setSelectedTool(other));
+    expect(context.qoderImageInput).toBe(true);
+    expect(context.qoder1mMode).toBe(false);
+    await act(async () => context.setSelectedTool(tool));
+    act(() => useNavigationStore.getState().setActivePage('models'));
+    act(() => useNavigationStore.getState().setActivePage('apps'));
+    act(() => renderer.unmount());
+    await mount();
+    expect(context.dshImageInput).toBe(false);
+    expect(context.dsh1mMode).toBe(true);
+    expect(context.zcodeImageInput).toBe(true);
+    expect(context.claude1mMode).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('uses both saved values for explicit flips and the normal apply button', async () => {
+    vi.useFakeTimers();
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    await act(async () => context.setDshCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: false })
+    );
+    await act(async () => context.setDshCapability('oneMContext', true));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(storage.get(`echobird_${tool}_image_input`)).toBe('false');
+    expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    expect(storage.has(`echobird_${other}_1m_mode`)).toBe(false);
+    act(() => {
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      tool,
+      expect.objectContaining({ imageInput: false, oneMContext: true })
+    );
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it('locks both controls while pending and reports failure without launching', async () => {
+    await mount();
+    act(() => context.handleSelectModel(tool, 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setDshCapability('oneMContext', true));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setDshCapability('imageInput', false));
+    expect(context.dshImageInput).toBe(true);
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    await act(async () => finish({ success: false, message: 'Fixture Harness error' }));
+    expect(context.applyError).toBe('Fixture Harness error');
+    expect(context.isLaunching).toBe(false);
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+  it.each(['no-model', 'uninstalled', 'account'])(
+    'only saves preferences with %s',
+    async (mode) => {
+      await mount();
+      if (mode === 'uninstalled') {
+        act(() => context.handleSelectModel(tool, 'fixture'));
+        act(() =>
+          useToolsStore
+            .getState()
+            .setDetectedTools([{ id: tool, name: tool, category: 'Desktop', installed: false }])
+        );
+      }
+      if (mode === 'account') {
+        act(() => context.handleSelectModel(tool, 'fixture'));
+        await act(async () => context.deepSeekAccounts.select('fixture-account'));
+        expect(context.toolModelConfig[tool]).toBeNull();
+        expect(context.deepSeekAccounts.selectedId).toBe('fixture-account');
+      }
+      await act(async () => context.setDshCapability('oneMContext', true));
+      expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+      expect(api.applyModelToTool).not.toHaveBeenCalled();
+      expect(api.startTool).not.toHaveBeenCalled();
+      await act(async () => context.setSelectedTool('unrelated'));
+      act(() => context.setDshCapability('oneMContext', false));
+      expect(storage.get(`echobird_${tool}_1m_mode`)).toBe('true');
+    }
+  );
 });

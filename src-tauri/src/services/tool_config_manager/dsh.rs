@@ -14,6 +14,26 @@ pub(crate) static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 // Desktop settings live in the profile patch; credentials use the shared v1 store.
 const DSH_API_KEY_ENV: &str = "ECHOBIRD_API_KEY";
+const DSH_PROVIDER: &str = "echobird";
+const ONE_M_CONTEXT: u64 = 1_048_576;
+
+fn check_owned_route(settings: &Value) -> Result<(), String> {
+    if let Some(route) = settings
+        .get("llm-pi-ai")
+        .and_then(|v| v.get("providers"))
+        .and_then(|v| v.get(DSH_PROVIDER))
+    {
+        if route["displayName"].as_str() != Some("EchoBird")
+            || route["apiKeyEnv"].as_str() != Some(DSH_API_KEY_ENV)
+        {
+            return Err(
+                "DeepSeek Harness provider ID 'echobird' is already in use by another provider."
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
 
 // serde_yaml_ng drops tags in YAML's standard namespace, including DSH's !!js.
 // Rewrite tag tokens only; quoted strings and block scalars must stay literal.
@@ -304,6 +324,7 @@ fn apply_at(home: &Path, model_info: &ModelInfo) -> Result<(), String> {
     let display_name = model_info.name.as_deref().unwrap_or(model_id);
 
     let mut settings = settings_at(home)?;
+    check_owned_route(&settings)?;
     let mut creds = credentials_at(home)?;
     {
         let settings_map = yaml_as_map_mut(&mut settings);
@@ -311,24 +332,82 @@ fn apply_at(home: &Path, model_info: &ModelInfo) -> Result<(), String> {
             let llm = yaml_child_map(settings_map, "llm-pi-ai");
             let providers = yaml_child_map(llm, "providers");
 
-            let mut route = serde_yaml_ng::Mapping::new();
+            let mut route = providers
+                .get(yaml_str(DSH_PROVIDER))
+                .filter(|route| {
+                    route["api"].as_str() == Some(api)
+                        && route["baseURL"]
+                            .as_str()
+                            .map(|url| url.trim_end_matches('/'))
+                            == Some(endpoint.as_str())
+                })
+                .and_then(Value::as_mapping)
+                .cloned()
+                .unwrap_or_default();
             route.insert(yaml_str("displayName"), yaml_str("EchoBird"));
             route.insert(yaml_str("apiKeyEnv"), yaml_str(DSH_API_KEY_ENV));
             route.insert(yaml_str("api"), yaml_str(api));
             route.insert(yaml_str("baseURL"), yaml_str(&endpoint));
-            let mut model = serde_yaml_ng::Mapping::new();
+            let mut models = route
+                .get(yaml_str("models"))
+                .and_then(Value::as_sequence)
+                .cloned()
+                .unwrap_or_default();
+            let index = models
+                .iter()
+                .position(|entry| entry["id"].as_str() == Some(model_id));
+            let mut model = index
+                .and_then(|index| models[index].as_mapping())
+                .cloned()
+                .unwrap_or_default();
             model.insert(yaml_str("id"), yaml_str(model_id));
             model.insert(yaml_str("name"), yaml_str(display_name));
-            route.insert(
-                yaml_str("models"),
-                serde_yaml_ng::Value::Sequence(vec![serde_yaml_ng::Value::Mapping(model)]),
-            );
-            providers.insert(yaml_str("echobird"), serde_yaml_ng::Value::Mapping(route));
+            let mut efforts = model
+                .get(yaml_str("reasoningEfforts"))
+                .and_then(Value::as_mapping)
+                .cloned()
+                .unwrap_or_default();
+            efforts.entry(yaml_str("off")).or_insert(Value::Null);
+            for level in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+                efforts
+                    .entry(yaml_str(level))
+                    .or_insert_with(|| yaml_str(level));
+            }
+            model.insert(yaml_str("reasoningEfforts"), Value::Mapping(efforts));
+            if let Some(image) = model_info.image_input {
+                let mut input = vec![yaml_str("text")];
+                if image {
+                    input.push(yaml_str("image"));
+                }
+                model.insert(yaml_str("input"), Value::Sequence(input));
+            }
+            match model_info.one_m_context {
+                Some(true) => {
+                    model.insert(
+                        yaml_str("contextWindow"),
+                        Value::Number(ONE_M_CONTEXT.into()),
+                    );
+                }
+                Some(false)
+                    if model.get(yaml_str("contextWindow")).and_then(Value::as_u64)
+                        == Some(ONE_M_CONTEXT) =>
+                {
+                    model.remove(yaml_str("contextWindow"));
+                }
+                _ => {}
+            }
+            if let Some(index) = index {
+                models[index] = Value::Mapping(model);
+            } else {
+                models.push(Value::Mapping(model));
+            }
+            route.insert(yaml_str("models"), Value::Sequence(models));
+            providers.insert(yaml_str(DSH_PROVIDER), serde_yaml_ng::Value::Mapping(route));
         }
 
         // Active selector — new sessions default to this route/model.
         let mut selector = serde_yaml_ng::Mapping::new();
-        selector.insert(yaml_str("provider"), yaml_str("echobird"));
+        selector.insert(yaml_str("provider"), yaml_str(DSH_PROVIDER));
         selector.insert(yaml_str("model"), yaml_str(model_id));
         settings_map.insert(
             yaml_str("agent-default-model"),
@@ -372,12 +451,13 @@ fn read_at(home: &Path) -> Option<ModelInfo> {
         .and_then(|v| v.as_str())
         .map(String::from);
     // Display name: read the models list for the entry matching `model_id`.
-    let name = yaml_get(route, "models")
+    let entry = yaml_get(route, "models")
         .and_then(|m| m.as_sequence())
         .and_then(|seq| {
             seq.iter()
                 .find(|e| yaml_get(e, "id").and_then(|v| v.as_str()) == Some(model_id))
-        })
+        });
+    let name = entry
         .and_then(|e| yaml_get(e, "name").and_then(|v| v.as_str()))
         .map(String::from)
         .unwrap_or_else(|| model_id.to_string());
@@ -398,8 +478,14 @@ fn read_at(home: &Path) -> Option<ModelInfo> {
         display_model: None,
         relay_mode: None,
         web_search: None,
-        image_input: None,
-        one_m_context: None,
+        image_input: entry
+            .and_then(|e| yaml_get(e, "input"))
+            .and_then(Value::as_sequence)
+            .map(|inputs| inputs.contains(&yaml_str("image"))),
+        one_m_context: entry
+            .and_then(|e| yaml_get(e, "contextWindow"))
+            .and_then(Value::as_u64)
+            .map(|context| context == ONE_M_CONTEXT),
     })
 }
 
@@ -416,20 +502,22 @@ pub(super) fn restore_dsh_to_official() -> ApplyResult {
     }
 }
 
-fn remove_route(settings: &mut Value) {
+fn remove_route(settings: &mut Value) -> Result<(), String> {
+    check_owned_route(settings)?;
     if let Some(providers) = settings
         .get_mut("llm-pi-ai")
         .and_then(|v| v.get_mut("providers"))
         .and_then(Value::as_mapping_mut)
     {
-        providers.remove(yaml_str("echobird"));
+        providers.remove(yaml_str(DSH_PROVIDER));
     }
+    Ok(())
 }
 
 fn restore_at(home: &Path) -> Result<(), String> {
     let mut settings = settings_at(home)?;
     let mut creds = credentials_at(home)?;
-    remove_route(&mut settings);
+    remove_route(&mut settings)?;
     if settings["agent-default-model"]["provider"].as_str() == Some("echobird") {
         settings
             .as_mapping_mut()
@@ -448,7 +536,7 @@ fn restore_at(home: &Path) -> Result<(), String> {
 pub(crate) fn apply_account_at(home: &Path, token: &str, device: &str) -> Result<(), String> {
     let mut settings = settings_at(home)?;
     let mut creds = credentials_at(home)?;
-    remove_route(&mut settings);
+    remove_route(&mut settings)?;
     // Keep a previously selected official account model; otherwise use the shipped default.
     let model = if settings["agent-default-model"]["provider"].as_str() == Some("deepseek-account")
     {
@@ -509,6 +597,80 @@ mod tests {
     }
     fn model() -> ModelInfo {
         serde_json::from_value(json!({"name":"Test", "model":"test-model", "apiKey":"test-key", "baseUrl":"https://example.test/v1", "protocol":"openai"})).unwrap()
+    }
+
+    #[test]
+    fn model_capabilities_preserve_limits_and_reset_only_one_m() {
+        let dir = fixture();
+        apply_at(&dir, &model()).unwrap();
+        let mut settings = settings_at(&dir).unwrap();
+        let route = &mut settings["llm-pi-ai"]["providers"]["echobird"];
+        route["models"][0]["maxTokens"] = serde_yaml_ng::to_value(64000).unwrap();
+        route["models"][0]["custom"] = serde_yaml_ng::to_value(true).unwrap();
+        route["models"]
+            .as_sequence_mut()
+            .unwrap()
+            .push(serde_yaml_ng::from_str("id: manual\nname: Keep").unwrap());
+        write_settings_at(&dir, &settings).unwrap();
+        let mut info = model();
+        info.image_input = Some(true);
+        info.one_m_context = Some(true);
+        apply_at(&dir, &info).unwrap();
+        let saved = settings_at(&dir).unwrap();
+        let route = &saved["llm-pi-ai"]["providers"]["echobird"];
+        let entry = &route["models"][0];
+        assert_eq!(entry["contextWindow"].as_u64(), Some(1_048_576));
+        assert_eq!(entry["maxTokens"].as_u64(), Some(64000));
+        assert_eq!(entry["custom"].as_bool(), Some(true));
+        assert_eq!(
+            entry["input"],
+            serde_yaml_ng::to_value(["text", "image"]).unwrap()
+        );
+        assert_eq!(entry["reasoningEfforts"], serde_yaml_ng::from_str::<Value>("off: null\nminimal: minimal\nlow: low\nmedium: medium\nhigh: high\nxhigh: xhigh\nmax: max").unwrap());
+        assert_eq!(route["models"][1]["id"].as_str(), Some("manual"));
+        let read = read_at(&dir).unwrap();
+        assert_eq!(read.image_input, Some(true));
+        assert_eq!(read.one_m_context, Some(true));
+        info.image_input = Some(false);
+        info.one_m_context = Some(false);
+        apply_at(&dir, &info).unwrap();
+        let saved = settings_at(&dir).unwrap();
+        let entry = &saved["llm-pi-ai"]["providers"]["echobird"]["models"][0];
+        assert!(entry.get("contextWindow").is_none());
+        assert_eq!(entry["maxTokens"].as_u64(), Some(64000));
+        assert_eq!(entry["input"], serde_yaml_ng::to_value(["text"]).unwrap());
+        info.base_url = Some("https://other.test/v1".into());
+        info.one_m_context = Some(true);
+        apply_at(&dir, &info).unwrap();
+        let saved = settings_at(&dir).unwrap();
+        let entry = &saved["llm-pi-ai"]["providers"]["echobird"]["models"][0];
+        assert_eq!(entry["contextWindow"].as_u64(), Some(1_048_576));
+        assert!(entry.get("maxTokens").is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn foreign_provider_id_is_never_overwritten_or_removed() {
+        let dir = fixture();
+        let mut settings = settings_at(&dir).unwrap();
+        settings["llm-pi-ai"]["providers"]["echobird"] = serde_yaml_ng::from_str(
+            "displayName: Personal\napiKeyEnv: PERSONAL\nbaseURL: https://personal.test/v1",
+        )
+        .unwrap();
+        write_settings_at(&dir, &settings).unwrap();
+        let before = fs::read(profile_at(&dir)).unwrap();
+        let credentials = fs::read(dir.join(".credentials.yaml")).unwrap();
+        assert!(apply_at(&dir, &model())
+            .unwrap_err()
+            .contains("already in use"));
+        assert!(restore_at(&dir).is_err());
+        assert!(apply_account_at(&dir, "test-token", "device").is_err());
+        assert_eq!(fs::read(profile_at(&dir)).unwrap(), before);
+        assert_eq!(
+            fs::read(dir.join(".credentials.yaml")).unwrap(),
+            credentials
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -674,7 +836,7 @@ mod tests {
     fn empty_patch_names_do_not_hide_existing_model_configuration() {
         for name in ["''", "null"] {
             let dir = fixture();
-            fs::write(profile_at(&dir), format!("- id: llm-pi-ai\n  name: {name}\n  config:\n    providers:\n      echobird: {{baseURL: 'https://example.com/v1'}}\n- id: agent-default-model\n  name: {name}\n  config: {{provider: echobird, model: existing}}\n")).unwrap();
+            fs::write(profile_at(&dir), format!("- id: llm-pi-ai\n  name: {name}\n  config:\n    providers:\n      echobird: {{displayName: EchoBird, apiKeyEnv: ECHOBIRD_API_KEY, baseURL: 'https://example.com/v1'}}\n- id: agent-default-model\n  name: {name}\n  config: {{provider: echobird, model: existing}}\n")).unwrap();
             assert_eq!(read_at(&dir).unwrap().model.as_deref(), Some("existing"));
             let original = profile(&dir).unwrap();
             apply_at(&dir, &model()).unwrap();

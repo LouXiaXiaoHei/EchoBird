@@ -403,6 +403,9 @@ const zhHans: Partial<Translations> = {
     '部分第三方模型 web_search 需要二次开通或另外计费（仔细阅读你购买模型的官方文档，确认是否支持及如何开通 web_search 能力）',
   'agent.claude1mHint':
     '开启后向模型 id 追加 [1m] 以使用 1M 上下文。请仔细阅读你购买模型的官方文档，确认是否支持「模型id+[1m]」约定。',
+  'agent.imageInputHint': '请仔细阅读你购买模型的官方文档，确认是否具备 image 或 vision 能力。',
+  'agent.oneMContextHint':
+    '开启后使用 1M 上下文。请仔细阅读你购买模型的官方文档，确认是否支持 1M 上下文。',
   'agent.installViaMother': 'AI 自动安装',
   'tool.models': '模型',
   'tool.app': '应用',

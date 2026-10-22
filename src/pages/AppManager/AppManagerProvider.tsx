@@ -239,6 +239,44 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   const [zcodeImageInput, setZCodeImageInput] = useState<boolean>(() =>
     readBool('echobird_zcode_image_input', true)
   );
+  const [workBuddyCapabilities, setWorkBuddyCapabilities] = useState(() => ({
+    workbuddy: {
+      imageInput: readBool('echobird_workbuddy_image_input', true),
+      oneMContext: readBool('echobird_workbuddy_1m_mode', false),
+    },
+    workbuddyai: {
+      imageInput: readBool('echobird_workbuddyai_image_input', true),
+      oneMContext: readBool('echobird_workbuddyai_1m_mode', false),
+    },
+  }));
+  const [mimoCapabilities, setMimoCapabilities] = useState(() => ({
+    mimocode: {
+      imageInput: readBool('echobird_mimocode_image_input', true),
+      oneMContext: readBool('echobird_mimocode_1m_mode', false),
+    },
+    mimodesktop: {
+      imageInput: readBool('echobird_mimodesktop_image_input', true),
+      oneMContext: readBool('echobird_mimodesktop_1m_mode', false),
+    },
+  }));
+  const [minimaxCapabilities, setMinimaxCapabilities] = useState(() => ({
+    imageInput: readBool('echobird_minimax_image_input', true),
+    oneMContext: readBool('echobird_minimax_1m_mode', false),
+  }));
+  const [qoderCapabilities, setQoderCapabilities] = useState(() => ({
+    qoder: {
+      imageInput: readBool('echobird_qoder_image_input', true),
+      oneMContext: readBool('echobird_qoder_1m_mode', false),
+    },
+    qodercn: {
+      imageInput: readBool('echobird_qodercn_image_input', true),
+      oneMContext: readBool('echobird_qodercn_1m_mode', false),
+    },
+  }));
+  const [dshCapabilities, setDshCapabilities] = useState(() => ({
+    imageInput: readBool('echobird_dsh_image_input', true),
+    oneMContext: readBool('echobird_dsh_1m_mode', false),
+  }));
   // Claude Code 1M-context toggle. When on,
   // apply_claudecode appends `[1m]` to the model id (MODEL / OPUS / SONNET / FABLE env
   // vars only — HAIKU + SUBAGENT stay bare) so Claude Code budgets the 1M
@@ -281,6 +319,9 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
 
   const workBuddyEdition =
     selectedTool === 'workbuddy' || selectedTool === 'workbuddyai' ? selectedTool : null;
+  const mimoTool =
+    selectedTool === 'mimocode' || selectedTool === 'mimodesktop' ? selectedTool : null;
+  const mimoValues = mimoCapabilities[mimoTool ?? 'mimodesktop'];
   const clearWorkBuddyModel = useCallback((edition: api.WorkBuddyEdition) => {
     setToolModelConfig((prev) => ({ ...prev, [edition]: null }));
   }, []);
@@ -711,6 +752,36 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
               imageInput: imageInputOverride ?? zcodeImageInput,
             }
           : {}),
+        ...(toolId === 'workbuddy' || toolId === 'workbuddyai'
+          ? {
+              imageInput: imageInputOverride ?? workBuddyCapabilities[toolId].imageInput,
+              oneMContext: oneMOverride ?? workBuddyCapabilities[toolId].oneMContext,
+            }
+          : {}),
+        ...(toolId === 'mimocode' || toolId === 'mimodesktop'
+          ? {
+              imageInput: imageInputOverride ?? mimoCapabilities[toolId].imageInput,
+              oneMContext: oneMOverride ?? mimoCapabilities[toolId].oneMContext,
+            }
+          : {}),
+        ...(toolId === 'minimaxcode' || toolId === 'minimaxdesktop'
+          ? {
+              imageInput: imageInputOverride ?? minimaxCapabilities.imageInput,
+              oneMContext: oneMOverride ?? minimaxCapabilities.oneMContext,
+            }
+          : {}),
+        ...(toolId === 'qoder' || toolId === 'qodercn'
+          ? {
+              imageInput: imageInputOverride ?? qoderCapabilities[toolId].imageInput,
+              oneMContext: oneMOverride ?? qoderCapabilities[toolId].oneMContext,
+            }
+          : {}),
+        ...(toolId === 'dsh'
+          ? {
+              imageInput: imageInputOverride ?? dshCapabilities.imageInput,
+              oneMContext: oneMOverride ?? dshCapabilities.oneMContext,
+            }
+          : {}),
       });
 
       if (result?.success) {
@@ -799,6 +870,100 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
       capability === 'webSearch' ? value : zcodeWebSearch,
       capability === 'imageInput' ? value : zcodeImageInput
     )
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setWorkBuddyCapability = (capability: 'imageInput' | 'oneMContext', value: boolean) => {
+    if (isLaunching || !workBuddyEdition) return;
+    const tool = workBuddyEdition;
+    const values = { ...workBuddyCapabilities[tool], [capability]: value };
+    setWorkBuddyCapabilities((prev) => ({ ...prev, [tool]: values }));
+    writeBool(`echobird_${tool}_${capability === 'imageInput' ? 'image_input' : '1m_mode'}`, value);
+    if (!selectedToolData?.installed || workBuddyAccounts.selectedId) return;
+    const modelId = toolModelConfig[tool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(tool, modelId, values.oneMContext, undefined, values.imageInput)
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setMimoCapability = (capability: 'imageInput' | 'oneMContext', value: boolean) => {
+    if (isLaunching || !mimoTool) return;
+    const tool = mimoTool;
+    const values = { ...mimoCapabilities[tool], [capability]: value };
+    setMimoCapabilities((prev) => ({ ...prev, [tool]: values }));
+    writeBool(`echobird_${tool}_${capability === 'imageInput' ? 'image_input' : '1m_mode'}`, value);
+    if (!selectedToolData?.installed) return;
+    const modelId = toolModelConfig[tool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(tool, modelId, values.oneMContext, undefined, values.imageInput)
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setMinimaxCapability = (capability: 'imageInput' | 'oneMContext', value: boolean) => {
+    if (isLaunching || (selectedTool !== 'minimaxcode' && selectedTool !== 'minimaxdesktop'))
+      return;
+    const values = { ...minimaxCapabilities, [capability]: value };
+    setMinimaxCapabilities(values);
+    writeBool(`echobird_minimax_${capability === 'imageInput' ? 'image_input' : '1m_mode'}`, value);
+    if (!selectedToolData?.installed || minimaxAccounts.selectedId) return;
+    const modelId = toolModelConfig[selectedTool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(selectedTool, modelId, values.oneMContext, undefined, values.imageInput)
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setQoderCapability = (capability: 'imageInput' | 'oneMContext', value: boolean) => {
+    if (isLaunching || (selectedTool !== 'qoder' && selectedTool !== 'qodercn')) return;
+    const tool = selectedTool;
+    const values = { ...qoderCapabilities[tool], [capability]: value };
+    setQoderCapabilities((prev) => ({ ...prev, [tool]: values }));
+    writeBool(`echobird_${tool}_${capability === 'imageInput' ? 'image_input' : '1m_mode'}`, value);
+    if (!selectedToolData?.installed || qoderAccounts.selectedId) return;
+    const modelId = toolModelConfig[tool];
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(tool, modelId, values.oneMContext, undefined, values.imageInput)
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setDshCapability = (capability: 'imageInput' | 'oneMContext', value: boolean) => {
+    if (isLaunching || selectedTool !== 'dsh') return;
+    const values = { ...dshCapabilities, [capability]: value };
+    setDshCapabilities(values);
+    writeBool(`echobird_dsh_${capability === 'imageInput' ? 'image_input' : '1m_mode'}`, value);
+    if (!selectedToolData?.installed || deepSeekAccounts.selectedId) return;
+    const modelId = toolModelConfig.dsh;
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig('dsh', modelId, values.oneMContext, undefined, values.imageInput)
       .then((result) => {
         if (result !== true)
           setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
@@ -1626,6 +1791,22 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         zcodeWebSearch,
         zcodeImageInput,
         setZCodeCapability,
+        workBuddyImageInput: workBuddyCapabilities[workBuddyEdition ?? 'workbuddy'].imageInput,
+        setWorkBuddyImageInput: (value) => setWorkBuddyCapability('imageInput', value),
+        workBuddy1mMode: workBuddyCapabilities[workBuddyEdition ?? 'workbuddy'].oneMContext,
+        setWorkBuddy1mMode: (value) => setWorkBuddyCapability('oneMContext', value),
+        mimoImageInput: mimoValues.imageInput,
+        mimo1mMode: mimoValues.oneMContext,
+        setMimoCapability,
+        minimaxImageInput: minimaxCapabilities.imageInput,
+        minimax1mMode: minimaxCapabilities.oneMContext,
+        setMinimaxCapability,
+        qoderImageInput: qoderCapabilities[qoderEdition].imageInput,
+        qoder1mMode: qoderCapabilities[qoderEdition].oneMContext,
+        setQoderCapability,
+        dshImageInput: dshCapabilities.imageInput,
+        dsh1mMode: dshCapabilities.oneMContext,
+        setDshCapability,
         setCodexWebSearch,
         claudeDesktopWebSearch,
         claudeCodeWebSearch,

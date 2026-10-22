@@ -1,7 +1,9 @@
 //! Xiaomi MiMo Desktop beta: shared providers, separate Electron preferences.
 //! Verified against desktop 26.909.91205; restart to reload the renderer/engine.
 
-use super::{model_input_modalities_for, write_json_file, ApplyResult, ModelInfo};
+use super::{
+    mimo_capabilities, model_input_modalities_for, write_json_file, ApplyResult, ModelInfo,
+};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
@@ -75,6 +77,16 @@ fn apply_at(dir: &Path, prefs_path: &Path, info: &ModelInfo) -> Result<(), Strin
     if config.get("$schema").is_none() {
         config["$schema"] = json!("https://mimo.xiaomi.com/mimocode/config.json");
     }
+    let previous = config["provider"][PROVIDER]["models"]
+        .get(model)
+        .filter(|_| mimo_capabilities::same_endpoint(&config["provider"][PROVIDER], info))
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "modalities": {"input": model_input_modalities_for(model), "output": ["text"]}
+            })
+        });
+    let model_entry = mimo_capabilities::model_entry(info, &previous);
     config["provider"][PROVIDER] = json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": "EchoBird Desktop",
@@ -83,10 +95,7 @@ fn apply_at(dir: &Path, prefs_path: &Path, info: &ModelInfo) -> Result<(), Strin
             "apiKey": info.api_key.as_deref().unwrap_or("")
         },
         "models": {
-            model: {
-                "name": info.name.as_deref().unwrap_or(model),
-                "modalities": {"input": model_input_modalities_for(model), "output": ["text"]}
-            }
+            model: model_entry
         }
     });
     // Do not change model/small_model here: those also control the MiMo Code CLI.
@@ -129,13 +138,15 @@ fn read_at(dir: &Path, prefs_path: &Path) -> Option<ModelInfo> {
         }
     }
     let entry = provider.get("models")?.get(model)?;
-    serde_json::from_value(json!({
+    let mut info = serde_json::from_value(json!({
         "model": model,
         "name": entry.get("name").and_then(Value::as_str).unwrap_or(model),
         "baseUrl": provider.pointer("/options/baseURL"),
         "apiKey": provider.pointer("/options/apiKey"),
         "protocol": if provider.get("npm").and_then(Value::as_str) == Some("@ai-sdk/anthropic") { "anthropic" } else { "openai" }
-    })).ok()
+    })).ok()?;
+    mimo_capabilities::read_capabilities(&mut info, entry);
+    Some(info)
 }
 
 pub(super) fn read() -> Option<ModelInfo> {
@@ -212,6 +223,48 @@ mod tests {
     }
     fn model(id: &str) -> ModelInfo {
         serde_json::from_value(json!({"model": id, "name": "Test model", "baseUrl": "http://localhost:1234/v1/", "apiKey": "test-only"})).unwrap()
+    }
+
+    #[test]
+    fn image_and_one_m_switches_preserve_output_and_other_modalities() {
+        let f = Fixture::new();
+        let path = f.0.join("mimocode.jsonc");
+        let manual = json!({"limit":{"context":1000000,"output":128000},"modalities":{"input":["text","image"],"output":["text"]}});
+        write_json_file(&path, &json!({"model":"echobird/cli","provider":{
+            "manual":{"models":{"manual":manual}},
+            PROVIDER:{"options":{"baseURL":"http://localhost:1234/v1"},"models":{"any/model":{"limit":{"context":256000,"output":64000},"modalities":{"input":["text","audio"],"output":["text"]},"custom":"keep"}}}
+        }})).unwrap();
+        for image in [true, false] {
+            let info = ModelInfo {
+                image_input: Some(image),
+                one_m_context: Some(true),
+                ..model("any/model")
+            };
+            apply_at(&f.0, &f.prefs(), &info).unwrap();
+            let actual = load_object(&path).unwrap();
+            let selected = &actual["provider"][PROVIDER]["models"]["any/model"];
+            assert_eq!(selected["limit"], json!({"context":1000000,"output":64000}));
+            assert_eq!(selected["custom"], "keep");
+            let inputs = selected["modalities"]["input"].as_array().unwrap();
+            assert_eq!(inputs.contains(&json!("image")), image);
+            assert!(inputs.contains(&json!("audio")));
+            assert_eq!(actual["model"], "echobird/cli");
+            assert_eq!(actual["provider"]["manual"]["models"]["manual"], manual);
+            let read = read_at(&f.0, &f.prefs()).unwrap();
+            assert_eq!(read.image_input, Some(image));
+            assert_eq!(read.one_m_context, Some(true));
+        }
+        let changed_upstream = ModelInfo {
+            base_url: Some("https://another.test/v1".into()),
+            image_input: Some(true),
+            ..model("any/model")
+        };
+        apply_at(&f.0, &f.prefs(), &changed_upstream).unwrap();
+        let actual = load_object(&path).unwrap();
+        assert!(actual["provider"][PROVIDER]["models"]["any/model"]
+            .get("limit")
+            .is_none());
+        assert_eq!(actual["provider"]["manual"]["models"]["manual"], manual);
     }
 
     #[test]

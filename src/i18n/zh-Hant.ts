@@ -440,6 +440,9 @@ const zhHant: Partial<Translations> = {
     '部分第三方模型 web_search 需要另行開通或計費（仔細閱讀你購買模型的官方文件，確認是否支援及如何開通 web_search 能力）',
   'agent.claude1mHint':
     '開啟後向模型 id 附加 [1m] 以使用 1M 上下文。請仔細閱讀你購買模型的官方文件，確認是否支援「模型id+[1m]」。',
+  'agent.imageInputHint': '請仔細閱讀你購買模型的官方文件，確認是否具備 image 或 vision 能力。',
+  'agent.oneMContextHint':
+    '開啟後使用 1M 上下文。請仔細閱讀你購買模型的官方文件，確認是否支援 1M 上下文。',
   'agent.installViaMother': 'AI 自動安裝',
   'tool.models': '模型',
   'tool.app': '應用',

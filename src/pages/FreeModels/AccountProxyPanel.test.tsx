@@ -96,16 +96,9 @@ it('updates zero, singular, plural and unknown account counts across all languag
         .findAllByType('span')
         .filter((span) => span.children.includes(translate('accountProxy.highRisk', language)));
       expect(labels).toHaveLength(
-        [
-          'antigravity',
-          'claudeCode',
-          'qoder',
-          'qoderCn',
-          'workBuddy',
-          'workBuddyAi',
-          'doubaowork',
-          'dola',
-        ].includes(provider.id)
+        ['antigravity', 'claudeCode', 'qoder', 'qoderCn', 'doubaowork', 'dola'].includes(
+          provider.id
+        )
           ? 1
           : 0
       );

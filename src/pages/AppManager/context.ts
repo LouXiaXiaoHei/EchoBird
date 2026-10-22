@@ -107,6 +107,22 @@ export interface AppManagerContextType {
   zcodeWebSearch: boolean;
   zcodeImageInput: boolean;
   setZCodeCapability: (capability: 'webSearch' | 'imageInput', value: boolean) => void;
+  workBuddyImageInput: boolean;
+  setWorkBuddyImageInput: (value: boolean) => void;
+  workBuddy1mMode: boolean;
+  setWorkBuddy1mMode: (value: boolean) => void;
+  mimoImageInput: boolean;
+  mimo1mMode: boolean;
+  setMimoCapability: (capability: 'imageInput' | 'oneMContext', value: boolean) => void;
+  minimaxImageInput: boolean;
+  minimax1mMode: boolean;
+  setMinimaxCapability: (capability: 'imageInput' | 'oneMContext', value: boolean) => void;
+  qoderImageInput: boolean;
+  qoder1mMode: boolean;
+  setQoderCapability: (capability: 'imageInput' | 'oneMContext', value: boolean) => void;
+  dshImageInput: boolean;
+  dsh1mMode: boolean;
+  setDshCapability: (capability: 'imageInput' | 'oneMContext', value: boolean) => void;
   /** Desktop profile prefer1m. */
   claudeDesktop1mMode: boolean;
   setClaudeDesktop1mMode: (v: boolean) => void;

@@ -715,7 +715,8 @@ describe('ZCode model capability controls', () => {
         expect(toggle?.includes('disabled=""')).toBe(pending);
       }
       expect(markup).not.toContain('role="tooltip"');
-      expect(markup).not.toContain('agent.codexWebSearchHint');
+      expect(markup).toContain('aria-label="agent.codexWebSearchHint"');
+      expect(markup).toContain('aria-label="agent.imageInputHint"');
       expect(markup).not.toContain('aria-label="1M"');
     }
   );
@@ -842,5 +843,207 @@ describe.each(['grokbot', 'cursor', 'manus', 'cue'] as const)('%s account-only p
     expect(markup).toContain('btn.launchApp');
     expect(markup.match(/<button[^>]*disabled=""/g)).toHaveLength(1);
     expect(markup).toContain('aria-label="btn.cancel"');
+  });
+});
+
+describe.each(['workbuddy', 'workbuddyai'])('%s image control', (client) => {
+  it.each([false, true])('reuses the image switch with pending=%s', async (pending) => {
+    const { AppManagerPanel } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    const context = {
+      selectedTool: client,
+      selectedToolData: { ...tool, id: client },
+      toolModelConfig: {},
+      userModels: models,
+      workBuddyImageInput: false,
+      workBuddy1mMode: true,
+      isLaunching: pending,
+      workBuddyAccounts: {
+        accounts: [],
+        selectedId: null,
+        refreshing: new Set(),
+        authorizationFailedIds: new Set(),
+      },
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    const toggle = markup.match(/<button[^>]*aria-label="image"[^>]*>/)?.[0];
+    expect(toggle).toContain('aria-checked="false"');
+    expect(toggle?.includes('disabled=""')).toBe(pending);
+    expect(markup).toContain('aria-label="agent.imageInputHint"');
+    expect(markup).toContain('aria-label="agent.oneMContextHint"');
+    expect(markup).toMatch(/aria-checked="true" aria-label="1M"/);
+    expect(markup).not.toContain('agent.codexWebSearchLabel');
+    expect(markup).not.toContain('role="tooltip"');
+  });
+});
+
+describe.each(['mimocode', 'mimodesktop'])('%s capability controls', (client) => {
+  it.each([false, true])('reuses image and 1M switches with pending=%s', async (pending) => {
+    const { AppManagerPanel } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    const context = {
+      selectedTool: client,
+      selectedToolData: { ...tool, id: client },
+      toolModelConfig: {},
+      userModels: models,
+      mimoImageInput: true,
+      mimo1mMode: true,
+      isLaunching: pending,
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    for (const label of ['image', '1M']) {
+      const toggle = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+      expect(toggle).toContain('aria-checked="true"');
+      expect(toggle?.includes('disabled=""')).toBe(pending);
+    }
+    expect(markup).not.toContain('agent.claude1mHint');
+    expect(markup).toContain('aria-label="agent.oneMContextHint"');
+    expect(markup).toContain('aria-label="agent.imageInputHint"');
+    expect(markup).not.toContain('agent.codexWebSearchLabel');
+    expect(markup).not.toContain('role="tooltip"');
+  });
+});
+
+describe.each(['minimaxcode', 'minimaxdesktop'])('%s capability controls', (client) => {
+  it.each([false, true])('reuses image and 1M switches with pending=%s', async (pending) => {
+    const { AppManagerPanel } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    const context = {
+      selectedTool: client,
+      selectedToolData: { ...tool, id: client },
+      toolModelConfig: {},
+      userModels: models,
+      minimaxImageInput: true,
+      minimax1mMode: true,
+      minimaxAccounts: {
+        accounts: [],
+        selectedId: null,
+        refreshing: new Set(),
+        authorizationFailedIds: new Set(),
+      },
+      isLaunching: pending,
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    for (const label of ['image', '1M']) {
+      const toggle = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+      expect(toggle).toContain('aria-checked="true"');
+      expect(toggle?.includes('disabled=""')).toBe(pending);
+    }
+    expect(markup).not.toContain('agent.claude1mHint');
+    expect(markup).toContain('aria-label="agent.oneMContextHint"');
+    expect(markup).toContain('aria-label="agent.imageInputHint"');
+    expect(markup).not.toContain('agent.codexWebSearchLabel');
+    expect(markup).not.toContain('role="tooltip"');
+  });
+});
+
+describe.each(['qoder', 'qodercn'])('%s capability controls', (client) => {
+  it.each([false, true])('reuses image and 1M switches with pending=%s', async (pending) => {
+    const { AppManagerPanel } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    const context = {
+      selectedTool: client,
+      selectedToolData: { ...tool, id: client },
+      toolModelConfig: {},
+      userModels: models,
+      qoderImageInput: true,
+      qoder1mMode: true,
+      qoderAccounts: {
+        accounts: [],
+        selectedId: null,
+        refreshing: new Set(),
+        authorizationFailedIds: new Set(),
+      },
+      isLaunching: pending,
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    for (const label of ['image', '1M']) {
+      const toggle = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+      expect(toggle).toContain('aria-checked="true"');
+      expect(toggle?.includes('disabled=""')).toBe(pending);
+    }
+    expect(markup).not.toContain('agent.claude1mHint');
+    expect(markup).toContain('aria-label="agent.oneMContextHint"');
+    expect(markup).toContain('aria-label="agent.imageInputHint"');
+    expect(markup).not.toContain('agent.codexWebSearchLabel');
+    expect(markup).not.toContain('role="tooltip"');
+  });
+});
+
+describe.each(['dsh'])('%s capability controls', (client) => {
+  it.each([false, true])('reuses image and 1M switches with pending=%s', async (pending) => {
+    const { AppManagerPanel } = await import('./AppManagerComponents');
+    const { ModelNexusContext } = await import('../ModelNexus/context');
+    const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+    const context = {
+      selectedTool: client,
+      selectedToolData: { ...tool, id: client },
+      toolModelConfig: {},
+      userModels: models,
+      dshImageInput: true,
+      dsh1mMode: true,
+      deepSeekAccounts: {
+        accounts: [],
+        selectedId: null,
+        refreshing: new Set(),
+        authorizationFailedIds: new Set(),
+      },
+      isLaunching: pending,
+    } as unknown as AppManagerContextType;
+    const markup = renderToStaticMarkup(
+      <ConfirmDialogProvider>
+        <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+          <AppManagerContext.Provider value={context}>
+            <AppManagerPanel />
+          </AppManagerContext.Provider>
+        </ModelNexusContext.Provider>
+      </ConfirmDialogProvider>
+    );
+    for (const label of ['image', '1M']) {
+      const toggle = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+      expect(toggle).toContain('aria-checked="true"');
+      expect(toggle?.includes('disabled=""')).toBe(pending);
+    }
+    expect(markup).not.toContain('agent.claude1mHint');
+    expect(markup).toContain('aria-label="agent.oneMContextHint"');
+    expect(markup).toContain('aria-label="agent.imageInputHint"');
+    expect(markup).not.toContain('agent.codexWebSearchLabel');
+    expect(markup).not.toContain('role="tooltip"');
   });
 });

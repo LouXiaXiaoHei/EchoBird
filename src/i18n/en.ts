@@ -438,6 +438,10 @@ const en: Translations = {
     'Some third-party models require web_search to be separately enabled or billed. (Carefully read the official documentation of the model you purchased to confirm whether web_search is supported and how to enable it.)',
   'agent.claude1mHint':
     'When on, appends [1m] to the model id to enable the 1M context window. Carefully read the official docs of the model you purchased to confirm whether it supports the "model id + [1m]" convention.',
+  'agent.imageInputHint':
+    'Carefully read the official documentation for the model you purchased to confirm whether it supports image or vision input.',
+  'agent.oneMContextHint':
+    'When enabled, uses a 1M context window. Carefully read the official documentation for the model you purchased to confirm whether it supports 1M context.',
   'agent.installViaMother': 'AI Auto-Install',
   // ToolCard labels
   'tool.models': 'Models',

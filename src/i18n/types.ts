@@ -371,6 +371,8 @@ export type TKey =
   | 'agent.codexWebSearchLabel'
   | 'agent.codexWebSearchHint'
   | 'agent.claude1mHint'
+  | 'agent.imageInputHint'
+  | 'agent.oneMContextHint'
   // Tool categories
   | 'toolCat.all'
   | 'toolCat.ide'

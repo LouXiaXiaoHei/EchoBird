@@ -166,11 +166,77 @@ fn apply_at(home: &Path, model: &ModelInfo) -> Result<(), String> {
     if config.get("custom_provider").is_none() {
         config["custom_provider"] = json!({});
     }
-    config["custom_provider"]["echobird"] = json!({
-        "kind":"custom", "name":"EchoBird", "enabled":true, "api":api,
-        "options":{"baseURL":base,"apiKey":model.api_key.as_deref().unwrap_or("")},
-        "models":{id:{"name":model.name.as_deref().unwrap_or(id)}}
-    });
+    let previous = &config["custom_provider"]["echobird"];
+    let same_endpoint = previous["api"] == api
+        && previous["options"]["baseURL"]
+            .as_str()
+            .is_some_and(|url| url.trim_end_matches('/') == base);
+    let mut provider = if same_endpoint {
+        previous.clone()
+    } else {
+        json!({})
+    };
+    let mut entry = provider["models"][id]
+        .as_object()
+        .map(|value| json!(value))
+        .unwrap_or(json!({}));
+    entry["name"] = json!(model.name.as_deref().unwrap_or(id));
+    entry["reasoning"] = json!(true);
+    let mut thinking = entry["thinking"].as_object().cloned().unwrap_or_default();
+    thinking.insert(
+        "effortOptions".into(),
+        json!(["minimal", "low", "medium", "high", "xhigh", "max"]),
+    );
+    entry["thinking"] = json!(thinking);
+    if let Some(image) = model.image_input {
+        let mut modalities = entry["modalities"].as_object().cloned().unwrap_or_default();
+        let mut inputs = modalities
+            .get("input")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        inputs.retain(|value| value != "image");
+        if !inputs.contains(&json!("text")) {
+            inputs.insert(0, json!("text"));
+        }
+        if image {
+            inputs.push(json!("image"));
+        }
+        entry["attachment"] = json!(inputs.iter().any(|value| value != "text"));
+        modalities.insert("input".into(), json!(inputs));
+        modalities.entry("output").or_insert(json!(["text"]));
+        entry["modalities"] = json!(modalities);
+    }
+    let mut limit = entry["limit"].as_object().cloned().unwrap_or_default();
+    match model.one_m_context {
+        Some(true) => {
+            limit.insert("context".into(), json!(1_000_000));
+        }
+        Some(false) if limit.get("context").and_then(Value::as_u64) == Some(1_000_000) => {
+            limit.remove("context");
+        }
+        _ => {}
+    }
+    if limit.is_empty() {
+        entry.as_object_mut().unwrap().remove("limit");
+    } else {
+        entry["limit"] = json!(limit);
+    }
+    provider["kind"] = json!("custom");
+    provider["name"] = json!("EchoBird");
+    provider["enabled"] = json!(true);
+    provider["api"] = json!(api);
+    let mut options = provider["options"].as_object().cloned().unwrap_or_default();
+    options.insert("baseURL".into(), json!(base));
+    options.insert(
+        "apiKey".into(),
+        json!(model.api_key.as_deref().unwrap_or("")),
+    );
+    provider["options"] = json!(options);
+    let mut models = provider["models"].as_object().cloned().unwrap_or_default();
+    models.insert(id.into(), entry);
+    provider["models"] = json!(models);
+    config["custom_provider"]["echobird"] = provider;
     config["defaultModel"] = json!(format!("custom_provider:echobird/{id}"));
     config["defaultLightModel"] = config["defaultModel"].clone();
     clear_model_options(&mut config);
@@ -216,7 +282,9 @@ fn read_at(home: &Path) -> Option<ModelInfo> {
     serde_json::from_value(json!({
         "model":id, "name":provider["models"][id]["name"].as_str().unwrap_or(id),
         "baseUrl":provider["options"]["baseURL"], "apiKey":provider["options"]["apiKey"],
-        "protocol":if provider["api"] == "anthropic-messages" {"anthropic"} else {"openai"}
+        "protocol":if provider["api"] == "anthropic-messages" {"anthropic"} else {"openai"},
+        "imageInput":provider["models"][id]["modalities"]["input"].as_array().map(|inputs| inputs.contains(&json!("image"))),
+        "oneMContext":provider["models"][id]["limit"]["context"].as_u64().map(|context| context == 1_000_000)
     }))
     .ok()
 }
@@ -224,6 +292,56 @@ fn read_at(home: &Path) -> Option<ModelInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capabilities_roundtrip_preserves_output_and_manual_models() {
+        let dir =
+            std::env::temp_dir().join(format!("echobird-minimax-caps-{}", uuid::Uuid::new_v4()));
+        write_config(&dir, &json!({"theme":"dark","custom_provider":{"personal":{"keep":true},"echobird":{"api":"openai-completions","options":{"baseURL":"https://example.test/v1"},"models":{"arbitrary":{"limit":{"context":512000,"output":64000},"modalities":{"input":["text","audio"],"output":["audio"]},"custom":true},"manual":{"name":"Keep"}}}}})).unwrap();
+        let mut model: ModelInfo = serde_json::from_value(json!({"model":"arbitrary","baseUrl":"https://example.test/v1/","imageInput":true,"oneMContext":true})).unwrap();
+        apply_at(&dir, &model).unwrap();
+        let config = config_at(&dir).unwrap();
+        let entry = &config["custom_provider"]["echobird"]["models"]["arbitrary"];
+        assert_eq!(entry["limit"], json!({"context":1000000,"output":64000}));
+        assert_eq!(
+            entry["thinking"]["effortOptions"],
+            json!(["minimal", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(entry["reasoning"], true);
+        assert_eq!(entry["attachment"], true);
+        assert_eq!(entry["custom"], true);
+        assert_eq!(
+            entry["modalities"]["input"],
+            json!(["text", "audio", "image"])
+        );
+        assert_eq!(entry["modalities"]["output"], json!(["audio"]));
+        assert_eq!(
+            config["custom_provider"]["echobird"]["models"]["manual"]["name"],
+            "Keep"
+        );
+        assert_eq!(config["custom_provider"]["personal"]["keep"], true);
+        let read = read_at(&dir).unwrap();
+        assert_eq!(read.image_input, Some(true));
+        assert_eq!(read.one_m_context, Some(true));
+        model.image_input = Some(false);
+        model.one_m_context = Some(false);
+        apply_at(&dir, &model).unwrap();
+        let config = config_at(&dir).unwrap();
+        let entry = &config["custom_provider"]["echobird"]["models"]["arbitrary"];
+        assert_eq!(entry["limit"], json!({"output":64000}));
+        assert_eq!(entry["modalities"]["input"], json!(["text", "audio"]));
+        assert_eq!(entry["attachment"], true);
+        assert_eq!(read_at(&dir).unwrap().image_input, Some(false));
+        model.base_url = Some("https://other.test/v1".into());
+        model.one_m_context = Some(true);
+        apply_at(&dir, &model).unwrap();
+        let config = config_at(&dir).unwrap();
+        let entry = &config["custom_provider"]["echobird"]["models"]["arbitrary"];
+        assert_eq!(entry["limit"], json!({"context":1000000}));
+        assert!(entry.get("custom").is_none());
+        assert_eq!(entry["attachment"], false);
+        assert_eq!(config["theme"], "dark");
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn desktop_editions_are_identified_by_release_channel_not_executable_name() {
         let root = std::env::temp_dir().join(format!(

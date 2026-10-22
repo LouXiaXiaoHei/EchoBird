@@ -943,13 +943,43 @@ export const AppManagerPanel: React.FC = () => {
     zcodeWebSearch,
     zcodeImageInput,
     setZCodeCapability,
+    workBuddyImageInput,
+    setWorkBuddyImageInput,
+    workBuddy1mMode,
+    setWorkBuddy1mMode,
+    mimoImageInput,
+    mimo1mMode,
+    setMimoCapability,
+    minimaxImageInput,
+    minimax1mMode,
+    setMinimaxCapability,
+    qoderImageInput,
+    qoder1mMode,
+    setQoderCapability,
+    dshImageInput,
+    dsh1mMode,
+    setDshCapability,
     isLaunching,
   } = useAppManager();
 
   const isClaudeDesktopApp = selectedTool === 'claudedesktop';
   const isClaudeCodeApp = selectedTool === 'claudecode';
   const isZCodeApp = selectedTool === 'zcode';
-  const show1mToggle = isClaudeDesktopApp || isClaudeCodeApp;
+  const isWorkBuddyApp = selectedTool === 'workbuddy' || selectedTool === 'workbuddyai';
+  const isMimoTool = selectedTool === 'mimocode' || selectedTool === 'mimodesktop';
+  const isMinimaxTool = selectedTool === 'minimaxcode' || selectedTool === 'minimaxdesktop';
+  const isQoderTool = selectedTool === 'qoder' || selectedTool === 'qodercn';
+  const isDshTool = selectedTool === 'dsh';
+  const showImageToggle =
+    isZCodeApp || isWorkBuddyApp || isMimoTool || isMinimaxTool || isQoderTool || isDshTool;
+  const show1mToggle =
+    isClaudeDesktopApp ||
+    isClaudeCodeApp ||
+    isMimoTool ||
+    isMinimaxTool ||
+    isQoderTool ||
+    isDshTool ||
+    isWorkBuddyApp;
   const showCodexAccounts = selectedTool === 'codex' || selectedTool === 'chatgptdesktop';
   const selectedToolProtocols = selectedToolData?.apiProtocol || ['openai', 'anthropic'];
   const hasVisibleModels = userModels.some(
@@ -969,13 +999,13 @@ export const AppManagerPanel: React.FC = () => {
         : isSmartRouterId(toolModelConfig[selectedTool ?? ''])
           ? false
           : codexWebSearch;
-  const routingControls = (show1mToggle || showWebSearchToggle) && (
-    <div className="px-3 flex items-center gap-2">
+  const routingControls = (show1mToggle || showWebSearchToggle || showImageToggle) && (
+    <div className="px-3 flex flex-wrap items-center gap-2">
       {showWebSearchToggle && (
         <RoutingToggle
           key="web-search"
           label={t('agent.codexWebSearchLabel')}
-          hint={isZCodeApp ? undefined : t('agent.codexWebSearchHint')}
+          hint={t('agent.codexWebSearchHint')}
           checked={webSearchValue}
           disabled={
             isLaunching ||
@@ -991,21 +1021,78 @@ export const AppManagerPanel: React.FC = () => {
           }
         />
       )}
-      {isZCodeApp && (
+      {showImageToggle && (
         <RoutingToggle
           label="image"
-          checked={zcodeImageInput}
+          hint={t('agent.imageInputHint')}
+          checked={
+            isZCodeApp
+              ? zcodeImageInput
+              : isMimoTool
+                ? mimoImageInput
+                : isMinimaxTool
+                  ? minimaxImageInput
+                  : isQoderTool
+                    ? qoderImageInput
+                    : isDshTool
+                      ? dshImageInput
+                      : workBuddyImageInput
+          }
           disabled={isLaunching}
-          onChange={(value) => setZCodeCapability('imageInput', value)}
+          onChange={
+            isZCodeApp
+              ? (value) => setZCodeCapability('imageInput', value)
+              : isMimoTool
+                ? (value) => setMimoCapability('imageInput', value)
+                : isMinimaxTool
+                  ? (value) => setMinimaxCapability('imageInput', value)
+                  : isQoderTool
+                    ? (value) => setQoderCapability('imageInput', value)
+                    : isDshTool
+                      ? (value) => setDshCapability('imageInput', value)
+                      : setWorkBuddyImageInput
+          }
         />
       )}
       {show1mToggle && (
         <RoutingToggle
           key="1m"
           label="1M"
-          hint={t('agent.claude1mHint')}
-          checked={isClaudeDesktopApp ? claudeDesktop1mMode : claude1mMode}
-          onChange={isClaudeDesktopApp ? setClaudeDesktop1mMode : setClaude1mMode}
+          hint={t(
+            isMimoTool || isMinimaxTool || isQoderTool || isDshTool || isWorkBuddyApp
+              ? 'agent.oneMContextHint'
+              : 'agent.claude1mHint'
+          )}
+          checked={
+            isMimoTool
+              ? mimo1mMode
+              : isMinimaxTool
+                ? minimax1mMode
+                : isQoderTool
+                  ? qoder1mMode
+                  : isDshTool
+                    ? dsh1mMode
+                    : isWorkBuddyApp
+                      ? workBuddy1mMode
+                      : isClaudeDesktopApp
+                        ? claudeDesktop1mMode
+                        : claude1mMode
+          }
+          onChange={
+            isMimoTool
+              ? (value) => setMimoCapability('oneMContext', value)
+              : isMinimaxTool
+                ? (value) => setMinimaxCapability('oneMContext', value)
+                : isQoderTool
+                  ? (value) => setQoderCapability('oneMContext', value)
+                  : isDshTool
+                    ? (value) => setDshCapability('oneMContext', value)
+                    : isWorkBuddyApp
+                      ? setWorkBuddy1mMode
+                      : isClaudeDesktopApp
+                        ? setClaudeDesktop1mMode
+                        : setClaude1mMode
+          }
           disabled={isLaunching}
         />
       )}

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 //   • File must be UTF-8 WITHOUT BOM — some desktop builds fail to parse a
 //     BOM'd models.json. write_json_file writes raw UTF-8 (no BOM), so this
 //     is satisfied for free.
-//   • Preserve other models and existing capability/reasoning settings.
+//   • Preserve other models and existing reasoning choices/unknown settings.
 //     New-task selection is stored separately from model registration.
 // ════════════════════════════════════════════════════════════════
 
@@ -172,8 +172,6 @@ fn prepare_models(config_path: &Path, model_info: &ModelInfo) -> Result<Vec<Valu
         json!({
             "id": model_id,
             "vendor": extract_domain_name(base_url),
-            "maxInputTokens": 200000,
-            "maxOutputTokens": 8192,
             "supportsToolCall": true,
             "supportsImages": true,
         })
@@ -185,11 +183,24 @@ fn prepare_models(config_path: &Path, model_info: &ModelInfo) -> Result<Vec<Valu
     }
     model["apiKey"] = json!(api_key);
     model["disabled"] = json!(false);
-    for flag in ["supportsReasoning", "onlyReasoning"] {
-        if !model[flag].is_boolean() {
-            model[flag] = json!(false);
-        }
+    if let Some(image) = model_info.image_input {
+        model["supportsImages"] = json!(image);
     }
+    match model_info.one_m_context {
+        Some(true) => model["maxInputTokens"] = json!(1_000_000),
+        Some(false) if model["maxInputTokens"].as_u64() == Some(1_000_000) => {
+            model.as_object_mut().unwrap().remove("maxInputTokens");
+        }
+        _ => {}
+    }
+    model["supportsReasoning"] = json!(true);
+    if !model["onlyReasoning"].is_boolean() {
+        model["onlyReasoning"] = json!(false);
+    }
+    if !model["reasoning"].is_object() {
+        model["reasoning"] = json!({});
+    }
+    model["reasoning"]["supportedEfforts"] = json!(["low", "medium", "high", "xhigh", "max"]);
     // The native catalog merges duplicate IDs in order, with the last entry winning.
     models.push(model);
     Ok(models)
@@ -279,8 +290,11 @@ fn read_workbuddy_at(path: &Path, user_id: Option<&str>) -> Option<ModelInfo> {
         display_model: None,
         relay_mode: None,
         web_search: None,
-        image_input: None,
-        one_m_context: None,
+        image_input: m.get("supportsImages").and_then(Value::as_bool),
+        one_m_context: m
+            .get("maxInputTokens")
+            .and_then(Value::as_u64)
+            .map(|input| input == 1_000_000),
     })
 }
 
@@ -322,6 +336,75 @@ mod tests {
             "apiKey": "test-key"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn one_m_context_roundtrips_without_setting_or_removing_output_limits() {
+        let fixture = Fixture::new();
+        for tool in ["workbuddy", "workbuddyai"] {
+            let path = fixture.path(tool);
+            let mut info = model();
+            assert!(apply_workbuddy_at(&path, Some("fixture-user"), &info).success);
+            let mut rows = read_models(&path).unwrap();
+            rows[0]["maxOutputTokens"] = json!(64000);
+            std::fs::write(&path, serde_json::to_vec(&rows).unwrap()).unwrap();
+            info.one_m_context = Some(true);
+            assert!(apply_workbuddy_at(&path, Some("fixture-user"), &info).success);
+            let rows = read_models(&path).unwrap();
+            assert_eq!(rows.last().unwrap()["maxInputTokens"], 1_000_000);
+            assert_eq!(rows.last().unwrap()["maxOutputTokens"], 64000);
+            assert_eq!(
+                read_workbuddy_at(&path, Some("fixture-user"))
+                    .unwrap()
+                    .one_m_context,
+                Some(true)
+            );
+            info.one_m_context = None;
+            assert!(apply_workbuddy_at(&path, Some("fixture-user"), &info).success);
+            assert_eq!(
+                read_models(&path).unwrap().last().unwrap()["maxInputTokens"],
+                1_000_000
+            );
+            info.one_m_context = Some(false);
+            assert!(apply_workbuddy_at(&path, Some("fixture-user"), &info).success);
+            let rows = read_models(&path).unwrap();
+            assert!(rows.last().unwrap().get("maxInputTokens").is_none());
+            assert_eq!(rows.last().unwrap()["maxOutputTokens"], 64000);
+        }
+    }
+
+    #[test]
+    fn all_models_expose_native_efforts_and_round_trip_explicit_image_support() {
+        let fixture = Fixture::new();
+        for tool in ["workbuddy", "workbuddyai"] {
+            let path = fixture.path(tool);
+            for model_id in ["test-model", "another-vendor/model"] {
+                for image in [true, false] {
+                    let info = ModelInfo {
+                        model: Some(model_id.into()),
+                        image_input: Some(image),
+                        ..model()
+                    };
+                    assert!(apply_workbuddy_at(&path, Some("fixture-user"), &info).success);
+                    let rows = read_models(&path).unwrap();
+                    let selected = rows.last().unwrap();
+                    assert!(selected.get("maxInputTokens").is_none());
+                    assert!(selected.get("maxOutputTokens").is_none());
+                    assert_eq!(selected["supportsImages"], image);
+                    assert_eq!(selected["supportsReasoning"], true);
+                    assert_eq!(
+                        selected["reasoning"]["supportedEfforts"],
+                        json!(["low", "medium", "high", "xhigh", "max"])
+                    );
+                    assert_eq!(
+                        read_workbuddy_at(&path, Some("fixture-user"))
+                            .unwrap()
+                            .image_input,
+                        Some(image)
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -379,6 +462,8 @@ mod tests {
         expected["name"] = json!("Test model");
         expected["apiKey"] = json!("test-key");
         expected["disabled"] = json!(false);
+        expected["reasoning"]["supportedEfforts"] =
+            json!(["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(entries, vec![other, expected]);
     }
 
@@ -448,6 +533,8 @@ mod tests {
             expected["apiKey"] = json!("new-key");
             expected["disabled"] = json!(false);
             expected["onlyReasoning"] = json!(false);
+            expected["reasoning"] =
+                json!({"supportedEfforts": ["low", "medium", "high", "xhigh", "max"]});
             assert_eq!(read_models(&path).unwrap(), vec![expected]);
         }
     }
@@ -637,12 +724,8 @@ mod tests {
         }
         assert_eq!(effective["url"], "https://example.test/v1/chat/completions");
         assert_eq!(effective["apiKey"], "test-key");
-        for flag in [
-            "disabled",
-            "useCustomProtocol",
-            "onlyReasoning",
-            "supportsReasoning",
-        ] {
+        assert_eq!(effective["supportsReasoning"], true);
+        for flag in ["disabled", "useCustomProtocol", "onlyReasoning"] {
             assert_eq!(effective[flag], false);
         }
         assert_eq!(

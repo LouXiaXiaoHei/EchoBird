@@ -19,6 +19,7 @@ mod grok;
 pub(crate) mod hermes;
 mod kilo;
 pub(crate) mod kimicode;
+mod mimo_capabilities;
 mod mimocode;
 mod mimodesktop;
 pub(crate) mod minimaxcode;
@@ -134,7 +135,7 @@ pub struct ModelInfo {
     /// context window. Claude Code strips the suffix before sending the id
     /// upstream, so the provider still sees the bare id. `HAIKU` and
     /// `CLAUDE_CODE_SUBAGENT_MODEL` never get the suffix — no 1M concept.
-    /// Claude Desktop uses this as its profile prefer1m setting. Other tools ignore it.
+    /// Claude Desktop uses its profile prefer1m setting. MiMo, MiniMax, Qoder, DSH and WorkBuddy use native context limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_m_context: Option<bool>,
 }

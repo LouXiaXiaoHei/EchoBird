@@ -108,7 +108,7 @@ fn provider(info: &ModelInfo) -> Result<(Value, String), String> {
     {
         return Err("Invalid Qoder API URL".into());
     }
-    let entry = json!({
+    let mut entry = json!({
         "displayName": "EchoBird",
         "type": "openai-compatible",
         "protocol": protocol,
@@ -118,9 +118,20 @@ fn provider(info: &ModelInfo) -> Result<(Value, String), String> {
         "models": [{
             "model": model,
             "displayName": info.name.as_deref().filter(|name| !name.is_empty()).unwrap_or(model),
-            "capabilities": {"tools": true, "vision": false}
+            "capabilities": {
+                "tools": true,
+                "vision": info.image_input.unwrap_or(false),
+                "thinking": {
+                    "modes": [if protocol == "anthropic" { "adaptive" } else { "enabled" }],
+                    "supportsEffort": true,
+                    "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]
+                }
+            }
         }]
     });
+    if info.one_m_context == Some(true) {
+        entry["models"][0]["contextWindow"] = json!(1_000_000);
+    }
     Ok((entry, model.to_owned()))
 }
 
@@ -147,16 +158,59 @@ fn settings_bytes(path: &Path, info: &ModelInfo) -> Result<(Vec<u8>, String), St
                 .ok_or("Cannot create Qoder provider settings")?
         }
     };
-    if providers.get(PROVIDER).is_some() {
-        let existing = providers
+    let existing = if providers.get(PROVIDER).is_some() {
+        let value = providers
             .get(PROVIDER)
             .and_then(|value| value.to_serde_value())
             .ok_or("Invalid EchoBird provider")?;
-        if existing["displayName"] != "EchoBird" {
+        if value["displayName"] != "EchoBird" {
             return Err("Qoder provider ID is already in use".into());
         }
+        Some(value)
+    } else {
+        None
+    };
+    let (mut entry, model) = provider(info)?;
+    if let Some(previous) = existing.filter(|previous| {
+        previous["protocol"] == entry["protocol"]
+            && previous["baseUrl"]
+                .as_str()
+                .map(|url| url.trim_end_matches('/'))
+                == entry["baseUrl"].as_str()
+    }) {
+        if let Some(previous_model) = previous["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|value| value["model"] == model))
+        {
+            let mut fields = previous_model.as_object().cloned().unwrap_or_default();
+            let mut capabilities = previous_model["capabilities"]
+                .as_object()
+                .cloned()
+                .unwrap_or_default();
+            let mut updated = entry["models"][0].as_object().cloned().unwrap();
+            capabilities.extend(
+                updated
+                    .remove("capabilities")
+                    .unwrap()
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+            if info.image_input.is_none() {
+                if let Some(vision) = previous_model["capabilities"]["vision"].as_bool() {
+                    capabilities.insert("vision".into(), json!(vision));
+                }
+            }
+            fields.extend(updated);
+            fields.insert("capabilities".into(), json!(capabilities));
+            if info.one_m_context == Some(false)
+                && fields.get("contextWindow").and_then(Value::as_u64) == Some(1_000_000)
+            {
+                fields.remove("contextWindow");
+            }
+            entry["models"][0] = json!(fields);
+        }
     }
-    let (entry, model) = provider(info)?;
     set(&providers, PROVIDER, &entry);
     let model_settings = match settings.get("model") {
         Some(value) => value
@@ -308,12 +362,83 @@ mod tests {
     }
 
     #[test]
+    fn context_and_image_overrides_preserve_native_model_settings() {
+        let dir = Fixture::new();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, r#"{"model":{"reasoningEffort":"high"},"providers":{"other":{"keep":true},"echobird":{"displayName":"EchoBird","baseUrl":"https://example.test/v1","protocol":"openai","models":[{"model":"vendor/model","contextWindow":400000,"maxOutputTokens":64000,"custom":true,"capabilities":{"vision":false,"other":true}}]}}}"#).unwrap();
+        let mut model = info();
+        model.image_input = Some(true);
+        model.one_m_context = Some(true);
+        let (bytes, _) = settings_bytes(&path, &model).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = &state["providers"][PROVIDER]["models"][0];
+        assert_eq!(entry["contextWindow"], 1_000_000);
+        assert_eq!(entry["maxOutputTokens"], 64000);
+        assert_eq!(entry["capabilities"]["vision"], true);
+        assert_eq!(entry["capabilities"]["other"], true);
+        assert_eq!(entry["custom"], true);
+        assert_eq!(state["model"]["reasoningEffort"], "high");
+        assert_eq!(state["providers"]["other"]["keep"], true);
+        fs::write(&path, bytes).unwrap();
+        model.image_input = None;
+        model.one_m_context = None;
+        let (bytes, _) = settings_bytes(&path, &model).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            state["providers"][PROVIDER]["models"][0]["contextWindow"],
+            1_000_000
+        );
+        assert_eq!(
+            state["providers"][PROVIDER]["models"][0]["capabilities"]["vision"],
+            true
+        );
+        model.image_input = Some(false);
+        model.one_m_context = Some(false);
+        let (bytes, _) = settings_bytes(&path, &model).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = &state["providers"][PROVIDER]["models"][0];
+        assert!(entry.get("contextWindow").is_none());
+        assert_eq!(entry["maxOutputTokens"], 64000);
+        assert_eq!(entry["capabilities"]["vision"], false);
+        model.base_url = Some("https://other.test/v1".into());
+        model.one_m_context = Some(true);
+        let (bytes, _) = settings_bytes(&path, &model).unwrap();
+        let state: Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = &state["providers"][PROVIDER]["models"][0];
+        assert_eq!(entry["contextWindow"], 1_000_000);
+        assert!(entry.get("maxOutputTokens").is_none());
+        assert!(entry.get("custom").is_none());
+    }
+
+    #[test]
+    fn declares_native_thinking_capabilities_for_both_protocols() {
+        for (protocol, mode) in [("openai", "enabled"), ("anthropic", "adaptive")] {
+            for model_id in ["vendor/model", "deepseek-flash", "another-model"] {
+                let mut model = info();
+                model.protocol = Some(protocol.into());
+                model.model = Some(model_id.into());
+                let (entry, _) = provider(&model).unwrap();
+                assert_eq!(
+                    entry["models"][0]["capabilities"]["thinking"],
+                    json!({
+                        "modes": [mode],
+                        "supportsEffort": true,
+                        "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]
+                    })
+                );
+                assert_eq!(entry["models"][0]["capabilities"]["tools"], true);
+                assert_eq!(entry["models"][0]["capabilities"]["vision"], false);
+            }
+        }
+    }
+
+    #[test]
     fn preserves_other_settings_and_comments() {
         let dir = Fixture::new();
         let path = dir.path().join("settings.json");
         fs::write(
             &path,
-            "{\n  // keep this\n  \"model\": {},\n  \"providers\": {\"other\": {\"id\": 1}},\n}\n",
+            "{\n  // keep this\n  \"model\": {\"reasoningEffort\": \"high\"},\n  \"providers\": {\"other\": {\"id\": 1}},\n}\n",
         )
         .unwrap();
         let (bytes, model) = settings_bytes(&path, &info()).unwrap();
@@ -324,6 +449,8 @@ mod tests {
         let state =
             jsonc_parser::parse_to_serde_value::<Value>(&text, &Default::default()).unwrap();
         assert_eq!(state["model"]["name"], "echobird/vendor/model");
+        assert_eq!(state["model"]["reasoningEffort"], "high");
+        assert_eq!(state["providers"]["other"], json!({"id": 1}));
         assert_eq!(
             state["providers"]["echobird"]["models"][0]["model"],
             "vendor/model"
@@ -343,6 +470,11 @@ mod tests {
         db.flush().unwrap();
         drop(db);
         apply_at(&settings, &storage, Edition::QoderCn, "user", &info()).unwrap();
+        let state: Value = serde_json::from_slice(&fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(
+            state["providers"]["echobird"]["models"][0]["capabilities"]["thinking"]["modes"],
+            json!(["enabled"])
+        );
         let mut db = rusty_leveldb::DB::open(&storage, Default::default()).unwrap();
         assert!(db.get(&selection_key(Edition::QoderCn, "user")).is_some());
         assert!(db.get(&selection_key(Edition::Qoder, "user")).is_none());

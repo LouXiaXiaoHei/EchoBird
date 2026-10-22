@@ -462,6 +462,10 @@ const ja: Partial<Translations> = {
     '一部のサードパーティモデルでは web_search の個別の有効化または追加課金が必要です（購入したモデルの公式ドキュメントをよく読み、web_search への対応可否と有効化方法を確認してください）',
   'agent.claude1mHint':
     'オンにするとモデル id に [1m] を付加し、1M コンテキストを有効化します。購入したモデルの公式ドキュメントで「モデルid+[1m]」の対応を必ず確認してください。',
+  'agent.imageInputHint':
+    '購入したモデルの公式ドキュメントをよく読み、image または vision 入力に対応しているか確認してください。',
+  'agent.oneMContextHint':
+    'オンにすると 1M コンテキストを使用します。購入したモデルの公式ドキュメントをよく読み、1M コンテキストに対応しているか確認してください。',
   'agent.installViaMother': 'AI 自動インストール',
   'tool.models': 'モデル',
   'tool.app': 'アプリ',
