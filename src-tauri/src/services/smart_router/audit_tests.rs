@@ -4,6 +4,189 @@ use std::net::SocketAddr;
 use super::*;
 
 #[test]
+fn issue_577_quota_failures_isolate_the_actual_account_model_resource() {
+    for provider in [
+        AccountProvider::WorkBuddy,
+        AccountProvider::WorkBuddyAi,
+        AccountProvider::Kilo,
+    ] {
+        for failure in [FailureClass::RateLimit, FailureClass::Billing] {
+            let state = AppState::for_tests().unwrap();
+            let mut failed = audit_candidate("failed");
+            failed.account_source = Some(crate::models::model::AccountSource {
+                provider,
+                account_id: "quota-account".into(),
+            });
+            let mut sibling = failed.clone();
+            sibling.internal_id = "sibling".into();
+            sibling.model_id = "another-model".into();
+            let mut other_account = failed.clone();
+            other_account.internal_id = "other-account".into();
+            other_account.account_source.as_mut().unwrap().account_id =
+                "independent-account".into();
+            let mut alias = failed.clone();
+            alias.internal_id = "same-resource-alias".into();
+            mark_failure(&state, &failed, failure, None);
+            let mut other_group = AppState::for_tests().unwrap();
+            other_group.route_memory = state.route_memory.clone();
+            assert!(candidate_is_cooling_down(&other_group, &alias));
+            assert!(
+                !candidate_is_cooling_down(&state, &sibling),
+                "{provider:?} {failure:?}"
+            );
+            assert!(!candidate_is_cooling_down(&state, &other_account));
+            assert!(state.route_memory.lock().unwrap().accounts.is_empty());
+            mark_failure(&state, &failed, FailureClass::Authentication, None);
+            assert!(candidate_is_cooling_down(&state, &sibling));
+            assert!(!candidate_is_cooling_down(&state, &other_account));
+        }
+    }
+}
+
+#[test]
+fn issue_577_legacy_account_quota_records_do_not_block_other_models() {
+    for failure in [
+        FailureClass::RateLimit,
+        FailureClass::Billing,
+        FailureClass::Authentication,
+    ] {
+        let state = AppState::for_tests().unwrap();
+        let mut failed = audit_candidate("legacy-failed");
+        failed.account_source = Some(crate::models::model::AccountSource {
+            provider: AccountProvider::WorkBuddy,
+            account_id: "legacy-account".into(),
+        });
+        let mut sibling = failed.clone();
+        sibling.internal_id = "legacy-sibling".into();
+        sibling.model_id = "other-model".into();
+        let key = account_health_key(&failed).unwrap();
+        let health = CandidateHealth {
+            failure: Some(failure),
+            fingerprint: failed.fingerprint.clone(),
+            cooldown_until_ms: Some(now_ms() + 600_000),
+            ..Default::default()
+        };
+        let mut legacy = RouteMemory::default();
+        legacy.accounts.insert(key, health.clone());
+        legacy.candidates.insert(
+            failed.internal_id.clone(),
+            CandidateHealth {
+                resource_key: Some(resource_key(&failed)),
+                ..health
+            },
+        );
+        *state.route_memory.lock().unwrap() =
+            serde_json::from_slice(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(candidate_is_cooling_down(&state, &failed));
+        assert_eq!(
+            candidate_is_cooling_down(&state, &sibling),
+            failure == FailureClass::Authentication
+        );
+    }
+}
+
+#[test]
+fn issue_577_unknown_billing_uses_short_rate_limit_backoff_and_retry_after() {
+    assert_eq!(
+        cooldown_for_failure(FailureClass::Billing, None, 1),
+        RATE_LIMIT_COOLDOWN
+    );
+    assert_eq!(
+        cooldown_for_failure(FailureClass::Billing, Some(Duration::from_secs(150)), 1),
+        Duration::from_secs(150)
+    );
+    assert_eq!(
+        cooldown_for_failure(FailureClass::Billing, Some(Duration::MAX), 1),
+        MAX_RETRY_AFTER
+    );
+}
+
+#[test]
+fn issue_577_quota_recovery_reuses_one_cross_group_probe_and_releases_on_cancel() {
+    for failure in [FailureClass::Billing, FailureClass::RateLimit] {
+        let state = AppState::for_tests().unwrap();
+        let mut failed = audit_candidate("quota-probe");
+        failed.account_source = Some(crate::models::model::AccountSource {
+            provider: AccountProvider::WorkBuddy,
+            account_id: "probe-account".into(),
+        });
+        mark_failure(&state, &failed, failure, Some(Duration::from_secs(150)));
+        let mut sibling = failed.clone();
+        sibling.model_id = "other-model".into();
+        assert!(try_begin_attempt(&state, &mut sibling));
+        state
+            .route_memory
+            .lock()
+            .unwrap()
+            .candidates
+            .get_mut(&failed.internal_id)
+            .unwrap()
+            .cooldown_until_ms = Some(now_ms().saturating_sub(1));
+        let mut other_group = AppState::for_tests().unwrap();
+        other_group.route_memory = state.route_memory.clone();
+        let mut first = failed.clone();
+        assert!(try_begin_attempt(&state, &mut first));
+        let mut alias = failed.clone();
+        alias.internal_id = "quota-probe-alias".into();
+        assert!(!try_begin_attempt(&other_group, &mut alias));
+        drop(first);
+        assert!(try_begin_attempt(&other_group, &mut alias));
+        mark_success(&other_group, &alias);
+        assert!(state.route_memory.lock().unwrap().candidates.is_empty());
+        assert!(try_begin_attempt(&state, &mut failed));
+    }
+}
+
+#[tokio::test]
+async fn issue_577_failed_quota_request_can_fall_back_to_another_model_on_the_same_account() {
+    for provider in [
+        AccountProvider::WorkBuddy,
+        AccountProvider::WorkBuddyAi,
+        AccountProvider::Kilo,
+    ] {
+        for status in [StatusCode::PAYMENT_REQUIRED, StatusCode::TOO_MANY_REQUESTS] {
+            let first = Response::builder().status(status).body(Body::from(json!({"error":{"code":if status == StatusCode::PAYMENT_REQUIRED {"insufficient_quota"}else{"rate_limit_exceeded"},"message":"Quota unavailable"}}).to_string())).unwrap();
+            let state = audit_fixtures(
+                first,
+                audit_chat_json(
+                    json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                ),
+            );
+            let mut candidates = vec![audit_candidate("first"), audit_candidate("second")];
+            for candidate in &mut candidates {
+                candidate.account_source = Some(crate::models::model::AccountSource {
+                    provider,
+                    account_id: "same-account-fallback".into(),
+                });
+            }
+            let response = route_chat_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[]}),
+                candidates.clone(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{provider:?} {status}");
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "second/second-model"
+            );
+            response.into_body().collect().await.unwrap();
+            assert!(state
+                .fixture_responses
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_empty());
+            assert!(candidate_is_cooling_down(&state, &candidates[0]));
+            assert!(!candidate_is_cooling_down(&state, &candidates[1]));
+            assert!(state.route_memory.lock().unwrap().accounts.is_empty());
+        }
+    }
+}
+
+#[test]
 fn common_error_codes_use_one_failure_policy_without_guessing_unknown_bad_requests() {
     for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
         for (code, expected) in [

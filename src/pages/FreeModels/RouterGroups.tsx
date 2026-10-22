@@ -459,7 +459,7 @@ export function RouterGroups({
                 );
               tabs?.[next]?.focus();
             }}
-            className={`free-model-router-tab view-mode-tab text-xs ${router.id === activeRouterId ? 'bg-cyber-elevated text-cyber-text' : 'text-cyber-text-secondary hover:text-cyber-text'}`}
+            className={`free-model-router-tab view-mode-tab text-xs ${router.id === activeRouterId ? 'bg-cyber-elevated text-cyber-text' : routerEnabled && router.groupEnabled ? 'font-bold text-cyber-accent hover:text-cyber-text' : 'text-cyber-text-secondary hover:text-cyber-text'}`}
           >
             {index + 1}
           </button>
@@ -628,7 +628,7 @@ export function RouterGroups({
                   aria-label={router.name}
                   aria-pressed={router.id === activeRouterId}
                   onClick={() => void selectRouter(router.id)}
-                  className={`free-model-router-list-button shrink-0 rounded-button px-1 font-mono text-xs ${router.id === activeRouterId ? 'bg-cyber-accent/15 text-cyber-accent' : 'text-cyber-text-muted'}`}
+                  className={`free-model-router-list-button w-7 shrink-0 rounded-button px-1 font-mono text-xs ${router.id === activeRouterId ? 'bg-cyber-accent/15 text-cyber-accent' : routerEnabled && router.groupEnabled ? 'font-bold text-cyber-accent' : 'text-cyber-text-muted'}`}
                 >
                   {index + 1}
                 </button>

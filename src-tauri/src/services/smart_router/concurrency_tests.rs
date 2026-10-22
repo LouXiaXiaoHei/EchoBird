@@ -708,7 +708,7 @@ fn shared_account_failure_does_not_affect_other_accounts_or_erase_other_groups()
     mark_failure(
         &first,
         &a,
-        FailureClass::RateLimit,
+        FailureClass::Authentication,
         Some(Duration::from_secs(60)),
     );
     assert!(prioritized_candidates(&second, vec![sibling.clone()]).is_empty());

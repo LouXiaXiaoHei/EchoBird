@@ -389,7 +389,7 @@ async fn converted_account_body_errors_preserve_auth_rate_limits_and_model_scope
             memory
                 .accounts
                 .contains_key(&account_health_key(&candidate).unwrap()),
-            !model_scope
+            status == StatusCode::UNAUTHORIZED && !model_scope
         );
         assert!(state
             .response_memory

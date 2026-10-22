@@ -286,6 +286,9 @@ pub async fn set_master_enabled(enabled: bool) -> Result<PublicConfig, String> {
     }
     servers.extend(started);
     if !enabled {
+        for server in servers.values() {
+            server.cancel();
+        }
         for (_, server) in servers.drain() {
             server.stop().await;
         }

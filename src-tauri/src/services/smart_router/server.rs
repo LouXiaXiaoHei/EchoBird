@@ -27,6 +27,14 @@ mod zen_free;
 #[path = "workbuddy_reset.rs"]
 mod workbuddy_reset;
 
+#[path = "standby.rs"]
+mod standby;
+#[path = "standby_probe.rs"]
+mod standby_probe;
+#[cfg(test)]
+#[path = "standby_route_tests.rs"]
+mod standby_route_tests;
+
 #[path = "probe.rs"]
 mod probe;
 pub(crate) use probe::{cancel_probe, probe_candidate, ProbeResult};
@@ -178,6 +186,10 @@ struct AppState {
     route_memory_path: Option<PathBuf>,
     response_memory: Arc<Mutex<ResponseMemory>>,
     response_memory_path: Option<PathBuf>,
+    standby: Arc<standby::Standby>,
+    probe_pool: Arc<standby::ProbePool>,
+    shutdown: tokio_util::sync::CancellationToken,
+    request_epoch: Option<u64>,
     #[cfg(test)]
     fixture_responses: Option<Arc<Mutex<HashMap<String, Response>>>>,
     #[cfg(test)]
@@ -204,8 +216,11 @@ impl AppState {
             .tcp_keepalive(Duration::from_secs(60))
             .build()
             .map_err(|e| format!("reqwest client build failed: {e}"))?;
+        let config_path = super::config_path();
+        let standby = Arc::new(standby::Standby::new());
+        standby::register(&config_path, &standby);
         Ok(Self {
-            config_path: super::config_path(),
+            config_path,
             model_id: SMART_ROUTER_MODEL_ID.into(),
             activity: shared_activity(),
             http_client,
@@ -213,6 +228,10 @@ impl AppState {
             route_memory_path: Some(route_memory_path()),
             response_memory: shared_response_memory(),
             response_memory_path: Some(response_memory_path()),
+            standby,
+            probe_pool: standby::shared_probes(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            request_epoch: None,
             #[cfg(test)]
             fixture_responses: None,
             #[cfg(test)]
@@ -236,6 +255,10 @@ impl AppState {
             route_memory_path: None,
             response_memory: Arc::new(Mutex::new(ResponseMemory::default())),
             response_memory_path: None,
+            standby: Arc::new(standby::Standby::disabled()),
+            probe_pool: Arc::new(standby::ProbePool::default()),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            request_epoch: None,
             fixture_responses: None,
             fixture_authentication: None,
         })
@@ -570,6 +593,7 @@ pub(crate) fn retain_candidate_memory(candidate_ids: &[String]) {
 }
 
 pub(crate) fn forget_candidate_memory(candidate_id: &str) {
+    standby::invalidate_all();
     let memory = shared_route_memory();
     let Ok(mut memory) = memory.lock() else {
         return;
@@ -577,6 +601,10 @@ pub(crate) fn forget_candidate_memory(candidate_id: &str) {
     if clear_candidate_health(&mut memory, candidate_id) {
         persist_memory_at(&route_memory_path(), memory);
     }
+}
+
+pub(super) fn invalidate_standby(path: &Path) {
+    standby::invalidate(path);
 }
 
 fn clear_candidate_health(memory: &mut RouteMemory, candidate_id: &str) -> bool {
@@ -611,6 +639,7 @@ pub(super) fn start(
     listener: std::net::TcpListener,
 ) -> Result<super::runtime::ServerControl, String> {
     let state = AppState::new()?;
+    let shutdown = state.shutdown.clone();
     let app = Router::new()
         .route("/health", get(handle_health))
         .route("/v1/models", get(handle_models))
@@ -627,7 +656,9 @@ pub(super) fn start(
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     log::info!("[SmartRouter] listening on 127.0.0.1:{port}");
-    Ok(super::runtime::ServerControl::start(listener, app))
+    Ok(super::runtime::ServerControl::start(
+        listener, app, shutdown,
+    ))
 }
 
 fn config_for_request(state: &AppState) -> Result<super::RequestConfig, String> {
@@ -684,6 +715,7 @@ async fn handle_chat(
         }
         Err(error) => return error.into_response(),
     };
+    state.request_epoch = Some(state.standby.epoch());
     let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(e) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -727,6 +759,7 @@ async fn handle_responses(
         }
         Err(error) => return error.into_response(),
     };
+    state.request_epoch = Some(state.standby.epoch());
     let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(error) => return openai_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
@@ -759,6 +792,7 @@ async fn handle_messages(
         }
         Err(error) => return error.into_response(),
     };
+    state.request_epoch = Some(state.standby.epoch());
     let request_config = match config_for_request(&state) {
         Ok(config) => config,
         Err(e) => return anthropic_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -1284,7 +1318,7 @@ async fn route_with_policy(
     state: &AppState,
     inbound_headers: &HeaderMap,
     body: Value,
-    candidates: Vec<Candidate>,
+    mut candidates: Vec<Candidate>,
     policy: RoutePolicy,
     protocol: RouteProtocol,
 ) -> Response {
@@ -1310,6 +1344,11 @@ async fn route_with_policy(
         );
     }
 
+    let configured_candidates = candidates.clone();
+    let standby_epoch = state
+        .standby
+        .order_for_request(&mut candidates, state.request_epoch)
+        .filter(|_| !bound_continuation);
     let mut available = prioritized_candidates(state, candidates);
     if bound_continuation {
         available.retain(|candidate| {
@@ -1623,6 +1662,15 @@ async fn route_with_policy(
             };
             match first {
                 Ok(buffered) => {
+                    if let Some(standby_epoch) = standby_epoch.filter(|_| completion.meaningful) {
+                        state.standby.used(
+                            state,
+                            &candidate,
+                            &configured_candidates,
+                            protocol,
+                            standby_epoch,
+                        );
+                    }
                     completion
                         .last_progress
                         .get_or_insert_with(tokio::time::Instant::now);
@@ -1888,6 +1936,17 @@ async fn route_with_policy(
                             continue;
                         }
                         mark_success(state, &candidate);
+                        if let Some(standby_epoch) =
+                            standby_epoch.filter(|_| standby_probe::response_has_output(&value))
+                        {
+                            state.standby.used(
+                                state,
+                                &candidate,
+                                &configured_candidates,
+                                protocol,
+                                standby_epoch,
+                            );
+                        }
                         if native_responses {
                             remember_response(state, &candidate, value["id"].as_str());
                         }
@@ -1906,10 +1965,8 @@ async fn route_with_policy(
                     copy_response_headers(&mut response, &response_headers);
                     return response;
                 }
-                if serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .is_some_and(|value| empty_chat_response(&value))
-                {
+                let response_value = serde_json::from_slice::<Value>(&bytes).ok();
+                if response_value.as_ref().is_some_and(empty_chat_response) {
                     mark_failure(state, &candidate, FailureClass::Transient, None);
                     attempts.push(AttemptRecord {
                         candidate_id: candidate.internal_id.clone(),
@@ -1920,6 +1977,23 @@ async fn route_with_policy(
                     continue;
                 }
                 mark_success(state, &candidate);
+                if let Some(standby_epoch) = standby_epoch.filter(|_| {
+                    response_value.as_ref().is_some_and(|value| {
+                        value["choices"].as_array().is_some_and(|choices| {
+                            choices
+                                .iter()
+                                .any(|choice| chat_message_has_content(&choice["message"]))
+                        })
+                    })
+                }) {
+                    state.standby.used(
+                        state,
+                        &candidate,
+                        &configured_candidates,
+                        protocol,
+                        standby_epoch,
+                    );
+                }
                 return upstream_response(status, content_type, cache_control, bytes, &candidate);
             }
             Ok(Err(mut error)) => {
@@ -2525,23 +2599,9 @@ fn applicable_account_health<'a>(
     candidate: &Candidate,
 ) -> Option<&'a CandidateHealth> {
     let health = account_health_key(candidate).and_then(|key| memory.accounts.get(&key))?;
-    if health.failure == Some(FailureClass::Billing) {
-        if let Some(source) = &candidate.account_source {
-            if matches!(
-                source.provider,
-                AccountProvider::WorkBuddy | AccountProvider::WorkBuddyAi
-            ) && crate::services::account_proxy::cached_free_model_ids(
-                source.provider,
-                &source.account_id,
-            )
-            .iter()
-            .any(|model| model.eq_ignore_ascii_case(&candidate.model_id))
-            {
-                return None;
-            }
-        }
-    }
-    Some(health)
+    // Old quota records may cover the whole account. Only authentication is
+    // reliable account-wide evidence; model quota failures stay on their resource.
+    (health.failure == Some(FailureClass::Authentication)).then_some(health)
 }
 
 fn account_health_key(candidate: &Candidate) -> Option<String> {
@@ -3362,13 +3422,9 @@ fn mark_failure_until(
     }
     entry.revision = revision;
     entry.account_key = account_health_key(candidate);
+    state.probe_pool.forget(candidate);
     let consecutive_failures = entry.consecutive_failures;
-    if !model_scope
-        && matches!(
-            failure,
-            FailureClass::Authentication | FailureClass::Billing | FailureClass::RateLimit
-        )
-    {
+    if !model_scope && failure == FailureClass::Authentication {
         if let Some(key) = account_health_key(candidate) {
             let existing = memory.accounts.get(&key);
             if !existing
@@ -3399,9 +3455,9 @@ fn cooldown_for_failure(
     consecutive_failures: u32,
 ) -> Duration {
     match failure {
-        FailureClass::Authentication | FailureClass::Billing => AUTH_OR_BILLING_COOLDOWN,
+        FailureClass::Authentication => AUTH_OR_BILLING_COOLDOWN,
         FailureClass::ModelUnavailable => MODEL_UNAVAILABLE_COOLDOWN,
-        FailureClass::RateLimit => retry_after
+        FailureClass::RateLimit | FailureClass::Billing => retry_after
             .unwrap_or(RATE_LIMIT_COOLDOWN)
             .min(MAX_RETRY_AFTER),
         FailureClass::Transient => {
@@ -4042,13 +4098,13 @@ mod tests {
             );
             let mut unknown = free.clone();
             unknown.model_id = "unknown-free-status".into();
-            assert!(candidate_is_cooling_down(&state, &unknown));
+            assert!(!candidate_is_cooling_down(&state, &unknown));
             mark_failure(&state, &paid, FailureClass::Authentication, None);
             assert!(candidate_is_cooling_down(&state, &free));
             let limited = AppState::for_tests().unwrap();
             begin_attempt(&limited, &mut paid);
             mark_failure(&limited, &paid, FailureClass::RateLimit, None);
-            assert!(candidate_is_cooling_down(&limited, &free));
+            assert!(!candidate_is_cooling_down(&limited, &free));
         }
     }
 
@@ -4563,7 +4619,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_accounts_cool_down_all_bound_models_but_model_errors_stay_local() {
+    fn exhausted_models_stay_local_but_authentication_protects_the_account() {
         use crate::models::model::{AccountProvider, AccountSource};
         let address = "127.0.0.1:8080".parse().unwrap();
         let mut first = candidate(address, "first");
@@ -4580,14 +4636,16 @@ mod tests {
         });
         let state = AppState::for_tests().unwrap();
         mark_failure(&state, &first, FailureClass::RateLimit, None);
-        assert!(candidate_is_cooling_down(&state, &sibling));
+        assert!(!candidate_is_cooling_down(&state, &sibling));
         assert_eq!(
             prioritized_candidates(&state, vec![first.clone(), sibling.clone(), other])
                 .iter()
                 .map(|c| c.internal_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["other"]
+            vec!["sibling", "other"]
         );
+        mark_failure(&state, &first, FailureClass::Authentication, None);
+        assert!(candidate_is_cooling_down(&state, &sibling));
         let state = AppState::for_tests().unwrap();
         mark_failure(&state, &first, FailureClass::ModelUnavailable, None);
         assert!(!candidate_is_cooling_down(&state, &sibling));
@@ -5717,14 +5775,7 @@ mod tests {
                     memory.candidates.contains_key(&model.internal_id),
                     records_failure
                 );
-                let records_account = matches!(
-                    expected_failure,
-                    Some(
-                        FailureClass::Authentication
-                            | FailureClass::Billing
-                            | FailureClass::RateLimit
-                    )
-                );
+                let records_account = expected_failure == Some(FailureClass::Authentication);
                 assert_eq!(
                     memory
                         .accounts
@@ -5838,7 +5889,6 @@ mod tests {
             FailureClass::RateLimit,
             Some(Duration::from_secs(600)),
         );
-        let key = account_health_key(&old).unwrap();
         mark_success(&state, &old);
         {
             let mut memory = state.route_memory.lock().unwrap();
@@ -5846,29 +5896,27 @@ mod tests {
                 memory.candidates["concurrent"].failure,
                 Some(FailureClass::RateLimit)
             );
-            assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
+            assert!(memory.accounts.is_empty());
             memory
                 .candidates
                 .get_mut("concurrent")
                 .unwrap()
                 .cooldown_until_ms = Some(now_ms().saturating_sub(1));
-            memory.accounts.get_mut(&key).unwrap().cooldown_until_ms =
-                Some(now_ms().saturating_sub(1));
         }
         mark_success(&state, &old);
         assert!(state
             .route_memory
             .lock()
             .unwrap()
-            .accounts
-            .contains_key(&key));
+            .candidates
+            .contains_key("concurrent"));
         let mut fresh = old.clone();
         begin_attempt(&state, &mut fresh);
         bind_attempt_credentials(&state, &fresh, &json!({"accessToken":"T0"}));
         mark_success(&state, &fresh);
         let memory = state.route_memory.lock().unwrap();
         assert!(!memory.candidates.contains_key("concurrent"));
-        assert!(!memory.accounts.contains_key(&key));
+        assert!(memory.accounts.is_empty());
     }
 
     #[tokio::test]
@@ -5933,7 +5981,7 @@ mod tests {
     }
 
     #[test]
-    fn short_rate_limit_cannot_shorten_existing_candidate_or_account_deadline() {
+    fn short_rate_limit_cannot_shorten_existing_candidate_deadline() {
         let state = AppState::for_tests().unwrap();
         let mut model = bound_health_candidate("long-rate-limit");
         begin_attempt(&state, &mut model);
@@ -5944,7 +5992,6 @@ mod tests {
             FailureClass::RateLimit,
             Some(Duration::from_secs(600)),
         );
-        let key = account_health_key(&model).unwrap();
         let long_deadline =
             state.route_memory.lock().unwrap().candidates["long-rate-limit"].cooldown_until_ms;
         begin_attempt(&state, &mut model);
@@ -5960,12 +6007,12 @@ mod tests {
             memory.candidates["long-rate-limit"].cooldown_until_ms,
             long_deadline
         );
-        assert_eq!(memory.accounts[&key].cooldown_until_ms, long_deadline);
+        assert!(memory.accounts.is_empty());
         assert_eq!(memory.candidates["long-rate-limit"].consecutive_failures, 2);
     }
 
     #[test]
-    fn another_model_success_preserves_active_account_billing_and_rate_limit() {
+    fn another_model_success_preserves_the_failed_resource_quota_cooldown() {
         for failure in [FailureClass::Billing, FailureClass::RateLimit] {
             let state = AppState::for_tests().unwrap();
             let mut failed = bound_health_candidate("account-failed-model");
@@ -5977,14 +6024,14 @@ mod tests {
             begin_attempt(&state, &mut sibling);
             bind_attempt_credentials(&state, &sibling, &json!({"accessToken":"T0"}));
             mark_success(&state, &sibling);
-            assert!(candidate_is_cooling_down(&state, &sibling));
+            assert!(!candidate_is_cooling_down(&state, &sibling));
             let mut memory = state.route_memory.lock().unwrap();
             assert!(!clear_account_authentication(
                 &mut memory,
                 &key,
                 &HashSet::new()
             ));
-            assert_eq!(memory.accounts[&key].failure, Some(failure));
+            assert!(memory.accounts.is_empty());
             assert_eq!(
                 memory.candidates["account-failed-model"].failure,
                 Some(failure)
@@ -6291,7 +6338,6 @@ mod tests {
             let mut state = AppState::for_tests().unwrap();
             state.fixture_responses = Some(responses.clone());
             let limited = bound_health_candidate("typed-rate-limit");
-            let key = account_health_key(&limited).unwrap();
             let backup = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "rate-backup");
             let started = now_ms();
             let response = route_chat_with_candidates(
@@ -6313,15 +6359,7 @@ mod tests {
             let limited = &memory.candidates["typed-rate-limit"];
             assert_eq!(limited.failure, Some(FailureClass::RateLimit));
             assert!(limited.cooldown_until_ms.unwrap() >= started + 3_600_000);
-            if model_scope {
-                assert!(memory.accounts.is_empty());
-            } else {
-                assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
-                assert_eq!(
-                    memory.accounts[&key].cooldown_until_ms,
-                    limited.cooldown_until_ms
-                );
-            }
+            assert!(memory.accounts.is_empty());
         }
     }
 
@@ -6692,19 +6730,13 @@ mod tests {
             memory.candidates["refresh-account"].failure,
             Some(FailureClass::RateLimit)
         );
-        assert_eq!(
-            memory.accounts.values().next().unwrap().failure,
-            Some(FailureClass::RateLimit)
-        );
+        assert!(memory.accounts.is_empty());
     }
 
     #[test]
     fn changing_model_clears_candidate_health_without_clearing_account_cooldown() {
-        for failure in [
-            FailureClass::RateLimit,
-            FailureClass::Billing,
-            FailureClass::Authentication,
-        ] {
+        {
+            let failure = FailureClass::Authentication;
             let state = AppState::for_tests().unwrap();
             let account = bound_health_candidate("edited-account-model");
             mark_failure(&state, &account, failure, Some(Duration::from_secs(600)));
@@ -6723,7 +6755,12 @@ mod tests {
             assert_eq!(memory.accounts[&key].failure, Some(failure));
             assert_eq!(memory.accounts[&key].cooldown_until_ms, deadline);
         }
-        for failure in [FailureClass::Transient, FailureClass::ModelUnavailable] {
+        for failure in [
+            FailureClass::Transient,
+            FailureClass::ModelUnavailable,
+            FailureClass::RateLimit,
+            FailureClass::Billing,
+        ] {
             let state = AppState::for_tests().unwrap();
             let account = bound_health_candidate("edited-model-local");
             mark_failure(&state, &account, failure, None);
@@ -6779,7 +6816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn converted_responses_try_backup_before_creation_and_preserve_account_limit() {
+    async fn converted_responses_try_backup_before_creation_and_preserve_resource_limit() {
         for streaming in [false, true] {
             let request = json!({"model":SMART_ROUTER_MODEL_ID,"input":"hello","stream":streaming});
             let chat = responses_chat_request(&request).unwrap();
@@ -6804,7 +6841,6 @@ mod tests {
             let mut limited = bound_health_candidate("responses-early");
             limited.account_source.as_mut().unwrap().provider =
                 crate::models::model::AccountProvider::Traecn;
-            let key = account_health_key(&limited).unwrap();
             let started = now_ms();
             let response = route_responses_with_candidates(
                 &state,
@@ -6834,8 +6870,17 @@ mod tests {
             }
             assert!(fixtures.lock().unwrap().is_empty());
             let memory = state.route_memory.lock().unwrap();
-            assert_eq!(memory.accounts[&key].failure, Some(FailureClass::RateLimit));
-            assert!(memory.accounts[&key].cooldown_until_ms.unwrap() >= started + 120_000);
+            assert!(memory.accounts.is_empty());
+            assert_eq!(
+                memory.candidates["responses-early"].failure,
+                Some(FailureClass::RateLimit)
+            );
+            assert!(
+                memory.candidates["responses-early"]
+                    .cooldown_until_ms
+                    .unwrap()
+                    >= started + 120_000
+            );
         }
     }
 }

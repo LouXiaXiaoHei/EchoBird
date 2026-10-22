@@ -14,12 +14,15 @@ pub(super) struct ServerControl {
 }
 
 impl ServerControl {
-    pub(super) fn start(listener: TcpListener, app: axum::Router) -> Self {
+    pub(super) fn start(
+        listener: TcpListener,
+        app: axum::Router,
+        shutdown: CancellationToken,
+    ) -> Self {
         let id = super::profiles::current_id();
         let task_id = id.clone();
         #[cfg(windows)]
         let addr = listener.local_addr().expect("bound listener");
-        let shutdown = CancellationToken::new();
         let signal = shutdown.clone();
         let (released, stopped) = oneshot::channel();
         let listener = TrackedListener {
@@ -48,8 +51,12 @@ impl ServerControl {
         }
     }
 
-    pub(super) async fn stop(self) {
+    pub(super) fn cancel(&self) {
         self.shutdown.cancel();
+    }
+
+    pub(super) async fn stop(self) {
+        self.cancel();
         // Wait for the listening socket; in-flight responses drain independently.
         let _ = self.stopped.await;
         super::profiles::set_running(&self.id, false);
@@ -155,7 +162,8 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let listener = TcpListener::from_std(listener).unwrap();
             let addr = listener.local_addr().unwrap();
-            let server = ServerControl::start(listener, app);
+            let shutdown = CancellationToken::new();
+            let server = ServerControl::start(listener, app, shutdown.clone());
             let client = reqwest::Client::builder().no_proxy().build().unwrap();
             let request_client = client.clone();
             let request = tokio::spawn(async move {
@@ -171,6 +179,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), server.stop())
                 .await
                 .unwrap();
+            assert!(shutdown.is_cancelled());
             assert!(!request.is_finished());
             // A draining connection can still reserve the old Windows port.
             // Restart with the same binding policy as production.
@@ -181,6 +190,7 @@ mod tests {
             let restarted = ServerControl::start(
                 listener,
                 axum::Router::new().route("/", axum::routing::get(|| async { "restarted" })),
+                CancellationToken::new(),
             );
             assert_eq!(
                 client

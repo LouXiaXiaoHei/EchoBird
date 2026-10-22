@@ -200,6 +200,8 @@ fn save_config_at(path: &Path, config: &StoredConfig) -> Result<(), String> {
     })();
     if result.is_err() {
         let _ = fs::remove_file(temporary);
+    } else {
+        server::invalidate_standby(path);
     }
     result.map_err(|e| format!("write {} failed: {e}", path.display()))
 }
