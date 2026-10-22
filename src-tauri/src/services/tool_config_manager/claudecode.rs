@@ -312,14 +312,6 @@ fn claudecode_env_model_id(real_id: &str, var: &str, one_m: bool) -> String {
     }
 }
 
-fn is_fable_model(model: &str) -> bool {
-    model
-        .rsplit('/')
-        .next()
-        .unwrap_or(model)
-        .starts_with("claude-fable-")
-}
-
 /// Connect Claude Code directly to the selected Anthropic endpoint, preserving
 /// saved model identity and original settings for configuration reads/restore.
 pub(super) fn apply_claudecode(model_info: &ModelInfo) -> ApplyResult {
@@ -549,30 +541,6 @@ fn apply_claudecode_with_environment(
     );
     let one_m = model_info.one_m_context.unwrap_or(false);
     for var in CLAUDECODE_MODEL_VARS {
-        if var == "ANTHROPIC_DEFAULT_FABLE_MODEL" && !is_fable_model(&real_model_id) {
-            let previous = Some(&previous_profile_relay).filter(|relay| {
-                relay["fableTierManaged"] != false
-                    && relay["autoModeServerSettingsPath"]
-                        .as_str()
-                        .is_some_and(|path| std::path::Path::new(path) == settings_path)
-            });
-            let stale = env
-                .get(var)
-                .and_then(|value| value.as_str())
-                .is_some_and(|model| {
-                    let model = model.strip_suffix("[1m]").unwrap_or(model);
-                    previous.as_ref().is_some_and(|relay| {
-                        relay["actualModel"].as_str().is_some_and(|previous| {
-                            let previous = previous.strip_suffix("[1m]").unwrap_or(previous);
-                            model == previous && !is_fable_model(previous)
-                        })
-                    })
-                });
-            if stale {
-                env.remove(var);
-            }
-            continue;
-        }
         env.insert(
             var.to_string(),
             serde_json::Value::String(claudecode_env_model_id(&real_model_id, var, one_m)),
@@ -596,7 +564,7 @@ fn apply_claudecode_with_environment(
         "actualModel": real_model_id,
         "modelName": model_info.name.as_deref().unwrap_or(real_model_id.as_str()),
         "relayMode": true,
-        "fableTierManaged": is_fable_model(&real_model_id),
+        "fableTierManaged": true,
         "autoModeServerSettingsPath": auto_mode_managed.then(|| settings_path.to_string_lossy()),
         "managedSettings": saved,
         "otherSettings": profiles,
@@ -1081,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_models_only_set_the_fable_tier_for_fable() {
+    fn relay_models_pin_all_tiers_including_fable() {
         let dir = std::env::temp_dir().join(format!("claude-fable-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
         let relay = dir.join("relay.json");
@@ -1102,17 +1070,7 @@ mod tests {
                 let settings = read_json_file(&path).unwrap();
                 let env = &settings["env"];
                 for var in CLAUDECODE_MODEL_VARS {
-                    if var == "ANTHROPIC_DEFAULT_FABLE_MODEL"
-                        && !model
-                            .rsplit('/')
-                            .next()
-                            .unwrap()
-                            .starts_with("claude-fable-")
-                    {
-                        assert!(env.get(var).is_none(), "{model} must not be a Fable tier");
-                    } else {
-                        assert_eq!(env[var], claudecode_env_model_id(model, var, one_m));
-                    }
+                    assert_eq!(env[var], claudecode_env_model_id(model, var, one_m));
                 }
                 assert_eq!(env["KEEP"], "yes");
             }
@@ -1121,82 +1079,60 @@ mod tests {
     }
 
     #[test]
-    fn relay_fable_cleanup_preserves_independent_user_tiers() {
+    fn relay_fable_mapping_restores_prior_values_after_model_and_context_changes() {
         let dir = std::env::temp_dir().join(format!("claude-fable-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
         let relay = dir.join("relay.json");
-        for (previous, existing, expected) in [
-            ("gpt-6.1-sol", "gpt-6.1-sol", None),
-            ("gpt-6.1-sol", "gpt-6.1-sol[1m]", None),
-            (
-                "gpt-6.1-sol",
-                "deepseek-flash[1m]",
-                Some("deepseek-flash[1m]"),
-            ),
-            ("gpt-6.1-sol", "claude-fable-5-1", Some("claude-fable-5-1")),
-            (
-                "claude-fable-5-1",
-                "claude-fable-5-1[1m]",
-                Some("claude-fable-5-1[1m]"),
-            ),
-        ] {
-            write_json_file(
-                &path,
-                &serde_json::json!({"env":{"ANTHROPIC_DEFAULT_FABLE_MODEL":existing,"KEEP":"yes"}}),
-            )
-            .unwrap();
-            write_json_file(
-                &relay,
-                &serde_json::json!({"actualModel":previous,"autoModeServerSettingsPath":path.to_string_lossy()}),
-            )
-            .unwrap();
-            let mut info = claudecode_model_info(Some(true));
-            info.model = Some("deepseek-flash".into());
-            assert!(apply_claudecode_at(&info, &path, &relay).success);
-            let settings = read_json_file(&path).unwrap();
-            assert_eq!(
-                settings["env"]
-                    .get("ANTHROPIC_DEFAULT_FABLE_MODEL")
-                    .and_then(|v| v.as_str()),
-                expected,
-                "previous={previous}, existing={existing}"
-            );
-            assert_eq!(settings["env"]["KEEP"], "yes");
+        for existing in ["custom-fable", "custom-fable[1m]", "claude-fable-5-1"] {
+            let original =
+                serde_json::json!({"env":{"ANTHROPIC_DEFAULT_FABLE_MODEL":existing,"KEEP":"yes"}});
+            write_json_file(&path, &original).unwrap();
+            write_json_file(&relay, &serde_json::json!({"actualModel":"previous-model","fableTierManaged":false,"autoModeServerSettingsPath":path.to_string_lossy()})).unwrap();
+            for (model, one_m) in [("fixture-model", true), ("other-model", false)] {
+                let mut info = claudecode_model_info(Some(true));
+                info.model = Some(model.into());
+                info.one_m_context = Some(one_m);
+                assert!(apply_claudecode_at(&info, &path, &relay).success);
+                let settings = read_json_file(&path).unwrap();
+                assert_eq!(
+                    settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"],
+                    if one_m {
+                        format!("{model}[1m]")
+                    } else {
+                        model.into()
+                    }
+                );
+                assert_eq!(read_json_file(&relay).unwrap()["fableTierManaged"], true);
+                assert_eq!(
+                    read_claudecode_at(&path, &relay).unwrap().model.as_deref(),
+                    Some(model)
+                );
+                assert_eq!(settings["env"]["KEEP"], "yes");
+            }
+            assert!(restore_claudecode_at(&path, &relay).success);
+            assert_eq!(read_json_file(&path).unwrap(), original);
         }
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn relay_fable_value_equal_to_selected_model_needs_ownership_to_be_removed() {
+    fn relay_fable_mapping_preserves_manual_edits_on_restore() {
         let dir = std::env::temp_dir().join(format!("claude-fable-{}", uuid::Uuid::new_v4()));
         let path = dir.join("settings.json");
-        let other_path = dir.join("other/settings.json");
         let relay = dir.join("relay.json");
-        for existing in ["deepseek-flash", "deepseek-flash[1m]"] {
-            for other_owner in [false, true] {
-                write_json_file(
-                    &path,
-                    &serde_json::json!({"env":{"ANTHROPIC_DEFAULT_FABLE_MODEL":existing,"KEEP":"yes"}}),
-                )
-                .unwrap();
-                if other_owner {
-                    write_json_file(
-                        &relay,
-                        &serde_json::json!({"actualModel":"deepseek-flash","autoModeServerSettingsPath":other_path.to_string_lossy()}),
-                    )
-                    .unwrap();
-                } else if relay.exists() {
-                    fs::remove_file(&relay).unwrap();
-                }
-                let mut info = claudecode_model_info(Some(true));
-                info.model = Some("deepseek-flash".into());
-                for _ in 0..2 {
-                    assert!(apply_claudecode_at(&info, &path, &relay).success);
-                    let settings = read_json_file(&path).unwrap();
-                    assert_eq!(settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"], existing);
-                    assert_eq!(settings["env"]["KEEP"], "yes");
-                }
-            }
+        for user_model in ["user-fable", "user-fable[1m]"] {
+            write_json_file(&path, &serde_json::json!({"env":{"KEEP":"yes"}})).unwrap();
+            let mut info = claudecode_model_info(Some(true));
+            info.model = Some("fixture-model".into());
+            assert!(apply_claudecode_at(&info, &path, &relay).success);
+            let mut settings = read_json_file(&path).unwrap();
+            settings["env"]["ANTHROPIC_DEFAULT_FABLE_MODEL"] = serde_json::json!(user_model);
+            write_json_file(&path, &settings).unwrap();
+            assert!(restore_claudecode_at(&path, &relay).success);
+            assert_eq!(
+                read_json_file(&path).unwrap(),
+                serde_json::json!({"env":{"ANTHROPIC_DEFAULT_FABLE_MODEL":user_model,"KEEP":"yes"}})
+            );
         }
         fs::remove_dir_all(dir).unwrap();
     }
