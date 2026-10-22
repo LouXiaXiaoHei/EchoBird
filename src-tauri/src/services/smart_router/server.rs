@@ -24,6 +24,9 @@ use crate::services::model_manager;
 #[path = "zen_free.rs"]
 mod zen_free;
 
+#[path = "workbuddy_reset.rs"]
+mod workbuddy_reset;
+
 #[path = "probe.rs"]
 mod probe;
 pub(crate) use probe::{cancel_probe, probe_candidate, ProbeResult};
@@ -1501,7 +1504,14 @@ async fn route_with_policy(
                 copy_response_headers(&mut response, &response_headers);
                 return response;
             }
-            if let Some(failure) = classify_failure(status, &response_body) {
+            if let Some(failure) = mark_upstream_failure(
+                state,
+                &candidate,
+                status,
+                &response_body,
+                retry_after,
+                model_scope,
+            ) {
                 if failure == FailureClass::RequestIncompatible {
                     incompatible_response = Some(upstream_response(
                         status,
@@ -1511,7 +1521,6 @@ async fn route_with_policy(
                         &candidate,
                     ));
                 }
-                mark_failure_scoped(state, &candidate, failure, retry_after, model_scope);
                 if protocol == RouteProtocol::Responses && has_previous_response(&body) {
                     let mut response = upstream_response(
                         status,
@@ -2971,18 +2980,41 @@ fn mark_stream_failure(
             headers.insert(header::RETRY_AFTER, value.clone());
         }
         let body = json!({"error":{"message":proxy.message,"code":proxy.error_code,"type":proxy.error_type}}).to_string();
-        let failure = classify_failure(proxy.status, body.as_bytes())?;
-        mark_failure_scoped(
+        return mark_upstream_failure(
             state,
             candidate,
-            failure,
+            proxy.status,
+            body.as_bytes(),
             retry_after(&headers),
             proxy.model_scope,
         );
-        return Some(failure);
     }
     mark_failure(state, candidate, FailureClass::Transient, None);
     Some(FailureClass::Transient)
+}
+
+fn mark_upstream_failure(
+    state: &AppState,
+    candidate: &Candidate,
+    status: StatusCode,
+    body: &[u8],
+    retry_after: Option<Duration>,
+    model_scope: bool,
+) -> Option<FailureClass> {
+    let known = workbuddy_reset::classify(candidate, status, body, now_ms());
+    let failure = known
+        .as_ref()
+        .map(|known| known.failure)
+        .or_else(|| classify_failure(status, body))?;
+    mark_failure_until(
+        state,
+        candidate,
+        failure,
+        retry_after,
+        model_scope || known.is_some(),
+        known.and_then(|known| known.reset_at_ms),
+    );
+    Some(failure)
 }
 
 #[cfg(test)]
@@ -3271,6 +3303,17 @@ fn mark_failure_scoped(
     retry_after: Option<Duration>,
     model_scope: bool,
 ) {
+    mark_failure_until(state, candidate, failure, retry_after, model_scope, None);
+}
+
+fn mark_failure_until(
+    state: &AppState,
+    candidate: &Candidate,
+    failure: FailureClass,
+    retry_after: Option<Duration>,
+    model_scope: bool,
+    reset_at_ms: Option<u64>,
+) {
     if failure == FailureClass::RequestIncompatible {
         return;
     }
@@ -3307,7 +3350,9 @@ fn mark_failure_scoped(
         .or_default();
     *entry = next;
     let cooldown = cooldown_for_failure(failure, retry_after, entry.consecutive_failures);
-    let deadline = now_ms().saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64);
+    let deadline = reset_at_ms.unwrap_or_else(|| {
+        now_ms().saturating_add(cooldown.as_millis().min(u128::from(u64::MAX)) as u64)
+    });
     if !entry
         .cooldown_until_ms
         .is_some_and(|until| until > deadline)
@@ -3392,6 +3437,78 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
     {
         return None;
     }
+    let value = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+    let error = value
+        .pointer("/response/error")
+        .filter(|error| error.is_object())
+        .or_else(|| value.get("error").filter(|error| error.is_object()))
+        .unwrap_or(&value);
+    if ["code", "type"].iter().any(|key| {
+        error[*key].as_str().is_some_and(|code| {
+            [
+                "content_policy_violation",
+                "content_filter",
+                "safety_policy_violation",
+            ]
+            .iter()
+            .any(|policy| code.eq_ignore_ascii_case(policy))
+        })
+    }) {
+        return None;
+    }
+    if matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY
+    ) || status.is_server_error()
+    {
+        for key in ["code", "type", "status"] {
+            let failure = match error[key]
+                .as_str()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "request_incompatible" | "unsupported_parameter" => {
+                    Some(FailureClass::RequestIncompatible)
+                }
+                "model_not_found" | "model_not_supported" | "model_unavailable" => {
+                    Some(FailureClass::ModelUnavailable)
+                }
+                "invalid_api_key"
+                | "authentication_error"
+                | "unauthorized"
+                | "unauthenticated"
+                | "permission_denied" => Some(FailureClass::Authentication),
+                "insufficient_quota" | "billing_error" | "billing_hard_limit_reached" => {
+                    Some(FailureClass::Billing)
+                }
+                "rate_limit_exceeded"
+                | "rate_limit_error"
+                | "usage_limit_reached"
+                | "resource_exhausted"
+                | "too_many_requests" => Some(FailureClass::RateLimit),
+                "server_error"
+                | "internal_error"
+                | "internal_server_error"
+                | "overloaded_error"
+                | "service_unavailable"
+                | "service_unavailable_error"
+                | "unavailable"
+                | "internal"
+                | "request_timeout"
+                | "deadline_exceeded"
+                | "upstream_timeout"
+                | "empty_response"
+                | "upstream_empty_response"
+                | "stream_early_eof"
+                | "stream_timeout" => Some(FailureClass::Transient),
+                _ => None,
+            };
+            if failure.is_some() {
+                return failure;
+            }
+        }
+    }
     if [
         "does not support tool",
         "tools are not supported",
@@ -3442,6 +3559,7 @@ fn classify_failure(status: StatusCode, body: &[u8]) -> Option<FailureClass> {
         401 | 403 => Some(FailureClass::Authentication),
         402 => Some(FailureClass::Billing),
         404 => Some(FailureClass::ModelUnavailable),
+        405 | 415 => Some(FailureClass::RequestIncompatible),
         408 | 409 => Some(FailureClass::Transient),
         429 => Some(FailureClass::RateLimit),
         500..=599 => Some(FailureClass::Transient),
@@ -6054,6 +6172,63 @@ mod tests {
         Response::new(Body::from_stream(stream::once(async move {
             Err::<Bytes, std::io::Error>(std::io::Error::other(std::io::Error::other(error)))
         })))
+    }
+
+    #[tokio::test]
+    async fn workbuddy_typed_quota_errors_fall_back_and_keep_the_official_model_deadline() {
+        for streaming in [false, true] {
+            let reset = chrono::Utc::now() + chrono::Duration::days(2);
+            let message = format!(
+                "WorkBuddy: your usage will reset at {} UTC+8, switch models until then",
+                reset
+                    .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                    .format("%Y-%m-%d %H:%M:%S")
+            );
+            let deadline = reset.timestamp() as u64 * 1000;
+            let mut error =
+                crate::services::account_proxy::ProxyError::new(StatusCode::BAD_GATEWAY, message);
+            error.error_code = Some("6004".into());
+            let backup = if streaming {
+                Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+            } else {
+                crate::services::account_proxy::json_response(
+                    &json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                )
+            };
+            let fixtures = Arc::new(Mutex::new(HashMap::from([
+                ("wb-typed".into(), typed_body_failure(error)),
+                ("wb-backup".into(), backup),
+            ])));
+            let mut state = AppState::for_tests().unwrap();
+            state.fixture_responses = Some(fixtures.clone());
+            let mut limited = bound_health_candidate("wb-typed");
+            limited.account_source.as_mut().unwrap().provider = AccountProvider::WorkBuddy;
+            let backup = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "wb-backup");
+            let response = route_chat_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[],"stream":streaming}),
+                vec![limited, backup],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "wb-backup/wb-backup-model"
+            );
+            response.into_body().collect().await.unwrap();
+            assert!(fixtures.lock().unwrap().is_empty());
+            let memory = state.route_memory.lock().unwrap();
+            assert_eq!(
+                memory.candidates["wb-typed"].failure,
+                Some(FailureClass::RateLimit)
+            );
+            assert_eq!(
+                memory.candidates["wb-typed"].cooldown_until_ms,
+                Some(deadline)
+            );
+            assert!(memory.accounts.is_empty());
+        }
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppManagerContext, type AppManagerContextType } from '../AppManager/context';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
+import { useRewardClaimStore } from '../../stores/rewardClaimStore';
 import { AccountSectionRow } from '../AppManager/AccountSectionPrimitives';
 import { OpenDesignAccountSection } from '../AppManager/OpenDesignAccountSection';
 import { AccountCard, AccountCenterTitleActions } from './AccountCenter';
@@ -1143,6 +1144,66 @@ describe('Account Center display data', () => {
     ).toEqual([{ label: 'agent.credits', value: '—', percent: undefined, resetAt: undefined }]);
   });
 
+  it('shares the manual claim batch lock with background claiming, including across page changes', async () => {
+    const state = context();
+    const account = {
+      id: 'saved',
+      edition: 'workbuddy' as const,
+      name: 'Fixture',
+      active: false,
+      plan: 'Free',
+      remaining: null,
+      total: null,
+      expiresAt: null,
+    };
+    state.detectedTools = [
+      { id: 'workbuddy', name: 'WorkBuddy', category: 'Desktop', installed: true },
+    ];
+    state.workBuddyAccountGroups.workbuddy.accounts = [account];
+    let finish!: () => void;
+    const claim = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        })
+    );
+    state.workBuddyAccountGroups.workbuddy.claimDaily = claim;
+    useNavigationStore.getState().setActivePage('accounts');
+    let renderer: ReactTestRenderer | undefined;
+    try {
+      act(() => {
+        renderer = create(
+          <AppManagerContext.Provider value={state}>
+            <AccountCenterTitleActions />
+          </AppManagerContext.Provider>
+        );
+      });
+      const button = () => renderer!.root.findByProps({ 'aria-label': 'accountCenter.claimAll' });
+      act(() => {
+        useRewardClaimStore.getState().tryStart();
+      });
+      expect(button().props.disabled).toBe(true);
+      await act(async () => {
+        void button().props.onClick();
+      });
+      expect(claim).not.toHaveBeenCalled();
+      act(() => useRewardClaimStore.getState().finish());
+      await act(async () => {
+        void button().props.onClick();
+      });
+      expect(claim).toHaveBeenCalledOnce();
+      expect(useRewardClaimStore.getState().tryStart()).toBe(false);
+      act(() => useNavigationStore.getState().setActivePage('models'));
+      expect(useRewardClaimStore.getState().running).toBe(true);
+      await act(async () => finish());
+      expect(useRewardClaimStore.getState().running).toBe(false);
+    } finally {
+      act(() => renderer?.unmount());
+      useNavigationStore.getState().setActivePage('apps');
+      useRewardClaimStore.getState().finish();
+    }
+  });
+
   it.each(['device claimed', 'no device claim', 'ignored response'] as const)(
     'uses the actual TRAE claim result before a render snapshot updates (%s)',
     async (result) => {
@@ -1562,6 +1623,69 @@ describe('Account Center display data', () => {
     expect(unknown).toContain('items-center text-center');
     expect(unknown).not.toContain('>—</span>');
     expect(unknown).toContain('model.noUsageData');
+  });
+
+  it('shows WorkBuddy reward expiry after unclaimed independently of the package reset', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-22T00:00:00Z'));
+    const now = Date.now() / 1000;
+    const state = context();
+    state.workBuddyAccountGroups.workbuddy.accounts = [
+      {
+        id: 'reward',
+        name: 'Reward',
+        edition: 'workbuddy',
+        plan: '体验版',
+        active: true,
+        remaining: 600,
+        total: 600,
+        baseRemaining: 500,
+        baseTotal: 500,
+        baseResetAt: now + 10 * 86400,
+        rewardRemaining: 100,
+        rewardTotal: 100,
+        rewardNextExpiryAt: now + 3600,
+        expiresAt: null,
+      },
+    ];
+    const provider = providers(state).find((item) => item.id === 'workbuddy')!;
+    const account = provider.accounts[0];
+    expect(account.metrics[1]).toMatchObject({
+      resetAt: now + 3600,
+      resetLabel: 'agent.rewardCreditsNextExpiry',
+    });
+    let renderer!: ReactTestRenderer;
+    try {
+      act(() => {
+        renderer = create(
+          <AccountCard provider={provider} account={account} dailyClaimed={false} />
+        );
+      });
+      expect(
+        renderer.root.findByProps({ 'aria-label': 'agent.rewardCreditsNextExpiry 1h0m' })
+      ).toBeDefined();
+      const rendered = JSON.stringify(renderer.toJSON());
+      expect(rendered.indexOf('agent.dailyCreditsUnclaimed')).toBeGreaterThan(-1);
+      expect(rendered.indexOf('agent.dailyCreditsUnclaimed')).toBeLessThan(
+        rendered.indexOf('agent.rewardCreditsNextExpiry 1h0m')
+      );
+      act(() => {
+        renderer.update(<AccountCard provider={provider} account={account} dailyClaimed />);
+      });
+      expect(JSON.stringify(renderer.toJSON())).not.toContain('agent.dailyCreditsUnclaimed');
+      expect(
+        renderer.root.findByProps({ 'aria-label': 'agent.rewardCreditsNextExpiry 1h0m' })
+      ).toBeDefined();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3600_000);
+      });
+      expect(JSON.stringify(renderer.toJSON())).not.toContain('agent.rewardCreditsNextExpiry');
+    } finally {
+      if (renderer) act(() => renderer.unmount());
+      vi.useRealTimers();
+    }
+    expect(state.workBuddyAccountGroups.workbuddy.refresh).not.toHaveBeenCalled();
+    expect(state.workBuddyAccountGroups.workbuddy.claimDaily).not.toHaveBeenCalled();
   });
 
   it('reuses base/reward progress and daily claim text only from confirmed CN balances', () => {
@@ -2163,7 +2287,7 @@ describe('Account Center display data', () => {
       const html = renderToStaticMarkup(<AccountCard provider={provider} account={account} />);
       expect(html).toContain(`aria-label="ZCode · ${account.detail} ${account.identity}"`);
       expect(html.split(`>${account.detail}<`)).toHaveLength(1);
-      expect(html.includes('aria-label="accountCenter.subscription"')).toBe(account === paid);
+      expect(html).not.toContain('aria-label="accountCenter.subscription"');
     }
     expect(global.plan).toBe('agent.zcodeTrial');
   });

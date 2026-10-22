@@ -28,6 +28,7 @@ import {
 } from '../AppManager/workBuddyDailyCredits';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useToolsStore } from '../../stores/toolsStore';
+import { useRewardClaimStore } from '../../stores/rewardClaimStore';
 import { useAccountCardCache } from './useAccountCardCache';
 import { ZCodeAccountProviderChoice } from '../AppManager/ZCodeAccountSection';
 import { KimiAccountRegionChoice } from '../AppManager/KimiAccountSection';
@@ -65,9 +66,12 @@ export function AccountCard({
   const hidden = useAccountPrivacyStore((state) => state.hidden);
   const identity = hidden ? ACCOUNT_NAME_MASK : account.identity;
   const now = useUsageClock(
-    account.claimStatusExpiresAt != null ||
+    account.subscriptionEndAt != null ||
+      account.claimStatusExpiresAt != null ||
       account.metrics.some((metric) => Boolean(metric.resetLabel))
   );
+  const hasSubscriptionExpiry =
+    account.subscriptionEndAt != null && account.subscriptionEndAt * 1000 > now;
   const currentClaimStatus =
     account.claimStatusExpiresAt == null || account.claimStatusExpiresAt * 1000 > now;
   const claimed = currentClaimStatus && (account.dailyClaimed ?? dailyClaimed);
@@ -125,19 +129,15 @@ export function AccountCard({
       >
         <div className="flex min-w-0 items-center gap-3">
           <h3 className="min-w-0 flex-1 truncate text-base font-bold">{identity}</h3>
-          {(account.plan || account.subscriptionEndAt !== undefined) && (
+          {(account.plan || hasSubscriptionExpiry) && (
             <span className="flex max-w-[132px] flex-shrink-0 items-center gap-2 text-xs text-cyber-text-secondary">
-              {account.subscriptionEndAt !== undefined && (
+              {hasSubscriptionExpiry && (
                 <span className="flex flex-shrink-0 items-center text-[10px] leading-3 [&>span]:w-auto [&>span]:leading-3">
-                  {account.subscriptionEndAt == null ? (
-                    <span aria-label={t('accountCenter.subscription')}>—</span>
-                  ) : (
-                    <QuotaCountdown
-                      resetAt={account.subscriptionEndAt}
-                      small
-                      label={t('accountCenter.subscription')}
-                    />
-                  )}
+                  <QuotaCountdown
+                    resetAt={account.subscriptionEndAt}
+                    small
+                    label={t('accountCenter.subscription')}
+                  />
                 </span>
               )}
               {account.plan && (
@@ -413,6 +413,7 @@ export function AccountCenterTitleActions() {
   const context = useAppManager();
   const { t, locale } = useI18n();
   const activePage = useNavigationStore((state) => state.activePage);
+  const rewardBatchRunning = useRewardClaimStore((state) => state.running);
   const toolsReady = useToolsStore((state) => state.hasScanned) || context.detectedTools.length > 0;
   const providers = accountCenterProviders(context, t, locale);
   const latest = useRef(providers);
@@ -439,6 +440,7 @@ export function AccountCenterTitleActions() {
       provider.accounts.map((account) => ({ providerId: provider.id, account }))
     );
   const blocked =
+    rewardBatchRunning ||
     !toolsReady ||
     context.isScanning ||
     context.isLaunching ||
@@ -450,6 +452,7 @@ export function AccountCenterTitleActions() {
     );
   const run = async (action: 'refresh' | 'claim') => {
     if (batch.current || blocked || activePage !== 'accounts' || !accounts.length) return;
+    if (!useRewardClaimStore.getState().tryStart()) return;
     const request = Symbol();
     batch.current = request;
     setRunning(action);
@@ -500,6 +503,7 @@ export function AccountCenterTitleActions() {
         if (summary) context.setApplyError(summary);
       }
     } finally {
+      useRewardClaimStore.getState().finish();
       if (batch.current === request) {
         batch.current = null;
         setRunning(null);

@@ -3,6 +3,7 @@ import { accountError, isAccountAuthorizationError } from '../../utils/accountEr
 import { useConfirm } from '../../components/ConfirmDialog';
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useRewardClaimStore } from '../../stores/rewardClaimStore';
 
 export const BROWSER_LOGIN_TIMEOUT_SECONDS = 10 * 60;
 
@@ -159,6 +160,15 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
     setListFailed(false);
     setMutationRevision((value) => value + 1);
   };
+
+  useEffect(
+    () =>
+      useRewardClaimStore.subscribe((state, previous) => {
+        if (enabled && state.revision !== previous.revision && state.updatedScope === scope)
+          void reload().catch(() => {});
+      }),
+    [enabled, reload, scope]
+  );
 
   useEffect(() => {
     const current = ++generation.current;

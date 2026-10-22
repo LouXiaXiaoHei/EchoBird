@@ -3,6 +3,7 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useManagedAccounts, type AccountClient, type ManagedLogin } from './useManagedAccounts';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useRewardClaimStore } from '../../stores/rewardClaimStore';
 
 vi.mock('../../hooks/useI18n', () => {
   const t = (key: string) => key;
@@ -76,6 +77,27 @@ afterEach(() => {
 });
 
 describe('shared account request boundaries', () => {
+  it('updates a visible saved account after background claiming with only a local list read', async () => {
+    await mount();
+    const selected = state.selectedId;
+    vi.mocked(client.list).mockResolvedValue([{ ...account, quota: 123 }]);
+    await act(async () => useRewardClaimStore.getState().updated('another-provider'));
+    expect(client.list).toHaveBeenCalledTimes(1);
+    await act(async () => useRewardClaimStore.getState().updated('store'));
+    expect(state.accounts).toEqual([{ ...account, quota: 123 }]);
+    expect(state.selectedId).toBe(selected);
+    expect(client.list).toHaveBeenCalledTimes(2);
+    expect(client.refresh).not.toHaveBeenCalled();
+    expect(client.start).not.toHaveBeenCalled();
+    expect(showError).not.toHaveBeenCalled();
+    await act(async () => renderer.update(<Harness enabled={false} />));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+      useRewardClaimStore.getState().updated('store');
+    });
+    expect(client.list).toHaveBeenCalledTimes(2);
+  });
+
   it('honors a longer browser deadline while keeping the backend expiry authoritative', async () => {
     client.loginTimeoutSeconds = 600;
     const poll = deferred<Account | null>();

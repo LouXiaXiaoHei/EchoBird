@@ -500,7 +500,8 @@ pub(super) fn upstream_error(status: StatusCode, headers: &HeaderMap, value: &Va
         .as_str()
         .or_else(|| detail["status"].as_str())
         .or_else(|| detail["error_code"].as_str())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| detail["code"].as_i64().map(|code| code.to_string()));
     error.error_type = detail["type"].as_str().map(str::to_string);
     error.model_scope = detail["scope"] == "model"
         || matches!(
@@ -628,7 +629,11 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
                     | "tools_not_supported"
                     | "response_not_found",
                 ) => StatusCode::NOT_FOUND,
-                Some("invalid_previous_response_id") => StatusCode::BAD_REQUEST,
+                Some(
+                    "invalid_previous_response_id"
+                    | "unsupported_parameter"
+                    | "request_incompatible",
+                ) => StatusCode::BAD_REQUEST,
                 Some("server_error" | "overloaded_error" | "service_unavailable_error") => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
@@ -647,6 +652,30 @@ pub(crate) fn stream_error(event: &str, data: &str, headers: &HeaderMap) -> Opti
 #[cfg(test)]
 mod context_limit_regressions {
     use super::*;
+
+    #[test]
+    fn numeric_quota_codes_and_nested_messages_survive_proxy_and_stream_conversion() {
+        let raw = json!({"code":6004,"msg":"于 2026-10-22 09:00:00 UTC+8 可用"});
+        for value in [raw.clone(), json!({"error":raw})] {
+            let error = upstream_error(StatusCode::BAD_REQUEST, &HeaderMap::new(), &value);
+            assert_eq!(error.error_code.as_deref(), Some("6004"));
+            assert!(error.message.contains("UTC+8"));
+            let stream = stream_error("error", &value.to_string(), &HeaderMap::new()).unwrap();
+            assert_eq!(stream.error_code.as_deref(), Some("6004"));
+            assert!(stream.message.contains("UTC+8"));
+        }
+        for code in ["request_incompatible", "unsupported_parameter"] {
+            let error = stream_error(
+                "error",
+                &json!({"error":{"code":code,"message":"Candidate cannot serve this request"}})
+                    .to_string(),
+                &HeaderMap::new(),
+            )
+            .unwrap();
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert_eq!(error.error_code.as_deref(), Some(code));
+        }
+    }
 
     #[test]
     fn context_limit_stream_failures_are_client_errors_even_with_a_rate_status() {
@@ -696,6 +725,7 @@ mod context_limit_regressions {
 fn safe_error(value: &Value) -> String {
     value["error"]["message"]
         .as_str()
+        .or_else(|| value["error"]["msg"].as_str())
         .or_else(|| value["error"]["error_msg"].as_str())
         .or_else(|| value["message"].as_str())
         .or_else(|| value["error_msg"].as_str())

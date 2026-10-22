@@ -132,6 +132,7 @@ export type TKey =
   | 'settings.alwaysAsk'
   | 'settings.easterEgg'
   | 'settings.launchAtStartup'
+  | 'settings.autoClaimRewards'
   // Close Dialog
   | 'closeDialog.title'
   | 'closeDialog.hint'
@@ -162,6 +163,7 @@ export type TKey =
   | 'model.name'
   | 'model.apiKey'
   | 'model.paste'
+  | 'model.copy'
   | 'model.modelId'
   | 'model.free'
   | 'model.catalogKeyRequired'
@@ -273,6 +275,7 @@ export type TKey =
   | 'freeModels.router.lockKey'
   | 'freeModels.router.unlockKey'
   | 'freeModels.router.randomPort'
+  | 'freeModels.router.apiKeyRequired'
   | 'freeModels.router.portInUse'
   | 'freeModels.router.portUnavailable'
   | 'freeModels.layout.label'

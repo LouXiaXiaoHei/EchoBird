@@ -3,6 +3,321 @@ use std::net::SocketAddr;
 
 use super::*;
 
+#[test]
+fn common_error_codes_use_one_failure_policy_without_guessing_unknown_bad_requests() {
+    for status in [StatusCode::BAD_REQUEST, StatusCode::UNPROCESSABLE_ENTITY] {
+        for (code, expected) in [
+            ("server_error", Some(FailureClass::Transient)),
+            ("service_unavailable_error", Some(FailureClass::Transient)),
+            ("request_timeout", Some(FailureClass::Transient)),
+            ("usage_limit_reached", Some(FailureClass::RateLimit)),
+            ("RESOURCE_EXHAUSTED", Some(FailureClass::RateLimit)),
+            ("invalid_api_key", Some(FailureClass::Authentication)),
+            ("authentication_error", Some(FailureClass::Authentication)),
+            ("billing_hard_limit_reached", Some(FailureClass::Billing)),
+            ("invalid_request_error", None),
+            ("invalid_value", None),
+        ] {
+            for key in ["code", "type"] {
+                let body = json!({"error":{key:code,"message":"Upstream rejected the request"}})
+                    .to_string();
+                assert_eq!(
+                    classify_failure(status, body.as_bytes()),
+                    expected,
+                    "{status} {key}={code}"
+                );
+            }
+        }
+    }
+    for status in [
+        StatusCode::METHOD_NOT_ALLOWED,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+    ] {
+        assert_eq!(
+            classify_failure(status, b"endpoint incompatible"),
+            Some(FailureClass::RequestIncompatible)
+        );
+    }
+    for (code, expected) in [
+        ("RESOURCE_EXHAUSTED", FailureClass::RateLimit),
+        ("unauthenticated", FailureClass::Authentication),
+        ("empty_response", FailureClass::Transient),
+    ] {
+        let body = json!({"error":{"code":code,"message":"Upstream stream error"}}).to_string();
+        assert_eq!(
+            classify_failure(StatusCode::BAD_GATEWAY, body.as_bytes()),
+            Some(expected)
+        );
+    }
+    for code in [
+        "content_policy_violation",
+        "content_filter",
+        "safety_policy_violation",
+    ] {
+        let body = json!({"error":{"code":code,"message":"Request rejected"}}).to_string();
+        assert_eq!(
+            classify_failure(StatusCode::FORBIDDEN, body.as_bytes()),
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn workbuddy_channel_refusal_switches_candidates_without_cooling_a_valid_account() {
+    for provider in [
+        AccountProvider::WorkBuddy,
+        AccountProvider::WorkBuddyAi,
+        AccountProvider::Kilo,
+    ] {
+        for code in [11128, 99999] {
+            let first = Response::builder()
+                .status(400)
+                .body(Body::from(
+                    json!({"code":code,"msg":"Illegal API invocation from an unapproved channel"})
+                        .to_string(),
+                ))
+                .unwrap();
+            let state = audit_fixtures(
+                first,
+                audit_chat_json(
+                    json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                ),
+            );
+            let mut candidate = audit_candidate("first");
+            candidate.account_source = Some(crate::models::model::AccountSource {
+                provider,
+                account_id: "refusal-fixture".into(),
+            });
+            let response = route_chat_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[]}),
+                vec![candidate, audit_candidate("second")],
+            )
+            .await;
+            let known = provider != AccountProvider::Kilo && code == 11128;
+            assert_eq!(
+                response.status(),
+                if known {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                if known {
+                    "second/second-model"
+                } else {
+                    "first/first-model"
+                }
+            );
+            response.into_body().collect().await.unwrap();
+            let memory = state.route_memory.lock().unwrap();
+            assert!(memory.accounts.is_empty());
+            assert!(memory.candidates.is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn typed_workbuddy_channel_refusal_uses_the_same_fallback_policy() {
+    for streaming in [false, true] {
+        let mut error = crate::services::account_proxy::ProxyError::new(
+            StatusCode::BAD_REQUEST,
+            "Illegal API invocation from an unapproved channel",
+        );
+        error.error_code = Some("11128".into());
+        let first = Response::new(Body::from_stream(stream::once(async move {
+            Err::<Bytes, std::io::Error>(std::io::Error::other(error))
+        })));
+        let second = if streaming {
+            Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        } else {
+            audit_chat_json(
+                json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+            )
+        };
+        let state = audit_fixtures(first, second);
+        let mut candidate = audit_candidate("first");
+        candidate.account_source = Some(crate::models::model::AccountSource {
+            provider: AccountProvider::WorkBuddy,
+            account_id: "typed-refusal".into(),
+        });
+        let response = route_chat_with_candidates(
+            &state,
+            &HeaderMap::new(),
+            json!({"messages":[],"stream":streaming}),
+            vec![candidate, audit_candidate("second")],
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "second/second-model"
+        );
+        response.into_body().collect().await.unwrap();
+        assert!(state
+            .fixture_responses
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_empty());
+        let memory = state.route_memory.lock().unwrap();
+        assert!(memory.accounts.is_empty());
+        assert!(memory.candidates.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn issue_576_incompatible_candidates_fall_back_for_each_request_shape() {
+    for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+        for streaming in [false, true] {
+            for code in ["unsupported_parameter", "request_incompatible"] {
+                for parameter in [
+                    "max_tokens below the model's native output limit",
+                    "reasoning_effort",
+                    "image input",
+                ] {
+                    let error = json!({"error":{"code":code,"type":"upstream_error","message":format!("Trae does not advertise support for {parameter} on this model")}});
+                    let first = Response::builder()
+                        .status(400)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(error.to_string()))
+                        .unwrap();
+                    let second = if protocol == RouteProtocol::Responses {
+                        audit_response(
+                            audit_completed("resp_backup", audit_text(), json!({})),
+                            streaming,
+                            true,
+                        )
+                    } else if streaming {
+                        Response::new(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"backup\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+                    } else {
+                        audit_chat_json(
+                            json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                        )
+                    };
+                    let state = audit_fixtures(first, second);
+                    let response = route_with_policy(&state,&HeaderMap::new(),json!({"messages":[],"input":"hello","stream":streaming,"max_tokens":1,"reasoning_effort":"high"}),vec![audit_candidate("first"),audit_candidate("second")],RoutePolicy::default(),protocol).await;
+                    assert_eq!(response.status(), StatusCode::OK, "{code}: {parameter}");
+                    assert_eq!(
+                        response.headers()["X-EchoBird-Routed-Via"],
+                        "second/second-model"
+                    );
+                    response.into_body().collect().await.unwrap();
+                    assert!(state
+                        .fixture_responses
+                        .as_ref()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                        .is_empty());
+                    let memory = state.route_memory.lock().unwrap();
+                    assert!(memory.candidates.is_empty());
+                    assert!(memory.accounts.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn issue_576_all_incompatible_candidates_are_tried_before_returning_bad_request() {
+    for protocol in [RouteProtocol::Chat, RouteProtocol::Responses] {
+        let error = || {
+            Response::builder().status(400).body(Body::from(json!({"error":{"code":"unsupported_parameter","message":"image input unsupported"}}).to_string())).unwrap()
+        };
+        let state = audit_fixtures(error(), error());
+        let response = route_with_policy(
+            &state,
+            &HeaderMap::new(),
+            json!({"messages":[],"input":"hello"}),
+            vec![audit_candidate("first"), audit_candidate("second")],
+            RoutePolicy::default(),
+            protocol,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.headers()["X-EchoBird-Routed-Via"],
+            "second/second-model"
+        );
+        assert!(state
+            .fixture_responses
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .is_empty());
+        assert!(state.route_memory.lock().unwrap().candidates.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn issue_576_workbuddy_reset_uses_the_official_deadline_without_pausing_other_models() {
+    for provider in [AccountProvider::WorkBuddy, AccountProvider::WorkBuddyAi] {
+        for status in [400, 429] {
+            let reset = chrono::Utc::now() + chrono::Duration::days(2);
+            let reset = reset
+                .with_timezone(&chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string();
+            let deadline = chrono::NaiveDateTime::parse_from_str(&reset, "%Y-%m-%d %H:%M:%S")
+                .unwrap()
+                .and_local_timezone(chrono::FixedOffset::east_opt(8 * 3600).unwrap())
+                .unwrap()
+                .timestamp_millis() as u64;
+            let first = Response::builder().status(status).body(Body::from(json!({"code":6004,"msg":format!("今日使用量已超频次上限，于 {reset} (UTC+8) 可用")}).to_string())).unwrap();
+            let state = audit_fixtures(
+                first,
+                audit_chat_json(
+                    json!({"choices":[{"message":{"role":"assistant","content":"backup"},"finish_reason":"stop"}]}),
+                ),
+            );
+            let mut limited = audit_candidate("first");
+            limited.account_source = Some(crate::models::model::AccountSource {
+                provider,
+                account_id: "workbuddy-reset-fixture".into(),
+            });
+            let response = route_chat_with_candidates(
+                &state,
+                &HeaderMap::new(),
+                json!({"messages":[],"stream":false}),
+                vec![limited.clone(), audit_candidate("second")],
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers()["X-EchoBird-Routed-Via"],
+                "second/second-model"
+            );
+            response.into_body().collect().await.unwrap();
+            {
+                let memory = state.route_memory.lock().unwrap();
+                let health = &memory.candidates["first"];
+                assert_eq!(health.failure, Some(FailureClass::RateLimit));
+                assert_eq!(health.cooldown_until_ms, Some(deadline));
+                assert!(memory.accounts.is_empty());
+                assert!(!is_cooling_down(&memory, &limited, deadline));
+                let restored: RouteMemory =
+                    serde_json::from_slice(&serde_json::to_vec(&*memory).unwrap()).unwrap();
+                assert_eq!(
+                    restored.candidates["first"].cooldown_until_ms,
+                    Some(deadline)
+                );
+            }
+            assert!(candidate_is_cooling_down(&state, &limited));
+            let mut other = limited.clone();
+            other.internal_id = "other".into();
+            other.model_id = "other-model".into();
+            other.fingerprint = "other-fingerprint".into();
+            assert!(!candidate_is_cooling_down(&state, &other));
+        }
+    }
+}
+
 fn timeout_stream_frame(protocol: RouteProtocol, kind: &str) -> String {
     if protocol == RouteProtocol::Chat {
         let delta = match kind {

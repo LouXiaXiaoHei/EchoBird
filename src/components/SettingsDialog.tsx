@@ -11,6 +11,7 @@ import {
   Sparkles,
   Power,
   Monitor,
+  Gift,
 } from 'lucide-react';
 import { getVersion } from '@tauri-apps/api/app';
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
@@ -24,6 +25,7 @@ import { useThemeStore, type ThemeMode } from '../stores/themeStore';
 import { COLOR_THEMES, type ColorThemeId } from '../data/colorThemes';
 import { useUiScaleStore } from '../stores/uiScaleStore';
 import { useEasterEggStore } from '../stores/easterEggStore';
+import { useRewardClaimStore } from '../stores/rewardClaimStore';
 
 // All supported locales
 const LOCALE_OPTIONS = [
@@ -65,6 +67,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   const [closeToTray, setCloseToTray] = useState<boolean | null>(false);
   const easterEgg = useEasterEggStore((state) => state.enabled);
   const setEasterEgg = useEasterEggStore((state) => state.setEnabled);
+  const autoClaimRewards = useRewardClaimStore((state) => state.enabled);
+  const setAutoClaimRewards = useRewardClaimStore((state) => state.setEnabled);
   const background = useBackgroundStore((state) => state.mode);
   const setBackground = useBackgroundStore((state) => state.setMode);
   // Launch-at-startup toggle. Source of truth is the autostart plugin's OS
@@ -516,6 +520,15 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                       </span>
                     </div>
                     <ToggleSwitch checked={easterEgg} onChange={setEasterEgg} />
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Gift size={14} className="text-cyber-text-secondary" />
+                      <span className="text-[14px] font-medium text-cyber-text-secondary">
+                        {t('settings.autoClaimRewards')}
+                      </span>
+                    </div>
+                    <ToggleSwitch checked={autoClaimRewards} onChange={setAutoClaimRewards} />
                   </div>
                 </div>
 

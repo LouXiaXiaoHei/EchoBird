@@ -98,6 +98,8 @@ pub struct Account {
     #[serde(default)]
     pub reward_total: Option<f64>,
     #[serde(default)]
+    pub reward_next_expiry_at: Option<i64>,
+    #[serde(default)]
     pub addon_remaining: Option<f64>,
     #[serde(default)]
     pub daily_claimed_at: Option<i64>,
@@ -203,6 +205,7 @@ fn snapshot(edition: Edition, session: Value) -> Result<Saved, String> {
             base_reset_at: None,
             reward_remaining: None,
             reward_total: None,
+            reward_next_expiry_at: None,
             addon_remaining: None,
             daily_claimed_at: None,
             expires_at: None,
@@ -681,6 +684,7 @@ async fn refresh_saved(saved: &mut Saved, sync_checkin_status: bool) -> Result<A
     saved.summary.base_reset_at = quota.base_reset_at;
     saved.summary.reward_remaining = quota.reward_remaining;
     saved.summary.reward_total = quota.reward_total;
+    saved.summary.reward_next_expiry_at = quota.reward_next_expiry_at;
     saved.summary.addon_remaining = quota.addon_remaining;
     saved.summary.expires_at = quota.expires_at;
     saved.summary.plan = quota.plan;
@@ -1065,6 +1069,7 @@ mod tests {
             "baseResetAt",
             "rewardRemaining",
             "rewardTotal",
+            "rewardNextExpiryAt",
             "addonRemaining",
         ] {
             value["summary"].as_object_mut().unwrap().remove(key);
@@ -1077,6 +1082,7 @@ mod tests {
         assert_eq!(saved.summary.plan, None);
         assert_eq!(saved.summary.base_remaining, None);
         assert_eq!(saved.summary.reward_remaining, None);
+        assert_eq!(saved.summary.reward_next_expiry_at, None);
         assert_eq!(saved.summary.addon_remaining, None);
         assert_eq!(saved.summary.daily_claimed_at, None);
     }

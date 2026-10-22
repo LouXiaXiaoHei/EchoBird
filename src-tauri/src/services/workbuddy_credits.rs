@@ -11,6 +11,7 @@ pub(super) struct Quota {
     pub base_reset_at: Option<i64>,
     pub reward_remaining: Option<f64>,
     pub reward_total: Option<f64>,
+    pub reward_next_expiry_at: Option<i64>,
     pub addon_remaining: Option<f64>,
     pub plan: Option<String>,
 }
@@ -90,15 +91,20 @@ fn resource_amount(item: &Value, suffix: &str) -> Option<f64> {
             .and_then(|slice| amount(slice, suffix))
     })
 }
-fn expiry(v: &Value, now: i64) -> Option<i64> {
-    let deduction = [
+fn package_expiry(v: &Value) -> Option<i64> {
+    [
+        "PackageEndTime",
+        "packageEndTime",
         "DeductionEndTime",
         "deductionEndTime",
         "ExpiredTime",
         "expiredTime",
     ]
     .iter()
-    .find_map(|k| timestamp(v.get(k)));
+    .find_map(|k| timestamp(v.get(k)))
+}
+fn expiry(v: &Value, now: i64) -> Option<i64> {
+    let deduction = package_expiry(v);
     let cycle = timestamp(v.get("CycleEndTime").or_else(|| v.get("cycleEndTime")));
     let result = match (deduction, cycle) {
         (Some(a), Some(b)) if a.saturating_sub(b) > 365 * 86400 => Some(b),
@@ -315,6 +321,18 @@ fn quota(items: &[Value], summary: Option<&Value>, now: i64, edition: Edition) -
     };
     let base_values = known(&base).then(|| summarize(&base, now));
     let reward_values = known(&rewards).then(|| summarize(&rewards, now));
+    let reward_next_expiry_at = reward_values.and_then(|_| {
+        rewards
+            .iter()
+            .filter_map(|item| {
+                let end = package_expiry(item)?;
+                (end > now
+                    && end.saturating_sub(now) <= 730 * 86400
+                    && summarize(std::slice::from_ref(item), now).0 > 0.0)
+                    .then_some(end)
+            })
+            .min()
+    });
     let addon_values = known(&addons).then(|| summarize(&addons, now));
     let base_reset_at = base
         .iter()
@@ -336,6 +354,7 @@ fn quota(items: &[Value], summary: Option<&Value>, now: i64, edition: Edition) -
         base_reset_at,
         reward_remaining: reward_values.map(|value| value.0),
         reward_total: reward_values.map(|value| value.1),
+        reward_next_expiry_at,
         addon_remaining: addon_values.map(|value| value.0),
         plan: subscription_plan(items, summary, now, edition),
     }
@@ -633,8 +652,41 @@ mod tests {
         assert_eq!(result.base_reset_at, Some(1700300000));
         assert_eq!(result.reward_remaining, Some(85.0));
         assert_eq!(result.reward_total, Some(120.0));
+        assert_eq!(result.reward_next_expiry_at, Some(1700100000));
         assert_eq!(result.addon_remaining, Some(25.0));
         assert_eq!(result.plan.as_deref(), Some("体验版"));
+    }
+    #[test]
+    fn reward_deadline_uses_the_next_unspent_package_not_the_billing_cycle() {
+        let now = 1700000000;
+        let reward = |remaining, end| json!({"PackageCode":"TCACA_code_007_nzdH5h4Nl0", "CycleCapacitySize":100,"CycleCapacityRemain":remaining,"PackageEndTime":end,"CycleEndTime":now+300,"DeductionEndTime":now+86400});
+        let result = quota(
+            &[
+                reward(18.49, now + 3600),
+                reward(30.0, now + 7200),
+                reward(0.0, now + 60),
+                reward(100.0, now - 1),
+                json!({"PackageCode":"TCACA_code_008_cfWoLwvjU4","CycleCapacityRemain":500,"CycleEndTime":now+600}),
+            ],
+            None,
+            now,
+            Edition::Cn,
+        );
+        assert!((result.reward_remaining.unwrap() - 48.49).abs() < 1e-9);
+        assert_eq!(result.reward_next_expiry_at, Some(now + 3600));
+        assert_eq!(result.base_reset_at, Some(now + 600));
+        let unknown = quota(
+            &[
+                json!({"PackageCode":"TCACA_code_007_nzdH5h4Nl0","CycleCapacityRemain":20,"CycleEndTime":now+300}),
+            ],
+            None,
+            now,
+            Edition::Cn,
+        );
+        assert_eq!(unknown.reward_remaining, Some(20.0));
+        assert_eq!(unknown.reward_next_expiry_at, None);
+        let exhausted = quota(&[reward(0.0, now + 3600)], None, now, Edition::Cn);
+        assert_eq!(exhausted.reward_next_expiry_at, None);
     }
     #[test]
     fn unknown_group_amount_is_not_fabricated() {

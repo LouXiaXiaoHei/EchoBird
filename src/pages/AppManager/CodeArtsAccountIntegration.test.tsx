@@ -281,7 +281,7 @@ it('uses the shared subscription countdown in both plan positions and updates it
   await tick(60_000);
   expect(
     renderer.root.findAllByProps({ 'aria-label': 'accountCenter.subscription 0m' })
-  ).toHaveLength(2);
+  ).toHaveLength(0);
   expect(renderedText()).toContain('6,498.62');
   expect(renderedText()).not.toContain('99.98%');
   expect(calls('refresh_codearts_account')).toHaveLength(2);

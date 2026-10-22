@@ -157,6 +157,7 @@ const en: Translations = {
   'freeModels.router.lockKey': 'Encrypt API key',
   'freeModels.router.unlockKey': 'Decrypt API key',
   'freeModels.router.randomPort': 'Random port',
+  'freeModels.router.apiKeyRequired': 'An API key is required to call this endpoint.',
   'freeModels.router.portInUse': 'Port is in use',
   'freeModels.router.portUnavailable': 'Port unavailable',
   'freeModels.layout.label': 'Display layout',
@@ -252,6 +253,7 @@ const en: Translations = {
   'settings.closeToTray': 'Minimize to tray',
   'settings.easterEgg': 'Easter Egg',
   'settings.launchAtStartup': 'Launch at startup',
+  'settings.autoClaimRewards': 'Automatically claim rewards',
   'settings.alwaysAsk': 'Always ask',
   // Close Dialog
   'closeDialog.title': 'CLOSE BEHAVIOR',
@@ -278,6 +280,7 @@ const en: Translations = {
   'model.name': 'Name',
   'model.apiKey': 'API Key',
   'model.paste': 'Paste',
+  'model.copy': 'Copy',
   'model.modelId': 'Model ID',
   'model.free': 'Free',
   'model.catalogKeyRequired': 'Enter API key first',

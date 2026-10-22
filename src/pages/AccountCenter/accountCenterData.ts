@@ -151,8 +151,17 @@ export function accountCenterProviders(
           account.baseResetAt
         )
       );
-    if (account.rewardRemaining != null)
-      metrics.push(credits(t('agent.rewardCredits'), account.rewardRemaining, account.rewardTotal));
+    if (account.rewardRemaining != null) {
+      const reward = credits(
+        t('agent.rewardCredits'),
+        account.rewardRemaining,
+        account.rewardTotal,
+        account.rewardNextExpiryAt
+      );
+      if (account.rewardNextExpiryAt != null)
+        reward.resetLabel = t('agent.rewardCreditsNextExpiry');
+      metrics.push(reward);
+    }
     if (account.addonRemaining != null)
       metrics.push(credits(t('agent.purchasedCredits'), account.addonRemaining));
     return metrics.length

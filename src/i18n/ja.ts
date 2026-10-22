@@ -158,6 +158,7 @@ const ja: Partial<Translations> = {
   'freeModels.router.lockKey': 'APIキーを暗号化',
   'freeModels.router.unlockKey': 'APIキーを復号',
   'freeModels.router.randomPort': 'ランダムポート',
+  'freeModels.router.apiKeyRequired': '呼び出すには API キーの入力が必要です。',
   'freeModels.router.portInUse': 'ポートは使用中です',
   'freeModels.router.portUnavailable': 'ポートを使用できません',
   'freeModels.layout.label': '表示形式',
@@ -287,6 +288,7 @@ const ja: Partial<Translations> = {
   'settings.alwaysAsk': '毎回確認',
   'settings.easterEgg': 'イースターエッグ',
   'settings.launchAtStartup': '起動時に開く',
+  'settings.autoClaimRewards': '報酬を自動受け取り',
   'closeDialog.title': 'ウィンドウの閉じ方',
   'closeDialog.hint':
     '注意：EchoBird のスマートルーターを使用している場合、終了するとアプリが使用できなくなります。',
@@ -308,6 +310,7 @@ const ja: Partial<Translations> = {
   'model.name': '名前',
   'model.apiKey': 'API キー',
   'model.paste': '貼り付け',
+  'model.copy': 'コピー',
   'model.modelId': 'モデル ID',
   'model.free': '無料',
   'model.catalogKeyRequired': '先に API キーを入力',

@@ -186,6 +186,60 @@ describe('explicit Smart Router response tests', () => {
     expect(api.cancelSmartRouterProbe).not.toHaveBeenCalled();
   });
 
+  it('keeps the original round when API and account candidates are added and tests additions only in the next round', async () => {
+    await render();
+    await act(async () => {
+      void hook.test();
+    });
+    const firstBatch = vi.mocked(api.testSmartRouterCandidate).mock.calls[0][3];
+    await reply(0, { latencyMs: 123, error: null });
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    models = [
+      ...models,
+      {
+        id: 'added-api',
+        internalId: 'added-api',
+        provider: 'Added API',
+        modelId: 'added-api-model',
+        baseUrl: 'https://added.example/v1',
+      },
+      {
+        id: 'added-account',
+        internalId: 'added-account',
+        provider: 'Added account',
+        modelId: 'added-account-model',
+        baseUrl: '',
+        accountSource: { provider: 'codex', accountId: 'added-account-id' },
+      },
+    ];
+    await render();
+    expect(api.cancelSmartRouterProbe).not.toHaveBeenCalled();
+    expect(finishConnectionTestBatch).not.toHaveBeenCalled();
+    expect(hook.isTesting).toBe(true);
+    expect(hook.pendingIds).toEqual(new Set(['account', 'keyless']));
+    expect(hook.results.api.latencyMs).toBe(123);
+    await reply(1, { latencyMs: 234, error: null });
+    await reply(2, { latencyMs: 345, error: null });
+    expect(api.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    expect(hook.results['added-api']).toBeUndefined();
+    expect(hook.results['added-account']).toBeUndefined();
+    expect(hook.isTesting).toBe(false);
+    expect(finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(firstBatch);
+    await act(async () => {
+      void hook.test();
+    });
+    for (let i = 3; i < 8; i++) await reply(i, { latencyMs: 100 + i, error: null });
+    expect(
+      vi
+        .mocked(api.testSmartRouterCandidate)
+        .mock.calls.slice(3)
+        .map((call) => call[0])
+    ).toEqual(['api', 'account', 'keyless', 'added-api', 'added-account']);
+    expect(hook.results['added-api'].latencyMs).toBe(106);
+    expect(hook.results['added-account'].latencyMs).toBe(107);
+    expect(hook.isTesting).toBe(false);
+  });
+
   it.each(['model', 'account', 'endpoint', 'remove'])(
     'cancels when the %s binding changes',
     async (change) => {

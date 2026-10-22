@@ -3,7 +3,6 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import * as api from '../../api/tauri';
-import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { copyText } from '../../utils/copyText';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { FreeModelsProvider, useFreeModels } from './provider';
@@ -540,9 +539,15 @@ describe('Independent smart router groups', () => {
     await act(async () => button('freeModels.router.edit First').props.onClick());
     await act(async () => {
       if (field === 'apiKey') input('router-apiKey').props.onChange({ target: { value } });
-      else renderer.root.findByType(ModelIdCombobox).props.onChange(value);
+      else input('router-modelId').props.onChange({ target: { value } });
     });
     expect(renderer.root.findByProps({ type: 'submit' }).props.disabled).toBe(true);
+    expect(input('router-key-hint').props['aria-hidden']).toBe(field !== 'apiKey');
+    if (field === 'apiKey') {
+      expect(input('router-key-hint').children).toEqual(['freeModels.router.apiKeyRequired']);
+      expect(input('router-apiKey').props['aria-invalid']).toBe(true);
+      expect(button('model.copy model.apiKey').props.disabled).toBe(true);
+    }
     await act(async () => renderer.root.findByType('form').props.onSubmit({ preventDefault() {} }));
     expect(api.saveSmartRouter).not.toHaveBeenCalled();
     expect(api.encryptSecret).not.toHaveBeenCalled();
@@ -551,9 +556,11 @@ describe('Independent smart router groups', () => {
     await act(async () => {
       if (field === 'apiKey')
         input('router-apiKey').props.onChange({ target: { value: 'custom-route-key' } });
-      else renderer.root.findByType(ModelIdCombobox).props.onChange('custom-route');
+      else input('router-modelId').props.onChange({ target: { value: 'custom-route' } });
     });
     expect(renderer.root.findByProps({ type: 'submit' }).props.disabled).toBe(false);
+    expect(input('router-key-hint').props['aria-hidden']).toBe(true);
+    expect(input('router-apiKey').props['aria-invalid']).toBeUndefined();
   });
 
   it('randomizes only the edited port on dice click and preserves edits on probe failure', async () => {
@@ -645,31 +652,80 @@ describe('Independent smart router groups', () => {
     expect(button('freeModels.router.add')).toBeDefined();
   });
 
-  it('reuses a plain model-ID input with paste and supports key paste without catalog or crypto actions', async () => {
+  it('copies both protocol URLs and the current editable model ID and key without mutating or saving', async () => {
     await open();
     await act(async () => button('freeModels.router.edit First').props.onClick());
-    const modelId = () => renderer.root.findByType(ModelIdCombobox);
-    expect(modelId().props.onRefresh).toBeUndefined();
-    expect(modelId().props.options).toBeUndefined();
-    expect(modelId().findAllByType('button')).toHaveLength(1);
-    vi.mocked(readClipboardText).mockResolvedValueOnce('  custom-route  ');
-    await act(async () =>
-      modelId()
-        .findByType('button')
-        .props.onClick({ stopPropagation() {} })
-    );
-    expect(modelId().findByType('input').props.value).toBe('custom-route');
-    vi.mocked(readClipboardText).mockResolvedValueOnce('  pasted-key  ');
-    await act(async () => button('model.paste model.apiKey').props.onClick());
-    expect(input('router-apiKey').props.value).toBe('pasted-key');
-    vi.mocked(readClipboardText).mockRejectedValueOnce(new Error('Clipboard unavailable'));
-    await act(async () => button('model.paste model.apiKey').props.onClick());
-    expect(input('router-apiKey').props.value).toBe('pasted-key');
+    await act(async () => {
+      input('router-modelId').props.onChange({ target: { value: 'custom-route' } });
+      input('router-apiKey').props.onChange({ target: { value: 'custom-key' } });
+    });
+    await act(async () => dice().props.onClick());
+    for (const [label, value] of [
+      ['OpenAI', 'http://127.0.0.1:60001/v1'],
+      ['Anthropic', 'http://127.0.0.1:60001'],
+      ['model.modelId', 'custom-route'],
+      ['model.apiKey', 'custom-key'],
+    ]) {
+      await act(async () => button(`model.copy ${label}`).props.onClick());
+      expect(copyText).toHaveBeenLastCalledWith(value);
+      expect(showToast).toHaveBeenLastCalledWith('success', 'feedback.step1.copied');
+    }
+    expect(input('router-modelId').props.value).toBe('custom-route');
+    expect(input('router-apiKey').props.value).toBe('custom-key');
+    expect(readClipboardText).not.toHaveBeenCalled();
+    expect(renderer.root.findAllByProps({ role: 'combobox' })).toHaveLength(0);
     expect(renderer.root.findAllByProps({ role: 'alert' })).toHaveLength(0);
     expect(api.encryptSecret).not.toHaveBeenCalled();
     expect(api.decryptSecret).not.toHaveBeenCalled();
     expect(api.saveSmartRouter).not.toHaveBeenCalled();
     await act(async () => button('btn.close').props.onClick());
+    expect(api.saveSmartRouter).not.toHaveBeenCalled();
+  });
+
+  it('copies a locked key as plaintext without unlocking the draft and reuses clipboard failure feedback', async () => {
+    await open();
+    await act(async () => button('freeModels.router.edit First').props.onClick());
+    await act(async () => button('freeModels.router.lockKey').props.onClick());
+    await act(async () => button('model.copy model.apiKey').props.onClick());
+    expect(api.decryptSecret).toHaveBeenCalledExactlyOnceWith('enc:v1:sealed-fixture');
+    expect(copyText).toHaveBeenCalledExactlyOnceWith('private-key');
+    expect(input('router-apiKey').props.readOnly).toBe(true);
+    expect(input('router-apiKey').props.value).not.toContain('private-key');
+    expect(input('router-key-hint').children).toEqual(['key.encrypted']);
+    expect(showToast).toHaveBeenLastCalledWith('success', 'feedback.step1.copied');
+    vi.mocked(copyText).mockResolvedValueOnce(false);
+    await act(async () => button('model.copy model.apiKey').props.onClick());
+    expect(showToast).toHaveBeenLastCalledWith('error', 'feedback.step1.failed');
+    vi.mocked(api.decryptSecret).mockResolvedValueOnce('');
+    await act(async () => button('model.copy model.apiKey').props.onClick());
+    expect(copyText).toHaveBeenCalledTimes(2);
+    expect(showToast).toHaveBeenLastCalledWith('error', 'feedback.step1.failed');
+    expect(api.saveSmartRouter).not.toHaveBeenCalled();
+  });
+
+  it('does not copy or toast if a pending key decryption finishes after closing the modal', async () => {
+    await open();
+    await act(async () => button('freeModels.router.edit First').props.onClick());
+    await act(async () => button('freeModels.router.lockKey').props.onClick());
+    let resolve!: (value: string) => void;
+    vi.mocked(api.decryptSecret).mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      })
+    );
+    let copying!: Promise<void>;
+    await act(async () => {
+      copying = button('model.copy model.apiKey').props.onClick();
+    });
+    expect(button('model.copy model.apiKey').props.disabled).toBe(false);
+    expect(renderer.root.findByProps({ type: 'submit' }).props.disabled).toBe(false);
+    await act(async () => button('btn.close').props.onClick());
+    await act(async () => {
+      resolve('private-key');
+      await copying;
+    });
+    expect(copyText).not.toHaveBeenCalled();
+    expect(showToast).not.toHaveBeenCalled();
     expect(api.saveSmartRouter).not.toHaveBeenCalled();
   });
 

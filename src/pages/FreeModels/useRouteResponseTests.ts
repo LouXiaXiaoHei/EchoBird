@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   cancelSmartRouterProbe,
   testSmartRouterCandidate,
@@ -26,13 +26,16 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean,
   const running = useRef(false);
   const requests = useRef(new Map<string, string>());
   const batchId = useRef<string | null>(null);
-  const scopedBinding = (model: RouteModelNode) => JSON.stringify([routerId, binding(model)]);
-  const bindings = new Map(models.map((model) => [model.id, scopedBinding(model)]));
-  const bindingsKey = JSON.stringify([...bindings].sort(([a], [b]) => a.localeCompare(b)));
+  const roundBindings = useRef(new Map<string, string>());
+  const bindings = useMemo(
+    () => new Map(models.map((model) => [model.id, JSON.stringify([routerId, binding(model)])])),
+    [models, routerId]
+  );
 
   const cancel = useCallback(() => {
     generation.current++;
     running.current = false;
+    roundBindings.current.clear();
     for (const requestId of requests.current.values()) {
       void cancelSmartRouterProbe(requestId).catch(() => undefined);
     }
@@ -44,7 +47,10 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean,
     setPendingIds(new Set());
   }, []);
 
-  useLayoutEffect(() => cancel, [bindingsKey, routerId, cancel]);
+  useLayoutEffect(() => cancel, [routerId, cancel]);
+  useLayoutEffect(() => {
+    if ([...roundBindings.current].some(([id, value]) => bindings.get(id) !== value)) cancel();
+  }, [bindings, cancel]);
 
   const test = async () => {
     if (!active || running.current || models.length === 0) return;
@@ -52,7 +58,8 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean,
     const attempt = ++generation.current;
     const batch = crypto.randomUUID();
     batchId.current = batch;
-    const queue = models.map((model) => ({ model, binding: scopedBinding(model) }));
+    roundBindings.current = new Map(bindings);
+    const queue = models.map((model) => ({ model, binding: bindings.get(model.id)! }));
     let next = 0;
     setPendingIds(new Set(models.map((model) => model.id)));
     const worker = async () => {
@@ -93,7 +100,10 @@ export function useRouteResponseTests(models: RouteModelNode[], active: boolean,
         batchId.current = null;
         void finishConnectionTestBatch(batch).catch(() => undefined);
       }
-      if (generation.current === attempt) running.current = false;
+      if (generation.current === attempt) {
+        running.current = false;
+        roundBindings.current.clear();
+      }
     }
   };
 

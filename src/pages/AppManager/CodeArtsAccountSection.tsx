@@ -43,7 +43,6 @@ export function CodeArtsAccountSection({ showDivider = true }: { showDivider?: b
                   <QuotaCountdown
                     resetAt={account.subscriptionEndAt}
                     compact
-                    keepZero
                     label={t('accountCenter.subscription')}
                   />
                 ) : undefined

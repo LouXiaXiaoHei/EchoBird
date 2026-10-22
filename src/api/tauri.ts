@@ -517,6 +517,7 @@ export interface WorkBuddyAccount {
   baseResetAt?: number | null;
   rewardRemaining?: number | null;
   rewardTotal?: number | null;
+  rewardNextExpiryAt?: number | null;
   addonRemaining?: number | null;
   dailyClaimedAt?: number | null;
   expiresAt: number | null;

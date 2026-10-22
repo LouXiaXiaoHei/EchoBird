@@ -9,10 +9,8 @@ import {
   type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { readText as readClipboardText } from '@tauri-apps/plugin-clipboard-manager';
 import { Lock, Plus, SquarePen, Trash2, Unlock, Waypoints, X } from 'lucide-react';
 import * as api from '../../api/tauri';
-import { ModelIdCombobox } from '../../components/ModelIdCombobox';
 import { RoutingToggle } from '../../components/RoutingToggle';
 import { ViewModeTabGroup, type ViewModeTabPosition } from '../../components/ViewModeTabGroup';
 import { useConfirm } from '../../components/ConfirmDialog';
@@ -33,6 +31,7 @@ function RouterSettingsModal({
   onSave: (settings: api.SmartRouterSettings) => Promise<void>;
 }) {
   const { t } = useI18n();
+  const { showToast } = useToast();
   const [form, setForm] = useState(initial);
   const [port, setPort] = useState(initial.port);
   const [saving, setSaving] = useState(false);
@@ -40,6 +39,7 @@ function RouterSettingsModal({
   const request = useRef(0);
   const [error, setError] = useState('');
   const locked = form.apiKey.startsWith('enc:v1:');
+  const keyMissing = !form.apiKey.trim();
   const valid =
     form.name.trim() && form.modelId.trim() && form.apiKey.trim() && port > 0 && port <= 65535;
   const busy = saving || pending;
@@ -56,10 +56,7 @@ function RouterSettingsModal({
       return t('freeModels.router.portUnavailable');
     return message;
   };
-  const updateField = async (
-    field: 'port' | 'modelId' | 'apiKey',
-    read: () => Promise<string | null>
-  ) => {
+  const updateField = async (field: 'port' | 'apiKey', read: () => Promise<string | null>) => {
     if (busy) return;
     const attempt = ++request.current;
     setPending(true);
@@ -78,14 +75,23 @@ function RouterSettingsModal({
   };
   const randomizePort = () =>
     updateField('port', async () => String(await api.getSmartRouterAvailablePort(port)));
-  const paste = (field: 'modelId' | 'apiKey') =>
-    updateField(field, async () => {
-      try {
-        return (await readClipboardText()).trim() || null;
-      } catch {
-        return null;
-      }
-    });
+  const copy = async (value: string, encrypted = false) => {
+    if (busy || !value.trim()) return;
+    const attempt = ++request.current;
+    try {
+      const text = encrypted ? await api.decryptSecret(value) : value;
+      if (attempt !== request.current) return;
+      if (!text.trim()) throw new Error('Empty copied value');
+      const ok = await copyText(text);
+      if (attempt === request.current)
+        showToast(
+          ok ? 'success' : 'error',
+          t(ok ? 'feedback.step1.copied' : 'feedback.step1.failed')
+        );
+    } catch {
+      if (attempt === request.current) showToast('error', t('feedback.step1.failed'));
+    }
+  };
   const toggleKey = () => {
     if (!form.apiKey) return;
     return updateField('apiKey', async () => {
@@ -182,34 +188,61 @@ function RouterSettingsModal({
                   type="text"
                   readOnly
                   value={`127.0.0.1:${port}${protocol === 'OpenAI' ? '/v1' : ''}`}
-                  className="w-full rounded-button border border-cyber-border bg-cyber-input py-1.5 pl-2 pr-8 font-mono text-xs text-cyber-text-secondary focus:border-cyber-border focus:outline-none"
+                  className="w-full rounded-button border border-cyber-border bg-cyber-input py-1.5 pl-2 pr-20 font-mono text-xs text-cyber-text-secondary focus:border-cyber-border focus:outline-none"
                   style={{ cursor: 'default' }}
                 />
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label={`${t('freeModels.router.randomPort')} ${protocol}`}
-                  onClick={() => void randomizePort()}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-sm"
-                >
-                  <span aria-hidden="true">🎲</span>
-                </button>
+                <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`${t('model.copy')} ${protocol}`}
+                    onClick={() =>
+                      void copy(`http://127.0.0.1:${port}${protocol === 'OpenAI' ? '/v1' : ''}`)
+                    }
+                    className="text-xs text-cyber-text-secondary"
+                  >
+                    {t('model.copy')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    aria-label={`${t('freeModels.router.randomPort')} ${protocol}`}
+                    onClick={() => void randomizePort()}
+                    className="text-sm"
+                  >
+                    <span aria-hidden="true">🎲</span>
+                  </button>
+                </div>
               </div>
             </div>
           ))}
           <div>
-            <label className="mb-1 block text-xs text-cyber-text-secondary">
+            <label
+              htmlFor="router-modelId"
+              className="mb-1 block text-xs text-cyber-text-secondary"
+            >
               {t('model.modelId')}
             </label>
-            <ModelIdCombobox
-              inlineActions
-              ariaLabel={t('model.modelId')}
-              value={form.modelId}
-              onChange={(modelId) => setForm((current) => ({ ...current, modelId }))}
-              disabled={busy}
-              onPaste={() => paste('modelId')}
-              pasteLabel={t('model.paste')}
-            />
+            <div className="relative">
+              <input
+                id="router-modelId"
+                type="text"
+                autoComplete="off"
+                aria-label={t('model.modelId')}
+                value={form.modelId}
+                onChange={(e) => setForm((current) => ({ ...current, modelId: e.target.value }))}
+                className="w-full rounded-button border border-cyber-border bg-cyber-input py-1.5 pl-2 pr-16 font-mono text-xs text-cyber-text focus:border-cyber-border focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={busy || !form.modelId.trim()}
+                aria-label={`${t('model.copy')} ${t('model.modelId')}`}
+                onClick={() => void copy(form.modelId)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-cyber-text-secondary"
+              >
+                {t('model.copy')}
+              </button>
+            </div>
           </div>
           <div>
             <label htmlFor="router-apiKey" className="mb-1 block text-xs text-cyber-text-secondary">
@@ -221,21 +254,21 @@ function RouterSettingsModal({
                 type="text"
                 autoComplete="off"
                 readOnly={locked}
+                aria-invalid={keyMissing || undefined}
+                aria-describedby={keyMissing || locked ? 'router-key-hint' : undefined}
                 value={locked ? '•••••••••••••••' : form.apiKey}
                 onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
                 className="w-full rounded-button border border-cyber-border bg-cyber-input px-2 py-1.5 pr-20 font-mono text-xs text-cyber-text focus:border-cyber-border focus:outline-none"
               />
-              {!locked && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  aria-label={`${t('model.paste')} ${t('model.apiKey')}`}
-                  onClick={() => void paste('apiKey')}
-                  className="absolute right-8 top-1/2 -translate-y-1/2 text-xs text-cyber-text-secondary"
-                >
-                  {t('model.paste')}
-                </button>
-              )}
+              <button
+                type="button"
+                disabled={busy || keyMissing}
+                aria-label={`${t('model.copy')} ${t('model.apiKey')}`}
+                onClick={() => void copy(form.apiKey, locked)}
+                className="absolute right-8 top-1/2 -translate-y-1/2 text-xs text-cyber-text-secondary"
+              >
+                {t('model.copy')}
+              </button>
               <button
                 type="button"
                 disabled={busy || !form.apiKey}
@@ -251,10 +284,12 @@ function RouterSettingsModal({
               </button>
             </div>
             <div
-              aria-hidden={!locked}
-              className={`mt-1 text-xs leading-tight text-cyber-text/60 ${locked ? '' : 'invisible'}`}
+              id="router-key-hint"
+              role={keyMissing ? 'alert' : undefined}
+              aria-hidden={!keyMissing && !locked}
+              className={`mt-1 text-xs leading-tight ${keyMissing ? 'text-red-400' : 'text-cyber-text/60'} ${keyMissing || locked ? '' : 'invisible'}`}
             >
-              {t('key.encrypted')}
+              {t(keyMissing ? 'freeModels.router.apiKeyRequired' : 'key.encrypted')}
             </div>
           </div>
           {error && (

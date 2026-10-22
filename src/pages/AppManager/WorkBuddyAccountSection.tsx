@@ -113,6 +113,13 @@ export const WorkBuddyAccountSection: React.FC<{ showDivider?: boolean }> = ({
                           </span>
                         )
                       )}
+                      {(account.rewardRemaining ?? 0) > 0 && (
+                        <QuotaCountdown
+                          resetAt={account.rewardNextExpiryAt}
+                          compact
+                          label={t('agent.rewardCreditsNextExpiry')}
+                        />
+                      )}
                     </span>
                   )
                 }

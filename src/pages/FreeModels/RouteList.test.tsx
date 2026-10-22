@@ -399,6 +399,57 @@ describe('Smart Router list layout and candidate pause', () => {
     noModelWrites();
   });
 
+  it('keeps list speed tests running when API and account rows are added without probing the new rows', async () => {
+    const replies: ((result: routerProbe.SmartRouterProbeResult) => void)[] = [];
+    vi.mocked(routerProbe.testSmartRouterCandidate).mockImplementation(
+      () => new Promise((resolve) => replies.push(resolve))
+    );
+    await open();
+    await layout('list');
+    await act(async () => buttons('btn.pingAll')[0].props.onClick());
+    const batch = vi.mocked(routerProbe.testSmartRouterCandidate).mock.calls[0][3];
+    await act(async () => replies[0]({ latencyMs: 123, error: null }));
+    for (const addition of [
+      {
+        internalId: 'new-api',
+        name: 'New API',
+        modelId: 'new-api-model',
+        baseUrl: 'https://new.example/v1',
+        apiKey: 'fixture-key',
+      },
+      {
+        internalId: 'new-account',
+        name: 'New account',
+        modelId: 'new-account-model',
+        baseUrl: '',
+        apiKey: '',
+        accountSource: { provider: 'codex' as const, accountId: 'new-account-id' },
+      },
+    ]) {
+      await act(async () => context.addSelectedModel(addition));
+      expect(buttons('btn.pingAll')[0].props['aria-busy']).toBe(true);
+      expect(routerProbe.cancelSmartRouterProbe).not.toHaveBeenCalled();
+      expect(modelApi.finishConnectionTestBatch).not.toHaveBeenCalled();
+    }
+    expect(rows()).toHaveLength(5);
+    expect(routerProbe.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      replies[1]({ latencyMs: 234, error: null });
+      replies[2]({ latencyMs: 345, error: null });
+    });
+    expect(modelApi.finishConnectionTestBatch).toHaveBeenCalledExactlyOnceWith(batch);
+    expect(routerProbe.testSmartRouterCandidate).toHaveBeenCalledTimes(3);
+    expect(buttons('btn.pingAll')[0].props['aria-busy']).toBeUndefined();
+    const slots = renderer.root.findAllByProps({
+      'aria-label': 'freeModels.router.responseLatency',
+    });
+    expect(slots[0].findByProps({ className: 'text-green-500' }).children.join('')).toBe('123ms');
+    expect(slots[3].children).toEqual(['—']);
+    expect(slots[4].children).toEqual(['—']);
+    expect(accountApi.getAccountProxyModels).not.toHaveBeenCalled();
+    noModelWrites();
+  });
+
   it.each([
     [199, 'text-green-500', '199ms'],
     [200, 'text-yellow-500', '200ms'],

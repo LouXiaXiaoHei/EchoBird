@@ -60,7 +60,7 @@ export function MinimaxAccountSection({ showDivider = true }: { showDivider?: bo
             plan={<>{minimaxPlanLabel(account.plan) || '—'}</>}
             planPrefix={
               !isFreePlan(minimaxPlanLabel(account.plan)) && account.subscriptionEndAt ? (
-                <QuotaCountdown resetAt={account.subscriptionEndAt} compact keepZero />
+                <QuotaCountdown resetAt={account.subscriptionEndAt} compact />
               ) : undefined
             }
             refreshing={group.refreshing.has(account.id)}

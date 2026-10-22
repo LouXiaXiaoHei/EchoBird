@@ -5,6 +5,7 @@ import { SettingsDialog } from './SettingsDialog';
 import { useUiScaleStore } from '../stores/uiScaleStore';
 import { useEasterEggStore } from '../stores/easterEggStore';
 import { useBackgroundStore } from '../stores/backgroundStore';
+import { useRewardClaimStore } from '../stores/rewardClaimStore';
 
 const mocks = vi.hoisted(() => ({ zoom: vi.fn(), save: vi.fn() }));
 vi.mock('@tauri-apps/api/app', () => ({ getVersion: async () => '' }));
@@ -31,6 +32,7 @@ beforeEach(() => {
   vi.stubGlobal('document', { addEventListener: vi.fn(), removeEventListener: vi.fn() });
   vi.stubGlobal('localStorage', { getItem: vi.fn(), setItem: vi.fn() });
   useEasterEggStore.setState({ enabled: true });
+  useRewardClaimStore.setState({ enabled: false });
   useBackgroundStore.setState({ mode: 'characters' });
   useUiScaleStore.setState({
     preference: 'auto',
@@ -132,6 +134,34 @@ function easterEggSwitch() {
     .findByProps({ children: 'settings.easterEgg' })
     .parent!.parent!.findByProps({ role: 'switch' });
 }
+
+it('places opt-in reward claiming below startup and preserves the setting through reopening', async () => {
+  await act(async () => {
+    view = create(<SettingsDialog {...props} />);
+  });
+  const control = () =>
+    view.root
+      .findByProps({ children: 'settings.autoClaimRewards' })
+      .parent!.parent!.findByProps({ role: 'switch' });
+  expect(control().props['aria-checked']).toBe(false);
+  const toggles = control().parent!.parent!.parent!;
+  expect(
+    toggles
+      .findAllByType('span')
+      .map((span) => span.props.children)
+      .filter((value) => typeof value === 'string')
+  ).toEqual(['settings.launchAtStartup', 'settings.easterEgg', 'settings.autoClaimRewards']);
+  expect(localStorage.setItem).not.toHaveBeenCalled();
+  await act(async () => control().props.onClick());
+  expect(useRewardClaimStore.getState().enabled).toBe(true);
+  expect(localStorage.setItem).toHaveBeenLastCalledWith('echobird_auto_claim_rewards', 'true');
+  await act(async () => view.update(<SettingsDialog {...props} isOpen={false} />));
+  await act(async () => view.update(<SettingsDialog {...props} />));
+  expect(control().props['aria-checked']).toBe(true);
+  await act(async () => control().props.onClick());
+  expect(useRewardClaimStore.getState().enabled).toBe(false);
+  expect(mocks.save).not.toHaveBeenCalled();
+});
 
 function EasterEggObserver() {
   const enabled = useEasterEggStore((state) => state.enabled);

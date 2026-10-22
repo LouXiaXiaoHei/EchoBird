@@ -37,7 +37,6 @@ export function QoderAccountSection({ showDivider = false }: { showDivider?: boo
                 <QuotaCountdown
                   resetAt={qoderSubscriptionExpiry(account)}
                   compact
-                  keepZero
                   label={t('accountCenter.subscription')}
                 />
               ) : undefined

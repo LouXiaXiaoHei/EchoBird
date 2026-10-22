@@ -25,7 +25,7 @@ export function OpenDesignAccountSection({ showDivider = false }: { showDivider?
             plan={account.plan ? accountPlanLabel(account.plan) : undefined}
             planPrefix={
               account.subscriptionEndAt != null ? (
-                <QuotaCountdown resetAt={account.subscriptionEndAt} compact keepZero />
+                <QuotaCountdown resetAt={account.subscriptionEndAt} compact />
               ) : undefined
             }
             refreshing={group.refreshing.has(account.id)}

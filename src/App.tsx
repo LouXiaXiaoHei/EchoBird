@@ -19,6 +19,7 @@ import { useModelNexus } from './pages/ModelNexus/context';
 import { getSettings, hideMainWindow } from './api/tauri';
 
 import { useI18n } from './hooks/useI18n';
+import { useAutoClaimRewards } from './hooks/useAutoClaimRewards';
 
 // Zustand stores
 import { useToolsStore } from './stores/toolsStore';
@@ -194,6 +195,7 @@ const pageBlock = (active: boolean) => (active ? 'flex-1 flex flex-col overflow-
 const pageScroll = (active: boolean) => (active ? 'flex-1 overflow-y-auto page-scroll' : 'hidden');
 
 function AppContent() {
+  useAutoClaimRewards();
   const { t, locale, setLocale } = useI18n();
   const [showSettings, setShowSettings] = useState(false);
   const [showChangelog, setShowChangelog] = useState(false);

@@ -24,11 +24,10 @@ export const QuotaCountdown: React.FC<{
   small?: boolean;
   parenthesized?: boolean;
   label?: string;
-  keepZero?: boolean;
-}> = ({ resetAt, compact, small, parenthesized, label, keepZero }) => {
+}> = ({ resetAt, compact, small, parenthesized, label }) => {
   const now = useUsageClock(!!resetAt);
   const mounted = useSyncExternalStore(subscribeMounted, clientMounted, serverMounted);
-  if (compact && (!mounted || !resetAt || (!keepZero && resetAt * 1000 <= now))) return null;
+  if (compact && (!mounted || !resetAt || resetAt * 1000 <= now)) return null;
   const countdown = resetAt && mounted ? formatQuotaCountdown(resetAt, now, compact) : '';
   return (
     <span
