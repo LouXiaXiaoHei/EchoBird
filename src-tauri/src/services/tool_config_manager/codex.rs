@@ -506,17 +506,28 @@ fn read_codex_auth_key(codex_dir: &Path) -> Option<String> {
         .map(String::from)
 }
 
-fn configured_codex_base_url(content: &str) -> String {
-    ["model_providers.OpenAI", "model_providers.openai"]
-        .into_iter()
-        .map(|table| toml_read_table_value(content, table, "base_url"))
-        .find(|value| !value.trim().is_empty())
-        .unwrap_or_default()
-}
-
 fn codex_route_is_official(content: &str) -> bool {
-    toml_read_top(content, "model_provider").eq_ignore_ascii_case("openai")
-        && configured_codex_base_url(content).trim().is_empty()
+    let Ok(document) = content.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    let provider = match document.get("model_provider") {
+        None => "openai",
+        Some(item) => match item.as_str() {
+            Some(provider) => provider,
+            None => return false,
+        },
+    };
+    if !provider.eq_ignore_ascii_case("openai") {
+        return false;
+    }
+    match document
+        .get("model_providers")
+        .and_then(|providers| providers.get(provider))
+        .and_then(|provider| provider.get("base_url"))
+    {
+        None => true,
+        Some(value) => value.as_str().is_some_and(|url| url.trim().is_empty()),
+    }
 }
 
 fn official_codex_config_from(content: &str) -> Result<String, String> {
@@ -1474,6 +1485,34 @@ command = "files-server"
         assert!(!restore_codex_config_at(&path).unwrap());
         assert_eq!(fs::read_to_string(&path).unwrap(), content);
         fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn restoring_official_ignores_inactive_providers_and_preserves_the_default_route() {
+        for (selected, inactive) in [("openai", "OpenAI"), ("OpenAI", "openai"), ("", "OpenAI")] {
+            let fixture =
+                std::env::temp_dir().join(format!("codex-inactive-route-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&fixture).unwrap();
+            let path = fixture.join("config.toml");
+            let selection = if selected.is_empty() {
+                String::new()
+            } else {
+                format!("model_provider = \"{selected}\"\n")
+            };
+            let active = if selected == "OpenAI" {
+                "\n[model_providers.OpenAI]\nname = \"OpenAI\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+            } else {
+                ""
+            };
+            let content = format!("{selection}model = \"gpt-5.2\"\nmodel_reasoning_effort = \"high\"\n\n[desktop]\ntheme = \"dark\"\n{active}\n[model_providers.{inactive}]\nname = \"Inactive\"\nbase_url = \"https://inactive.example/v1\"\nwire_api = \"responses\"\n");
+            fs::write(&path, &content).unwrap();
+            let changed = restore_codex_config_at(&path).unwrap();
+            let restored = fs::read_to_string(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            fs::remove_dir(&fixture).unwrap();
+            assert!(!changed, "official provider {selected:?} must be a no-op");
+            assert_eq!(restored, content);
+        }
     }
 
     #[test]
