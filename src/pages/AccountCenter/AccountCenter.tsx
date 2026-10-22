@@ -464,14 +464,10 @@ export function AccountCenterTitleActions() {
     const request = Symbol();
     batch.current = request;
     setRunning(action);
-    let authFailures = 0;
-    let otherFailures = 0;
+    const authFailures = new Map<string, { name: string; identity: string }>();
+    const otherFailures = new Map<string, { name: string; identity: string }>();
     const claimedProviders = new Set<string>();
-    const collectError = (error: unknown) => {
-      if (isAccountAuthorizationError(error)) authFailures += 1;
-      else otherFailures += 1;
-    };
-    if (action === 'refresh') context.setApplyError(null);
+    context.setApplyError(null);
     try {
       for (const target of accounts) {
         if (batch.current !== request || useNavigationStore.getState().activePage !== 'accounts')
@@ -486,27 +482,45 @@ export function AccountCenterTitleActions() {
           account.refreshing
         )
           continue;
-        if (action === 'claim') {
-          if (account.claim && !claimedProviders.has(provider.id)) {
-            const deviceClaimed = await account.claim();
-            if (deviceClaimed === true && batch.current === request)
-              claimedProviders.add(provider.id);
+        const collectError = (error: unknown) => {
+          const failures = isAccountAuthorizationError(error) ? authFailures : otherFailures;
+          failures.set(`${provider.id}:${account.id}`, {
+            name: [provider.name, account.detail].filter(Boolean).join(' · '),
+            identity: account.identity,
+          });
+        };
+        try {
+          if (action === 'claim') {
+            if (account.claim && !claimedProviders.has(provider.id)) {
+              const deviceClaimed = await account.claim(collectError);
+              if (deviceClaimed === true && batch.current === request)
+                claimedProviders.add(provider.id);
+            }
+          } else {
+            await account.refresh(collectError);
           }
-        } else {
-          await account.refresh(collectError);
+        } catch (error) {
+          collectError(error);
         }
       }
-      if (
-        action === 'refresh' &&
-        batch.current === request &&
-        useNavigationStore.getState().activePage === 'accounts'
-      ) {
-        const summary = [
-          authFailures && t('accountCenter.batchAuthFailed').replace('{n}', String(authFailures)),
-          otherFailures &&
-            t('accountCenter.batchRefreshFailed').replace('{n}', String(otherFailures)),
-        ]
-          .filter(Boolean)
+      if (batch.current === request && useNavigationStore.getState().activePage === 'accounts') {
+        const hidden = useAccountPrivacyStore.getState().hidden;
+        const summary = (
+          [
+            [authFailures, 'accountCenter.batchAuthFailed'],
+            [
+              otherFailures,
+              action === 'claim'
+                ? 'accountCenter.batchClaimFailed'
+                : 'accountCenter.batchRefreshFailed',
+            ],
+          ] as const
+        )
+          .filter(([failures]) => failures.size > 0)
+          .map(
+            ([failures, key]) =>
+              `${t(key).replace('{n}', String(failures.size))} (${Array.from(failures.values(), ({ name, identity }) => `${name} · ${hidden ? ACCOUNT_NAME_MASK : identity}`).join(', ')})`
+          )
           .join(' ');
         if (summary) context.setApplyError(summary);
       }

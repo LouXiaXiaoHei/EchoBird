@@ -41,6 +41,7 @@ const zhHans: Partial<Translations> = {
   'accountCenter.reauthorize': '重新授权',
   'accountCenter.batchAuthFailed': '授权失败：{n} 个账号，请重新添加授权。',
   'accountCenter.batchRefreshFailed': '刷新失败：{n} 个账号，请检查网络或稍后重试。',
+  'accountCenter.batchClaimFailed': '领取失败：{n} 个账号，请检查网络或稍后重试。',
   'accountCenter.window': '额度 {n}',
   'accountCenter.reset': '额度重置',
   'accountCenter.subscription': '订阅到期',

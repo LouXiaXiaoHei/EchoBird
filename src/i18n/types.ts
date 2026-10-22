@@ -43,6 +43,7 @@ export type TKey =
   | 'accountCenter.reauthorize'
   | 'accountCenter.batchAuthFailed'
   | 'accountCenter.batchRefreshFailed'
+  | 'accountCenter.batchClaimFailed'
   | 'accountCenter.window'
   | 'accountCenter.reset'
   | 'accountCenter.subscription'

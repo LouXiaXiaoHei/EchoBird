@@ -28,12 +28,12 @@ export function useQoderAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.QoderAccount) => {
+  const claimDaily = (account: api.QoderAccount, onError?: (error: unknown) => void) => {
     const current = managed.accounts.find((row) => row.id === account.id);
     if (account.edition !== edition || !current) return Promise.resolve();
     const status = qoderRewardStatus(current);
     if (status === 'claimed' || status === 'unavailable') return Promise.resolve();
-    return managed.refresh(current, (row) => api.claimQoderDailyCredits(edition, row.id));
+    return managed.refresh(current, (row) => api.claimQoderDailyCredits(edition, row.id), onError);
   };
   return { ...managed, claimDaily };
 }

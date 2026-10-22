@@ -27,11 +27,11 @@ export function useDoubaoAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.DoubaoAccount) => {
+  const claimDaily = (account: api.DoubaoAccount, onError?: (error: unknown) => void) => {
     const current = managed.accounts.find((row) => row.id === account.id);
     if (account.edition !== edition || !current || current.dailyReward?.status === 'unavailable')
       return Promise.resolve();
-    return managed.refresh(current, (row) => api.claimDoubaoDailyCredits(edition, row.id));
+    return managed.refresh(current, (row) => api.claimDoubaoDailyCredits(edition, row.id), onError);
   };
   return { ...managed, claimDaily };
 }

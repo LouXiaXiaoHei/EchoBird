@@ -29,12 +29,12 @@ export function useMinimaxAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.MinimaxAccount) => {
+  const claimDaily = (account: api.MinimaxAccount, onError?: (error: unknown) => void) => {
     const current = managed.accounts.find((row) => row.id === account.id);
     if (!current || current.region !== account.region) return Promise.resolve();
     const status = minimaxRewardStatus(current);
     if (status === 'claimed' || status === 'unavailable') return Promise.resolve();
-    return managed.refresh(current, (row) => api.claimMinimaxDailyCredits(row.id));
+    return managed.refresh(current, (row) => api.claimMinimaxDailyCredits(row.id), onError);
   };
   return {
     ...managed,

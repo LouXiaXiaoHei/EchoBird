@@ -16,7 +16,9 @@ fn real_daily_shape_allows_only_the_daily_direct_reward() {
     assert_eq!(daily.status, "available");
     assert_eq!(
         daily.claim_body,
-        Some(json!({"campaign_group_code":V3_GROUP,"campaign_item_code":"fixture_daily"}))
+        Some(
+            json!({"task_id":"","campaign_group_code":V3_GROUP,"campaign_item_code":"fixture_daily"})
+        )
     );
 }
 
@@ -75,7 +77,9 @@ fn legacy_groups_preserve_the_actual_daily_claim_group_and_deduplicate_mirrors()
     let daily = daily_task(&value, "legacy-root").unwrap();
     assert_eq!(
         daily.claim_body,
-        Some(json!({"campaign_group_code":"daily-child","campaign_item_code":"fixture_daily"}))
+        Some(
+            json!({"task_id":"","campaign_group_code":"daily-child","campaign_item_code":"fixture_daily"})
+        )
     );
 }
 

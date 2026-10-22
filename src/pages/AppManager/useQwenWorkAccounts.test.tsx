@@ -59,6 +59,20 @@ async function mount(edition: api.QwenWorkEdition = 'qwenworkcn', enabled = true
     await vi.advanceTimersByTimeAsync(0);
   });
 }
+it('collects batch claim errors without a second dialog and keeps individual errors visible', async () => {
+  await mount();
+  const collect = vi.fn();
+  vi.mocked(api.claimQwenWorkDailyCredits).mockRejectedValue('accountError.network');
+  await act(async () => {
+    await state.claimDaily(state.accounts[0], collect);
+  });
+  expect(collect).toHaveBeenCalledExactlyOnceWith('accountError.network');
+  expect(showError).not.toHaveBeenCalled();
+  await act(async () => {
+    await state.claimDaily(state.accounts[0]);
+  });
+  expect(showError).toHaveBeenCalledExactlyOnceWith('accountError.network');
+});
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();

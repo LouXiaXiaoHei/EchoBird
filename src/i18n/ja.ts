@@ -50,6 +50,8 @@ const ja: Partial<Translations> = {
     '{n} 個のアカウントで認証に失敗しました。再度追加してログインしてください。',
   'accountCenter.batchRefreshFailed':
     '{n} 個のアカウントを更新できませんでした。ネットワークを確認するか、しばらくしてから再試行してください。',
+  'accountCenter.batchClaimFailed':
+    '{n} 個のアカウントで報酬を受け取れませんでした。ネットワークを確認するか、しばらくしてから再試行してください。',
   'accountCenter.window': '利用枠 {n}',
   'accountCenter.reset': '利用枠のリセット',
   'accountCenter.subscription': 'サブスクリプション期限',

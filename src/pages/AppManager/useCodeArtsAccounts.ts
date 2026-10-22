@@ -29,7 +29,7 @@ export function useCodeArtsAccounts(
   );
   return {
     ...managed,
-    claimDaily: (account: api.CodeArtsAccount) =>
-      managed.refresh(account, (row) => api.claimCodeArtsCredits(row.id)),
+    claimDaily: (account: api.CodeArtsAccount, onError?: (error: unknown) => void) =>
+      managed.refresh(account, (row) => api.claimCodeArtsCredits(row.id), onError),
   };
 }

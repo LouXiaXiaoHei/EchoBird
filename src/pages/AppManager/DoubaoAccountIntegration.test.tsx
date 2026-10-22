@@ -6,6 +6,7 @@ import workDefinition from '../../../tools/doubaowork/paths.json';
 import dolaDefinition from '../../../tools/dola/paths.json';
 import { useToolsStore } from '../../stores/toolsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { ACCOUNT_NAME_MASK, useAccountPrivacyStore } from '../../stores/accountPrivacyStore';
 import { AppManagerProvider } from './AppManagerProvider';
 import { useAppManager } from './context';
 import { DoubaoAccountSection } from './DoubaoAccountSection';
@@ -21,7 +22,17 @@ vi.hoisted(() => vi.stubGlobal('__APP_EDITION__', 'full'));
 vi.mock('@tauri-apps/api/core', () => ({ invoke }));
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: openExternal }));
 vi.mock('../../hooks/useI18n', () => ({
-  useI18n: () => ({ t: (key: string) => key, locale: 'en' }),
+  useI18n: () => ({
+    t: (key: string) =>
+      (
+        ({
+          'accountCenter.batchAuthFailed': 'Authorization failed: {n}',
+          'accountCenter.batchClaimFailed': 'Claim failed: {n}',
+          'accountCenter.batchRefreshFailed': 'Refresh failed: {n}',
+        }) as Record<string, string>
+      )[key] ?? key,
+    locale: 'en',
+  }),
 }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => async () => true }));
 vi.mock('../ModelNexus/context', () => {
@@ -58,12 +69,16 @@ const account = (edition: DoubaoEdition): DoubaoAccount => ({
 let state: ReturnType<typeof useAppManager>;
 let renderer: ReactTestRenderer;
 let handlers: Map<string, (args?: Record<string, string>) => unknown>;
+let errorEvents: (string | null)[];
 function Harness() {
   const context = useAppManager();
   const page = useNavigationStore((state) => state.activePage);
   useLayoutEffect(() => {
     state = context;
   });
+  useLayoutEffect(() => {
+    errorEvents.push(context.applyError);
+  }, [context.applyError]);
   return (
     <>
       {editions.includes(context.selectedTool as DoubaoEdition) ? <DoubaoAccountSection /> : null}
@@ -159,6 +174,8 @@ beforeEach(() => {
     setItem: (key: string, value: string) => storage.set(key, value),
   });
   useNavigationStore.getState().setActivePage('apps');
+  useAccountPrivacyStore.getState().setHidden(false);
+  errorEvents = [];
   handlers = new Map<string, (args?: Record<string, string>) => unknown>([
     ['get_models', () => []],
     ['get_tool_install_index', () => '{"ids":[]}'],
@@ -178,9 +195,126 @@ beforeEach(() => {
 afterEach(() => {
   act(() => renderer?.unmount());
   useToolsStore.getState().setDetectedTools([]);
+  useAccountPrivacyStore.getState().setHidden(false);
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
+
+it.each([
+  ['claim', 'visible'],
+  ['claim', 'hidden'],
+  ['refresh', 'visible'],
+  ['claim', 'leave'],
+] as const)(
+  '%s across Doubao, DuMate and QwenWork collects errors once after the last response (%s)',
+  async (action, mode) => {
+    const doubao = {
+      ...account('doubaowork'),
+      dailyReward: { status: 'available' as const, scene: 'fixture', nextClaimAt: null },
+    };
+    const dumate = {
+      id: 'dumate',
+      name: 'DuMate user',
+      enterprise: false,
+      active: false,
+      plan: 'free',
+      expiresAt: null,
+      remaining: 100,
+      total: 100,
+      creditBuckets: [],
+      dailyReward: null,
+    };
+    const qwen = {
+      id: 'qwen',
+      edition: 'qwenworkcn',
+      name: 'Qwen user',
+      email: null,
+      organization: null,
+      active: false,
+      plan: 'free',
+      planName: 'Free',
+      expiresAt: null,
+      remaining: 100,
+      total: 100,
+      creditBuckets: [],
+      dailyReward: null,
+    };
+    handlers.set('list_doubao_accounts', () => [doubao]);
+    handlers.set('list_dumate_accounts', () => [dumate]);
+    handlers.set('list_qwenwork_accounts', () => [qwen]);
+    const commands =
+      action === 'claim'
+        ? [
+            'claim_doubao_daily_credits',
+            'claim_dumate_daily_credits',
+            'claim_qwenwork_daily_credits',
+          ]
+        : [
+            'refresh_doubao_account_quota',
+            'refresh_dumate_account_quota',
+            'refresh_qwenwork_account_quota',
+          ];
+    handlers.set(commands[0], () => {
+      throw new Error('accountError.claim');
+    });
+    handlers.set(commands[1], () => {
+      throw new Error('accountError.loginRequired');
+    });
+    let failLast!: (error: Error) => void;
+    handlers.set(
+      commands[2],
+      () =>
+        new Promise((_, reject) => {
+          failLast = reject;
+        })
+    );
+    await mount('doubaowork');
+    act(() => {
+      useToolsStore.getState().setDetectedTools(
+        ['doubaowork', 'dumate', 'qwenworkcn'].map((id) => ({
+          id,
+          name: id,
+          category: 'Desktop',
+          installed: true,
+        }))
+      );
+      useNavigationStore.getState().setActivePage('accounts');
+    });
+    await tick();
+    for (const command of commands) expect(calls(command)).toHaveLength(0);
+    let task!: Promise<void>;
+    await act(async () => {
+      task = renderer.root
+        .findByProps({
+          'aria-label': `accountCenter.${action === 'claim' ? 'claimAll' : 'refreshAll'}`,
+        })
+        .props.onClick();
+    });
+    for (const command of commands) expect(calls(command)).toHaveLength(1);
+    expect(state.applyError).toBeNull();
+    expect(errorEvents).toEqual([null]);
+    act(() => {
+      if (mode === 'hidden') useAccountPrivacyStore.getState().setHidden(true);
+      if (mode === 'leave') useNavigationStore.getState().setActivePage('models');
+    });
+    await act(async () => {
+      failLast(new Error('accountError.network'));
+      await task;
+    });
+    if (mode === 'leave') {
+      expect(state.applyError).toBeNull();
+      expect(errorEvents).toEqual([null]);
+    } else {
+      const label = (name: string) => (mode === 'hidden' ? ACCOUNT_NAME_MASK : name);
+      const summary = `Authorization failed: 1 (DuMate · ${label('DuMate user')}) ${action === 'claim' ? 'Claim' : 'Refresh'} failed: 2 (豆包工作 · ${label('doubaowork Fixture')}, 千问办公 · ${label('Qwen user')})`;
+      expect(state.applyError).toBe(summary);
+      expect(errorEvents).toEqual([null, summary]);
+      expect(state.dumateAccounts.authorizationFailedIds.has('dumate')).toBe(true);
+      expect(state.doubaoAccountGroups.doubaowork.accounts).toEqual([doubao]);
+      expect(state.qwenWorkAccountGroups.qwenworkcn.accounts).toEqual([qwen]);
+    }
+  }
+);
 
 it.each(editions)(
   '%s navigation reads saved accounts and explicit apply switches before launch',

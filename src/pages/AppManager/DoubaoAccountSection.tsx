@@ -7,7 +7,7 @@ import {
   AccountSectionRow,
 } from './AccountSectionPrimitives';
 import { QuotaCountdown } from './QuotaCountdown';
-import { doubaoRemainingPercent, doubaoWindowLabel } from './doubaoAccountDisplay';
+import { doubaoRemainingPercent } from './doubaoAccountDisplay';
 
 export function DoubaoAccountSection() {
   const { doubaoAccounts: group, selectedTool, isLaunching } = useAppManager();
@@ -60,9 +60,6 @@ export function DoubaoAccountSection() {
                   const percent = doubaoRemainingPercent(window);
                   return (
                     <span key={index} className="flex flex-shrink-0 items-center gap-1">
-                      <span>
-                        {doubaoWindowLabel(window, account.quota!.windows, t('agent.baseCredits'))}
-                      </span>
                       <span>
                         {window.unlimited ? '∞' : percent == null ? '—' : `${Math.round(percent)}%`}
                       </span>

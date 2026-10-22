@@ -48,6 +48,8 @@ const en: Translations = {
     'Authorization failed for {n} accounts. Add them again to sign in.',
   'accountCenter.batchRefreshFailed':
     'Could not refresh {n} accounts. Check your network or try again later.',
+  'accountCenter.batchClaimFailed':
+    'Could not claim rewards for {n} accounts. Check your network or try again later.',
   'accountCenter.window': 'Quota {n}',
   'accountCenter.reset': 'Quota resets',
   'accountCenter.subscription': 'Subscription ends',

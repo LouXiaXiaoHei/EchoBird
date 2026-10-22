@@ -68,7 +68,7 @@ fn daily_task(value: &Value, group: &str) -> Option<DailyTask> {
                 let direct = number(&row["reward_mode"]) == Some(2);
                 let claim_body = if direct {
                     (!group.is_empty())
-                        .then(|| json!({"campaign_group_code":group,"campaign_item_code":item}))
+                        .then(|| json!({"task_id":"","campaign_group_code":group,"campaign_item_code":item}))
                 } else {
                     text(row, "task_id").map(|id| json!({"task_id":id}))
                 };

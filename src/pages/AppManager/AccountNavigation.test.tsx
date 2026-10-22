@@ -36,6 +36,7 @@ vi.mock('../../hooks/useI18n', () => {
   const summaries: Record<string, string> = {
     'accountCenter.batchAuthFailed': 'Authorization failed: {n}',
     'accountCenter.batchRefreshFailed': 'Refresh failed: {n}',
+    'accountCenter.batchClaimFailed': 'Claim failed: {n}',
   };
   const t = (k: string) => summaries[k] ?? k;
   return { useI18n: () => ({ t, locale: 'en' }) };
@@ -1946,8 +1947,10 @@ it('Account Center: a batch marks only authorization failures, preserves them on
   expect(state.deepSeekAccounts.authorizationFailedIds.size).toBe(0);
   expect(state.deepSeekAccounts.accounts).toEqual([balance]);
   expect(state.workBuddyAccountGroups.workbuddy.accounts).toEqual([buddy]);
-  expect(state.applyError).toBe('Authorization failed: 1 Refresh failed: 2');
-  expect(applyErrorEvents).toEqual([null, 'Authorization failed: 1 Refresh failed: 2']);
+  const summary =
+    'Authorization failed: 1 (ChatGPT / Codex · failed@example.test) Refresh failed: 2 (DeepSeek Harness · Balance, WorkBuddy · Reward)';
+  expect(state.applyError).toBe(summary);
+  expect(applyErrorEvents).toEqual([null, summary]);
   act(() => useNavigationStore.getState().setActivePage('models'));
   await tick();
   act(() => useNavigationStore.getState().setActivePage('accounts'));
@@ -1987,14 +1990,19 @@ it.each([
     'authorization',
     'accountError.loginRequired',
     'accountError.network|HTTP 401',
-    'Authorization failed: 2',
+    'Authorization failed: 2 (ChatGPT / Codex · first@example.test, ChatGPT / Codex · second@example.test)',
   ],
-  ['connection', 'accountError.network', 'accountError.auth|HTTP 429', 'Refresh failed: 2'],
+  [
+    'connection',
+    'accountError.network',
+    'accountError.auth|HTTP 429',
+    'Refresh failed: 2 (ChatGPT / Codex · first@example.test, ChatGPT / Codex · second@example.test)',
+  ],
   [
     'mixed',
     'accountError.auth|HTTP 403',
     'accountError.quotaTimeout',
-    'Authorization failed: 1 Refresh failed: 1',
+    'Authorization failed: 1 (ChatGPT / Codex · first@example.test) Refresh failed: 1 (ChatGPT / Codex · second@example.test)',
   ],
   ['success', null, null, null],
 ])(
@@ -2293,7 +2301,7 @@ it('Account Center: individual/batch rewards share locks, retry claimed accounts
     state.workBuddyAccountGroups.workbuddy.accounts.find((row) => row.id === 'success')
       ?.rewardRemaining
   ).toBe(200);
-  expect(state.applyError).toBe('accountError.claim');
+  expect(state.applyError).toBe('Claim failed: 1 (WorkBuddy · failed)');
   expect(claimAll.props.disabled).toBe(false);
   expect(api.switchWorkBuddyAccount).not.toHaveBeenCalled();
   expect(api.startTool).not.toHaveBeenCalled();
@@ -2407,7 +2415,7 @@ it('Account Center: refreshes all installed account groups sequentially once and
   for (const [key, action] of Object.entries(api))
     if (key.startsWith('switch') && vi.isMockFunction(action))
       expect(action).not.toHaveBeenCalled();
-  expect(state.applyError).toBe('Refresh failed: 1');
+  expect(state.applyError).toBe('Refresh failed: 1 (ChatGPT / Codex · first@example.test)');
   expect(refreshAll.props.disabled).toBe(false);
 });
 
@@ -3875,7 +3883,7 @@ it.each(['failure', 'success'] as const)(
     expect(api.claimTraeDailyCredits).toHaveBeenCalledTimes(outcome === 'failure' ? 2 : 1);
     if (outcome === 'failure') {
       expect(api.claimTraeDailyCredits).toHaveBeenLastCalledWith('traecn', second.id);
-      expect(state.applyError).toBe('accountError.network');
+      expect(state.applyError).toBe('Claim failed: 1 (TRAE CN · First)');
     }
     expect(state.traeAccountGroups.traecn.refreshing.size).toBe(0);
     expect(api.refreshTraeAccountQuota).not.toHaveBeenCalled();

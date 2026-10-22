@@ -27,13 +27,17 @@ export function useQwenWorkAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.QwenWorkAccount) => {
+  const claimDaily = (account: api.QwenWorkAccount, onError?: (error: unknown) => void) => {
     if (edition !== 'qwenworkcn') return Promise.resolve();
     const current = managed.accounts.find((row) => row.id === account.id);
     if (account.edition !== edition || !current) return Promise.resolve();
     const status = qwenWorkRewardStatus(current);
     if (status === 'claimed' || status === 'unavailable') return Promise.resolve();
-    return managed.refresh(current, (row) => api.claimQwenWorkDailyCredits(edition, row.id));
+    return managed.refresh(
+      current,
+      (row) => api.claimQwenWorkDailyCredits(edition, row.id),
+      onError
+    );
   };
   return { ...managed, claimDaily };
 }

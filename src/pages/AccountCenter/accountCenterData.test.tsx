@@ -31,6 +31,7 @@ function context() {
   });
   return {
     detectedTools: [],
+    setApplyError: vi.fn(),
     codexAccounts: [],
     isAddingCodexAccount: false,
     isLoadingCodexAccounts: false,
@@ -199,7 +200,7 @@ describe('Account Center display data', () => {
     expect(state.dumateAccounts.refresh).not.toHaveBeenCalled();
     expect(state.dumateAccounts.claimDaily).not.toHaveBeenCalled();
     await account.claim!();
-    expect(state.dumateAccounts.claimDaily).toHaveBeenCalledWith(row);
+    expect(state.dumateAccounts.claimDaily).toHaveBeenCalledWith(row, undefined);
     row.enterprise = true;
     expect(providers(state).find((p) => p.id === 'dumate')!.accounts[0].claim).toBeUndefined();
   });
@@ -1388,8 +1389,9 @@ describe('Account Center display data', () => {
             .props.onClick();
         });
         expect(claim).toHaveBeenCalledTimes(result === 'device claimed' ? 1 : 2);
-        expect(claim).toHaveBeenNthCalledWith(1, first);
-        if (result !== 'device claimed') expect(claim).toHaveBeenNthCalledWith(2, second);
+        expect(claim).toHaveBeenNthCalledWith(1, first, expect.any(Function));
+        if (result !== 'device claimed')
+          expect(claim).toHaveBeenNthCalledWith(2, second, expect.any(Function));
         expect(state.traeAccountGroups.traecn.accounts).toEqual([first, second]);
         expect(state.traeAccountGroups.traecn.refresh).not.toHaveBeenCalled();
       } finally {

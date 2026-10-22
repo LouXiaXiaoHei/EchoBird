@@ -1833,11 +1833,38 @@ pub(crate) fn start_doubao_account_bridge(
     tool_id: &str,
     port: u16,
 ) -> Result<OwnedDesktopConfigProcess, String> {
-    if !matches!(tool_id, "doubaowork" | "dola") || port == 0 {
+    let product = match tool_id {
+        "doubaowork" => "DoubaoWork",
+        "dola" => "Cici",
+        _ => return Err("accountError.format".into()),
+    };
+    if port == 0 {
         return Err("accountError.format".into());
     }
+    #[cfg(windows)]
+    let data_dir = dirs::data_local_dir().map(|root| root.join(product).join("User Data"));
+    #[cfg(target_os = "macos")]
+    let data_dir = dirs::data_dir().map(|root| root.join(product));
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let data_dir = dirs::config_dir().map(|root| root.join(product));
+    let data_dir = data_dir.ok_or("accountError.initializeClient")?;
     start_desktop_with_config_args(
         tool_id,
+        &[
+            "--headless=new".into(),
+            format!("--user-data-dir={}", data_dir.display()),
+            "--remote-debugging-address=127.0.0.1".into(),
+            format!("--remote-debugging-port={port}"),
+        ],
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn start_doubao_account_restart_probe(
+    port: u16,
+) -> Result<OwnedDesktopConfigProcess, String> {
+    start_desktop_with_config_args(
+        "doubaowork",
         &[
             "--remote-debugging-address=127.0.0.1".into(),
             format!("--remote-debugging-port={port}"),

@@ -43,6 +43,7 @@ const zhHant: Partial<Translations> = {
   'accountCenter.reauthorize': '重新授權',
   'accountCenter.batchAuthFailed': '授權失敗：{n} 個帳號，請重新新增授權。',
   'accountCenter.batchRefreshFailed': '重新整理失敗：{n} 個帳號，請檢查網路或稍後重試。',
+  'accountCenter.batchClaimFailed': '領取失敗：{n} 個帳號，請檢查網路或稍後重試。',
   'accountCenter.window': '額度 {n}',
   'accountCenter.reset': '額度重置',
   'accountCenter.subscription': '訂閱到期',

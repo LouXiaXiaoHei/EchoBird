@@ -26,11 +26,11 @@ export function useDuMateAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.DuMateAccount) => {
+  const claimDaily = (account: api.DuMateAccount, onError?: (error: unknown) => void) => {
     const current = managed.accounts.find((row) => row.id === account.id);
     if (!current || ['claimed', 'unavailable'].includes(dumateRewardStatus(current)))
       return Promise.resolve();
-    return managed.refresh(current, (row) => api.claimDuMateDailyCredits(row.id));
+    return managed.refresh(current, (row) => api.claimDuMateDailyCredits(row.id), onError);
   };
   return { ...managed, claimDaily };
 }

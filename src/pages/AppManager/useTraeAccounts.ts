@@ -24,14 +24,14 @@ export function useTraeAccounts(
       label: (account) => account.name,
     }
   );
-  const claimDaily = (account: api.TraeAccount) => {
+  const claimDaily = (account: api.TraeAccount, onError?: (error: unknown) => void) => {
     if (
       edition !== 'traecn' ||
       account.edition !== edition ||
       traeClaimUnavailable(account, managed.accounts)
     )
       return Promise.resolve();
-    return managed.refresh(account, (row) => api.claimTraeDailyCredits(edition, row.id));
+    return managed.refresh(account, (row) => api.claimTraeDailyCredits(edition, row.id), onError);
   };
   return { ...managed, claimDaily };
 }

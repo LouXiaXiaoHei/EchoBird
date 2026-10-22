@@ -54,7 +54,7 @@ export interface AccountCardData {
   pending?: boolean;
   authorizationFailed: boolean;
   refresh: (onError?: (error: unknown) => void) => Promise<void>;
-  claim?: () => Promise<unknown>;
+  claim?: (onError?: (error: unknown) => void) => Promise<unknown>;
   claimDisabled?: boolean;
   dailyClaimedAt?: number | null;
   dailyClaimed?: boolean;
@@ -343,7 +343,8 @@ export function accountCenterProviders(
           metrics: creditMetrics(account),
           ...(edition === 'workbuddy'
             ? {
-                claim: () => context.workBuddyAccountGroups.workbuddy.claimDaily(account),
+                claim: (onError) =>
+                  context.workBuddyAccountGroups.workbuddy.claimDaily(account, onError),
                 dailyClaimedAt: account.dailyClaimedAt,
               }
             : {}),
@@ -418,10 +419,10 @@ export function accountCenterProviders(
             metrics,
             ...(edition === 'traecn'
               ? {
-                  claim: async () => {
+                  claim: async (onError) => {
                     const group = context.traeAccountGroups.traecn;
                     if (traeClaimUnavailable(account, group.accounts)) return;
-                    const updated = await group.claimDaily(account);
+                    const updated = await group.claimDaily(account, onError);
                     return updated != null && traeClaimedToday(updated.deviceClaimedAt);
                   },
                   claimDisabled:
@@ -477,7 +478,7 @@ export function accountCenterProviders(
           : account.plan
             ? (account.subscriptionEndAt ?? null)
             : undefined,
-        claim: () => context.minimaxAccounts.claimDaily(account),
+        claim: (onError) => context.minimaxAccounts.claimDaily(account, onError),
         dailyClaimed: minimaxRewardStatus(account) === 'claimed',
         claimDisabled: minimaxRewardStatus(account) === 'unavailable',
         claimStatusExpiresAt: account.dailyReward
@@ -516,7 +517,7 @@ export function accountCenterProviders(
               subscriptionEndAt: account.expiresAt,
               claim:
                 account.dailyReward && ['available', 'claimed'].includes(account.dailyReward.status)
-                  ? () => context.doubaoAccountGroups[edition].claimDaily(account)
+                  ? (onError) => context.doubaoAccountGroups[edition].claimDaily(account, onError)
                   : undefined,
               dailyClaimed: account.dailyReward?.status === 'claimed',
               metrics:
@@ -576,7 +577,7 @@ export function accountCenterProviders(
                 subscriptionEndAt: account.expiresAt ?? undefined,
                 claim: account.enterprise
                   ? undefined
-                  : () => context.dumateAccounts.claimDaily(account),
+                  : (onError) => context.dumateAccounts.claimDaily(account, onError),
                 dailyClaimed: dumateRewardStatus(account) === 'claimed',
                 claimDisabled: dumateRewardStatus(account) === 'unavailable',
                 claimStatusExpiresAt: account.dailyReward?.nextClaimAt,
@@ -623,7 +624,7 @@ export function accountCenterProviders(
             subscriptionEndAt: account.expiresAt ?? undefined,
             claim:
               edition === 'qwenworkcn'
-                ? () => context.qwenWorkAccountGroups[edition].claimDaily(account)
+                ? (onError) => context.qwenWorkAccountGroups[edition].claimDaily(account, onError)
                 : undefined,
             dailyClaimed: edition === 'qwenworkcn' && qwenWorkRewardStatus(account) === 'claimed',
             claimDisabled:
@@ -661,7 +662,7 @@ export function accountCenterProviders(
           identity: account.name || account.email || account.id,
           plan: qoderPlanLabel(account.plan, account.edition, t),
           subscriptionEndAt: qoderSubscriptionExpiry(account),
-          claim: () => context.qoderAccountGroups[edition].claimDaily(account),
+          claim: (onError) => context.qoderAccountGroups[edition].claimDaily(account, onError),
           dailyClaimed: qoderRewardStatus(account) === 'claimed',
           claimDisabled: qoderRewardStatus(account) === 'unavailable',
           claimStatusExpiresAt: account.dailyReward?.resetAt,
@@ -932,7 +933,7 @@ export function accountCenterProviders(
                     showProgress: true,
                   },
                 ],
-                claim: () => context.codeArtsAccounts.claimDaily(account),
+                claim: (onError) => context.codeArtsAccounts.claimDaily(account, onError),
               };
             }
           ),

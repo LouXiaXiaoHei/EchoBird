@@ -419,3 +419,68 @@ async fn saved_doubao_native_apply_probe() {
     );
     result.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "Explicit native account switch round trip; requires two saved accounts and restores the active account"]
+async fn saved_doubao_native_switch_round_trip_probe() {
+    async fn verify_restart(c: &Credentials) -> Result<(), String> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut owned = process_manager::start_doubao_account_restart_probe(port)?;
+        let bridge = Bridge::new(port)?;
+        let result = tokio::time::timeout(Duration::from_secs(15), bridge.verified(c))
+            .await
+            .unwrap_or_else(|_| Err("accountError.invalidAccount".into()));
+        tokio::task::spawn_blocking(move || owned.stop())
+            .await
+            .unwrap()?;
+        result
+    }
+    assert_eq!(
+        std::env::var("ECHOBIRD_DOUBAO_NATIVE_PROBE").as_deref(),
+        Ok("1")
+    );
+    let key = dirs::home_dir()
+        .unwrap()
+        .join(".echobird/config/.encryption_key");
+    assert_eq!(std::fs::metadata(key).unwrap().len(), 32);
+    let edition = Edition::DoubaoWork;
+    assert!(!process_manager::desktop_tool_is_running(edition.tool())
+        .await
+        .unwrap());
+    let path = super::super::path(edition).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let store = super::super::load(&path).unwrap();
+    let active = store
+        .iter()
+        .find(|(_, saved)| saved.account.active)
+        .expect("Requires a saved active account")
+        .0;
+    let other = store
+        .keys()
+        .find(|id| *id != active)
+        .expect("Requires a second saved account");
+    let original = super::super::credential(&store, edition, active).unwrap();
+    let other = super::super::credential(&store, edition, other).unwrap();
+    let switched = match apply(&other).await {
+        Ok(()) => verify_restart(&other).await,
+        error => error,
+    };
+    // Restore even if the first switch fails after the native profile changed.
+    let restored = match apply(&original).await {
+        Ok(()) => verify_restart(&original).await,
+        error => error,
+    };
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(!process_manager::desktop_tool_is_running(edition.tool())
+        .await
+        .unwrap());
+    println!(
+        "native_round_trip_switch_ok={} restore_ok={}",
+        switched.is_ok(),
+        restored.is_ok()
+    );
+    switched.unwrap();
+    restored.unwrap();
+}
