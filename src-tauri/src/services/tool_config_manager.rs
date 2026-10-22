@@ -121,9 +121,12 @@ pub struct ModelInfo {
     /// Accepted for compatibility with older callers; Claude apps always connect directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_mode: Option<bool>,
-    /// Codex / ChatGPT / Claude. None preserves the existing search policy.
+    /// Codex / ChatGPT / Claude / ZCode. None preserves the existing search policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search: Option<bool>,
+    /// Image input capability override. Clients without this setting ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<bool>,
     /// Claude Code: when `Some(true)`,
     /// append `[1m]` to the 1M-capable env vars (`ANTHROPIC_MODEL` /
     /// `ANTHROPIC_DEFAULT_SONNET_MODEL` / `ANTHROPIC_DEFAULT_OPUS_MODEL` / `ANTHROPIC_DEFAULT_FABLE_MODEL`)

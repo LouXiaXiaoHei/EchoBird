@@ -146,8 +146,10 @@ export interface ApplyModelInput {
   apiKey: string;
   model: string;
   protocol?: string;
-  /** Codex / ChatGPT / Claude: allow web search on model apply. */
+  /** Codex / ChatGPT / Claude / ZCode: allow web search on model apply. */
   webSearch?: boolean;
+  /** Declare image input support for clients with configurable model capabilities. */
+  imageInput?: boolean;
   /**
    * Claude Code: when true, append `[1m]`
    * to the model id written to the 1M-capable env vars (`ANTHROPIC_MODEL` /

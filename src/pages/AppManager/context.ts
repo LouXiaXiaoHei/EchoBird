@@ -104,6 +104,9 @@ export interface AppManagerContextType {
   claudeDesktopWebSearch: boolean;
   claudeCodeWebSearch: boolean;
   setClaudeWebSearch: (tool: 'claudedesktop' | 'claudecode', value: boolean) => void;
+  zcodeWebSearch: boolean;
+  zcodeImageInput: boolean;
+  setZCodeCapability: (capability: 'webSearch' | 'imageInput', value: boolean) => void;
   /** Desktop profile prefer1m. */
   claudeDesktop1mMode: boolean;
   setClaudeDesktop1mMode: (v: boolean) => void;

@@ -940,11 +940,15 @@ export const AppManagerPanel: React.FC = () => {
     claudeDesktopWebSearch,
     claudeCodeWebSearch,
     setClaudeWebSearch,
+    zcodeWebSearch,
+    zcodeImageInput,
+    setZCodeCapability,
     isLaunching,
   } = useAppManager();
 
   const isClaudeDesktopApp = selectedTool === 'claudedesktop';
   const isClaudeCodeApp = selectedTool === 'claudecode';
+  const isZCodeApp = selectedTool === 'zcode';
   const show1mToggle = isClaudeDesktopApp || isClaudeCodeApp;
   const showCodexAccounts = selectedTool === 'codex' || selectedTool === 'chatgptdesktop';
   const selectedToolProtocols = selectedToolData?.apiProtocol || ['openai', 'anthropic'];
@@ -954,21 +958,24 @@ export const AppManagerPanel: React.FC = () => {
       (!isSmartRouterId(model.internalId) || smartRouterEnabled)
   );
 
-  const showWebSearchToggle = showCodexAccounts || isClaudeDesktopApp || isClaudeCodeApp;
+  const showWebSearchToggle =
+    showCodexAccounts || isClaudeDesktopApp || isClaudeCodeApp || isZCodeApp;
   const webSearchValue = isClaudeDesktopApp
     ? claudeDesktopWebSearch
     : isClaudeCodeApp
       ? claudeCodeWebSearch
-      : isSmartRouterId(toolModelConfig[selectedTool ?? ''])
-        ? false
-        : codexWebSearch;
+      : isZCodeApp
+        ? zcodeWebSearch
+        : isSmartRouterId(toolModelConfig[selectedTool ?? ''])
+          ? false
+          : codexWebSearch;
   const routingControls = (show1mToggle || showWebSearchToggle) && (
     <div className="px-3 flex items-center gap-2">
       {showWebSearchToggle && (
         <RoutingToggle
           key="web-search"
           label={t('agent.codexWebSearchLabel')}
-          hint={t('agent.codexWebSearchHint')}
+          hint={isZCodeApp ? undefined : t('agent.codexWebSearchHint')}
           checked={webSearchValue}
           disabled={
             isLaunching ||
@@ -977,9 +984,19 @@ export const AppManagerPanel: React.FC = () => {
           onChange={
             showCodexAccounts
               ? setCodexWebSearch
-              : (value) =>
-                  setClaudeWebSearch(isClaudeDesktopApp ? 'claudedesktop' : 'claudecode', value)
+              : isZCodeApp
+                ? (value) => setZCodeCapability('webSearch', value)
+                : (value) =>
+                    setClaudeWebSearch(isClaudeDesktopApp ? 'claudedesktop' : 'claudecode', value)
           }
+        />
+      )}
+      {isZCodeApp && (
+        <RoutingToggle
+          label="image"
+          checked={zcodeImageInput}
+          disabled={isLaunching}
+          onChange={(value) => setZCodeCapability('imageInput', value)}
         />
       )}
       {show1mToggle && (

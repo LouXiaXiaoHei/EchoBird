@@ -28,6 +28,7 @@ fn prepare_zcode_personal_config(
     api_key: &str,
     base_url: &str,
     protocol: &str,
+    properties: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
     if !path.exists() {
         // Leave first-run migration to ZCode so other legacy providers are
@@ -102,7 +103,7 @@ fn prepare_zcode_personal_config(
         .push(serde_json::json!({
             "providerId": "echobird",
             "modelId": model_id,
-            "config": { "optionSpecs": { "reasoningLevel": {
+            "config": { "properties": properties, "optionSpecs": { "reasoningLevel": {
                 "values": REASONING_LEVELS,
                 "map": if protocol == "anthropic" { ANTHROPIC_REASONING_MAP } else { OPENAI_REASONING_MAP }
             }}}
@@ -199,7 +200,32 @@ fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
     // Resolve the real input modalities for the selected model so ZCode's
     // `modalities.input` reflects image/video support when the model has it,
     // instead of declaring every model text-only.
-    let input_modalities = model_input_modalities_for(model_id);
+    let mut input_modalities = model_input_modalities_for(model_id).to_vec();
+    if let Some(enabled) = model_info.image_input {
+        input_modalities.retain(|modality| *modality != "image");
+        if enabled {
+            input_modalities.push("image");
+        }
+    }
+    let mut properties = serde_json::json!({
+        "inputFormat": {
+            "supportsText": true,
+            "supportsImage": input_modalities.contains(&"image"),
+            "supportsVideo": input_modalities.contains(&"video")
+        }
+    });
+    if let Some(enabled) = model_info.web_search {
+        properties["supportsNativeWebSearch"] = serde_json::json!(enabled);
+    }
+    let personal_path = dir.join("provider_config.json");
+    if !personal_path.exists()
+        && (model_info.web_search.is_some() || model_info.image_input.is_some())
+    {
+        return ApplyResult {
+            success: false,
+            message: "Open ZCode once to initialize its provider configuration before changing model capabilities.".into(),
+        };
+    }
     config["provider"][provider_id] = serde_json::json!({
         "name": display_name,
         "kind": kind,
@@ -220,7 +246,6 @@ fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
     config["model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
     config["small_model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
 
-    let personal_path = dir.join("provider_config.json");
     let personal = match prepare_zcode_personal_config(
         &personal_path,
         model_id,
@@ -228,6 +253,7 @@ fn apply_zcode_at(model_info: &ModelInfo, dir: &Path) -> ApplyResult {
         &api_key,
         &base_url,
         model_info.protocol.as_deref().unwrap_or("openai"),
+        &properties,
     ) {
         Ok(config) => config,
         Err(error) => {
@@ -303,6 +329,15 @@ fn read_zcode_personal_config(path: &std::path::Path) -> Option<ModelInfo> {
         .pointer("/access/apiKey")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let properties = config
+        .pointer("/modelConfigRules/providerModelRules")
+        .and_then(|v| v.as_array())
+        .and_then(|rules| {
+            rules
+                .iter()
+                .find(|rule| rule["providerId"] == "echobird" && rule["modelId"] == model_id)
+        })
+        .and_then(|rule| rule.pointer("/config/properties"));
 
     Some(ModelInfo {
         name: Some(model_id.to_string()),
@@ -317,7 +352,12 @@ fn read_zcode_personal_config(path: &std::path::Path) -> Option<ModelInfo> {
         protocol: Some(protocol.to_string()),
         display_model: None,
         relay_mode: None,
-        web_search: None,
+        web_search: properties
+            .and_then(|v| v.get("supportsNativeWebSearch"))
+            .and_then(|v| v.as_bool()),
+        image_input: properties
+            .and_then(|v| v.pointer("/inputFormat/supportsImage"))
+            .and_then(|v| v.as_bool()),
         one_m_context: None,
     })
 }
@@ -365,6 +405,9 @@ fn read_zcode_at(dir: &Path) -> Option<ModelInfo> {
         display_model: None,
         relay_mode: None,
         web_search: None,
+        image_input: provider["models"][model_id]["modalities"]["input"]
+            .as_array()
+            .map(|modalities| modalities.iter().any(|value| value == "image")),
         one_m_context: None,
     })
 }
@@ -493,6 +536,92 @@ pub(super) fn restore_zcode_to_official_at(dir: &std::path::Path) -> ApplyResult
 mod tests {
     use super::*;
 
+    #[test]
+    fn capability_switches_round_trip_and_preserve_other_providers_and_video() {
+        let dir = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        write_json_file(&dir.join("provider_config.json"), &personal_fixture()).unwrap();
+        write_json_file(
+            &dir.join("config.json"),
+            &serde_json::json!({"provider":{"existing":{"keep":true}}}),
+        )
+        .unwrap();
+        for protocol in ["openai", "anthropic"] {
+            for search in [false, true] {
+                for image in [false, true] {
+                    let model: ModelInfo = serde_json::from_value(serde_json::json!({
+                        "model":"MiniMax-M3", "apiKey":"fixture", "protocol":protocol,
+                        "webSearch":search, "imageInput":image
+                    }))
+                    .unwrap();
+                    assert!(apply_zcode_at(&model, &dir).success);
+                    let personal = read_json_file(&dir.join("provider_config.json")).unwrap();
+                    let properties = &personal["config"]["modelConfigRules"]["providerModelRules"]
+                        [0]["config"]["properties"];
+                    assert_eq!(properties["supportsNativeWebSearch"], search);
+                    assert_eq!(properties["inputFormat"]["supportsImage"], image);
+                    assert_eq!(properties["inputFormat"]["supportsText"], true);
+                    assert_eq!(properties["inputFormat"]["supportsVideo"], true);
+                    assert_eq!(
+                        personal["config"]["providerConfigRules"]["providerRules"][0]["providerId"],
+                        "existing"
+                    );
+                    let read = read_zcode_at(&dir).unwrap();
+                    assert_eq!(read.web_search, Some(search));
+                    assert_eq!(read.image_input, Some(image));
+                    let legacy = read_json_file(&dir.join("config.json")).unwrap();
+                    assert_eq!(legacy["provider"]["existing"]["keep"], true);
+                    let modalities = legacy["provider"]["echobird"]["models"]["MiniMax-M3"]
+                        ["modalities"]["input"]
+                        .as_array()
+                        .unwrap();
+                    assert_eq!(modalities.contains(&serde_json::json!("image")), image);
+                    assert!(modalities.contains(&serde_json::json!("video")));
+                }
+            }
+        }
+        assert!(restore_zcode_to_official_at(&dir).success);
+        assert!(read_zcode_at(&dir).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn missing_current_config_rejects_explicit_capabilities_before_writes() {
+        let dir = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("config.json");
+        write_json_file(
+            &path,
+            &serde_json::json!({"provider":{"existing":{"keep":true}}}),
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let model: ModelInfo = serde_json::from_value(serde_json::json!({
+            "model":"vision/unknown", "apiKey":"fixture", "webSearch":false, "imageInput":true
+        }))
+        .unwrap();
+        let result = apply_zcode_at(&model, &dir);
+        assert!(!result.success);
+        assert!(result.message.contains("Open ZCode once"));
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        assert!(!dir.join("provider_config.json").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn image_override_enables_unknown_models_without_guessing_from_model_name() {
+        let dir = std::env::temp_dir().join(format!("echobird-zcode-{}", uuid::Uuid::new_v4()));
+        write_json_file(&dir.join("provider_config.json"), &personal_fixture()).unwrap();
+        let mut model: ModelInfo = serde_json::from_value(serde_json::json!({
+            "model":"vision/unknown", "apiKey":"fixture", "imageInput":true
+        }))
+        .unwrap();
+        assert!(apply_zcode_at(&model, &dir).success);
+        assert_eq!(read_zcode_at(&dir).unwrap().image_input, Some(true));
+        model.image_input = Some(false);
+        assert!(apply_zcode_at(&model, &dir).success);
+        assert_eq!(read_zcode_at(&dir).unwrap().image_input, Some(false));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn personal_fixture() -> serde_json::Value {
         serde_json::json!({
             "schemaVersion": 1,
@@ -525,6 +654,7 @@ mod tests {
             "secret",
             "https://example.com/v1",
             "openai",
+            &serde_json::json!({}),
         )
         .unwrap()
         .unwrap();
@@ -566,6 +696,7 @@ mod tests {
             "secret",
             "https://example.com/anthropic",
             "anthropic",
+            &serde_json::json!({}),
         )
         .unwrap()
         .unwrap();
@@ -741,6 +872,7 @@ mod tests {
                 "fixture",
                 "https://example.test",
                 "anthropic",
+                &serde_json::json!({}),
             )
             .unwrap()
             .unwrap();
@@ -771,7 +903,8 @@ mod tests {
                     "Supplier",
                     "fixture",
                     "https://example.test",
-                    "anthropic"
+                    "anthropic",
+                    &serde_json::json!({})
                 )
                 .unwrap(),
                 Some(updated)

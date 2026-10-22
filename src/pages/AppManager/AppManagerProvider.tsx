@@ -233,6 +233,12 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
   const [claudeCodeWebSearch, setClaudeCodeWebSearch] = useState<boolean>(() =>
     readBool('echobird_claudecode_web_search', true)
   );
+  const [zcodeWebSearch, setZCodeWebSearch] = useState<boolean>(() =>
+    readBool('echobird_zcode_web_search', false)
+  );
+  const [zcodeImageInput, setZCodeImageInput] = useState<boolean>(() =>
+    readBool('echobird_zcode_image_input', true)
+  );
   // Claude Code 1M-context toggle. When on,
   // apply_claudecode appends `[1m]` to the model id (MODEL / OPUS / SONNET / FABLE env
   // vars only — HAIKU + SUBAGENT stay bare) so Claude Code budgets the 1M
@@ -633,7 +639,8 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     toolId: string,
     internalId: string,
     oneMOverride?: boolean,
-    webSearchOverride?: boolean
+    webSearchOverride?: boolean,
+    imageInputOverride?: boolean
   ): Promise<true | string | false> => {
     const model = userModels.find((m) => m.internalId === internalId);
     if (!model) {
@@ -696,6 +703,12 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
               webSearch: isSmartRouterId(model.internalId)
                 ? false
                 : (webSearchOverride ?? codexWebSearch),
+            }
+          : {}),
+        ...(toolId === 'zcode'
+          ? {
+              webSearch: webSearchOverride ?? zcodeWebSearch,
+              imageInput: imageInputOverride ?? zcodeImageInput,
             }
           : {}),
       });
@@ -763,6 +776,29 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
     setIsLaunching(true);
     setApplyError(null);
     void applyModelConfig(tool, modelId, undefined, value)
+      .then((result) => {
+        if (result !== true)
+          setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
+      })
+      .finally(() => setIsLaunching(false));
+  };
+
+  const setZCodeCapability = (capability: 'webSearch' | 'imageInput', value: boolean) => {
+    if (isLaunching || selectedTool !== 'zcode') return;
+    (capability === 'webSearch' ? setZCodeWebSearch : setZCodeImageInput)(value);
+    writeBool(`echobird_zcode_${capability === 'webSearch' ? 'web_search' : 'image_input'}`, value);
+    if (!selectedToolData?.installed || zcodeAccounts.selectedId) return;
+    const modelId = toolModelConfig.zcode;
+    if (!modelId || isOfficialModelSentinel(modelId)) return;
+    setIsLaunching(true);
+    setApplyError(null);
+    void applyModelConfig(
+      'zcode',
+      modelId,
+      undefined,
+      capability === 'webSearch' ? value : zcodeWebSearch,
+      capability === 'imageInput' ? value : zcodeImageInput
+    )
       .then((result) => {
         if (result !== true)
           setApplyError(typeof result === 'string' ? result : t('key.destroyed'));
@@ -1587,6 +1623,9 @@ export const AppManagerProvider: React.FC<AppManagerProviderProps> = ({ children
         scanTools,
         userModels,
         codexWebSearch,
+        zcodeWebSearch,
+        zcodeImageInput,
+        setZCodeCapability,
         setCodexWebSearch,
         claudeDesktopWebSearch,
         claudeCodeWebSearch,

@@ -57,6 +57,7 @@ fn model(relay: bool) -> ModelInfo {
         display_model: None,
         relay_mode: Some(relay),
         web_search: None,
+        image_input: None,
         one_m_context: None,
     }
 }

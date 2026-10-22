@@ -675,6 +675,52 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search control', (client) => 
   );
 });
 
+describe('ZCode model capability controls', () => {
+  it.each([false, true])(
+    'reuses the switches and disables both while pending=%s',
+    async (pending) => {
+      const { AppManagerPanel } = await import('./AppManagerComponents');
+      const { ModelNexusContext } = await import('../ModelNexus/context');
+      const { ConfirmDialogProvider } = await import('../../components/ConfirmDialog');
+      const context = {
+        selectedTool: 'zcode',
+        selectedToolData: { ...tool, id: 'zcode' },
+        toolModelConfig: {},
+        userModels: models,
+        zcodeWebSearch: false,
+        zcodeImageInput: true,
+        isLaunching: pending,
+        zcodeAccounts: {
+          accounts: [],
+          selectedId: null,
+          refreshing: new Set(),
+          authorizationFailedIds: new Set(),
+        },
+      } as unknown as AppManagerContextType;
+      const markup = renderToStaticMarkup(
+        <ConfirmDialogProvider>
+          <ModelNexusContext.Provider value={{} as React.ContextType<typeof ModelNexusContext>}>
+            <AppManagerContext.Provider value={context}>
+              <AppManagerPanel />
+            </AppManagerContext.Provider>
+          </ModelNexusContext.Provider>
+        </ConfirmDialogProvider>
+      );
+      for (const [label, checked] of [
+        ['agent.codexWebSearchLabel', false],
+        ['image', true],
+      ]) {
+        const toggle = markup.match(new RegExp(`<button[^>]*aria-label="${label}"[^>]*>`))?.[0];
+        expect(toggle).toContain(`aria-checked="${checked}"`);
+        expect(toggle?.includes('disabled=""')).toBe(pending);
+      }
+      expect(markup).not.toContain('role="tooltip"');
+      expect(markup).not.toContain('agent.codexWebSearchHint');
+      expect(markup).not.toContain('aria-label="1M"');
+    }
+  );
+});
+
 describe.each(['claudedesktop', 'claudecode'])('%s model controls', (client) => {
   it.each([
     { selectedAccount: null, pending: false },

@@ -82,6 +82,7 @@ fn migrate_legacy_proxy_config_from(codex_dir: &Path, relay_path: &Path) -> io::
         display_model: None,
         relay_mode: None,
         web_search: None,
+        image_input: None,
         one_m_context: None,
     };
     let state_dir = relay_path.parent().unwrap_or_else(|| Path::new(""));

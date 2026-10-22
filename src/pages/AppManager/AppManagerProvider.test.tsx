@@ -951,6 +951,181 @@ describe.each(['codex', 'chatgptdesktop'])('%s Web Search preference', (tool) =>
   });
 });
 
+describe('ZCode model capability preferences', () => {
+  let renderer: ReactTestRenderer;
+  let context: ReturnType<typeof useAppManager>;
+  let storage: Map<string, string>;
+  function Harness() {
+    const state = useAppManager();
+    useLayoutEffect(() => {
+      context = state;
+    });
+    return null;
+  }
+  beforeEach(() => {
+    vi.clearAllMocks();
+    storage = new Map();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+    });
+    useNavigationStore.getState().setActivePage('apps');
+    useToolsStore.getState().setDetectedTools([
+      { id: 'zcode', name: 'ZCode', category: 'Desktop', installed: true, apiProtocol: ['openai'] },
+      { id: 'codex', name: 'Codex', category: 'CLI', installed: true, apiProtocol: ['openai'] },
+    ]);
+    vi.mocked(api.listZCodeAccounts).mockResolvedValue([]);
+    vi.mocked(api.listCodexAccounts).mockResolvedValue([]);
+    vi.mocked(api.getModels).mockResolvedValue([
+      {
+        internalId: 'fixture',
+        name: 'Fixture',
+        modelId: 'vision/fixture',
+        baseUrl: 'https://example.test/v1',
+        apiKey: 'fixture',
+      },
+    ]);
+    vi.mocked(api.applyModelToTool).mockResolvedValue({ success: true, message: 'ok' });
+  });
+  afterEach(() => {
+    act(() => renderer?.unmount());
+    useToolsStore.getState().setDetectedTools([]);
+    vi.mocked(api.getModels).mockResolvedValue([]);
+    vi.stubGlobal('localStorage', undefined);
+    vi.useRealTimers();
+  });
+  const mount = async () => {
+    await act(async () => {
+      renderer = create(
+        <AppManagerProvider>
+          <Harness />
+        </AppManagerProvider>
+      );
+    });
+    await act(async () => context.setSelectedTool('zcode'));
+  };
+
+  it('restores independent preferences without applying or logging in during navigation', async () => {
+    storage.set('echobird_zcode_web_search', 'true');
+    storage.set('echobird_zcode_image_input', 'false');
+    await mount();
+    expect(context.zcodeWebSearch).toBe(true);
+    expect(context.zcodeImageInput).toBe(false);
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.startZCodeLogin).not.toHaveBeenCalled();
+    expect(api.refreshZCodeAccountQuota).not.toHaveBeenCalled();
+    expect(context.applyError).toBeNull();
+    await act(async () => context.setSelectedTool('codex'));
+    await act(async () => context.setSelectedTool('zcode'));
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(context.zcodeImageInput).toBe(false);
+    expect(context.codexWebSearch).toBe(true);
+  });
+
+  it('persists without an API model, applies explicit flips with both values, and isolates tools', async () => {
+    await mount();
+    expect(context.zcodeWebSearch).toBe(false);
+    expect(context.zcodeImageInput).toBe(true);
+    act(() => context.setZCodeCapability('webSearch', true));
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(storage.get('echobird_zcode_web_search')).toBe('true');
+    act(() => context.handleSelectModel('zcode', 'fixture'));
+    await act(async () => context.setZCodeCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      'zcode',
+      expect.objectContaining({
+        model: 'vision/fixture',
+        webSearch: true,
+        imageInput: false,
+      })
+    );
+    await act(async () => context.setZCodeCapability('webSearch', false));
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      'zcode',
+      expect.objectContaining({
+        webSearch: false,
+        imageInput: false,
+      })
+    );
+    expect(storage.get('echobird_zcode_image_input')).toBe('false');
+    const calls = vi.mocked(api.applyModelToTool).mock.calls.length;
+    await act(async () => context.setSelectedTool('codex'));
+    act(() => context.setZCodeCapability('imageInput', true));
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(calls);
+    expect(context.zcodeImageInput).toBe(false);
+    expect(storage.has('echobird_codex_web_search')).toBe(false);
+  });
+
+  it('locks repeated flips until completion and exposes an explicit apply failure', async () => {
+    await mount();
+    act(() => context.handleSelectModel('zcode', 'fixture'));
+    let finish!: (value: { success: boolean; message: string }) => void;
+    vi.mocked(api.applyModelToTool).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      })
+    );
+    act(() => context.setZCodeCapability('webSearch', true));
+    expect(context.isLaunching).toBe(true);
+    act(() => context.setZCodeCapability('imageInput', false));
+    expect(api.applyModelToTool).toHaveBeenCalledTimes(1);
+    expect(context.zcodeImageInput).toBe(true);
+    await act(async () => finish({ success: false, message: 'Fixture apply failed' }));
+    expect(context.isLaunching).toBe(false);
+    expect(context.applyError).toBe('Fixture apply failed');
+  });
+
+  it.each(['account', 'uninstalled'])('does not apply capabilities in %s mode', async (mode) => {
+    const account: api.ZCodeAccount = {
+      id: 'saved',
+      email: 'fixture@example.test',
+      provider: 'bigmodel',
+      active: true,
+      plan: null,
+      remainingPercent: null,
+      resetAt: null,
+    };
+    vi.mocked(api.listZCodeAccounts).mockResolvedValue([account]);
+    if (mode === 'uninstalled') {
+      useToolsStore
+        .getState()
+        .setDetectedTools([{ id: 'zcode', name: 'ZCode', category: 'Desktop', installed: false }]);
+    }
+    await mount();
+    if (mode === 'account') act(() => context.zcodeAccounts.select(account.id));
+    await act(async () => context.setZCodeCapability('webSearch', true));
+    expect(storage.get('echobird_zcode_web_search')).toBe('true');
+    expect(api.applyModelToTool).not.toHaveBeenCalled();
+    expect(api.switchZCodeAccount).not.toHaveBeenCalled();
+    expect(api.refreshZCodeAccountQuota).not.toHaveBeenCalled();
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+
+  it('passes saved capabilities through the ordinary apply button', async () => {
+    vi.useFakeTimers();
+    storage.set('echobird_zcode_web_search', 'true');
+    storage.set('echobird_zcode_image_input', 'false');
+    await mount();
+    act(() => {
+      context.handleSelectModel('zcode', 'fixture');
+      context.setAgreedConfigPolicy(true);
+      context.setLaunchAfterApply(false);
+    });
+    await act(async () => {
+      await context.handleLaunch();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(api.applyModelToTool).toHaveBeenLastCalledWith(
+      'zcode',
+      expect.objectContaining({
+        webSearch: true,
+        imageInput: false,
+      })
+    );
+    expect(api.startTool).not.toHaveBeenCalled();
+  });
+});
+
 describe.each(['cline', 'clinedesktop'])('%s API model workflow', (tool) => {
   let renderer: ReactTestRenderer;
   let context: ReturnType<typeof useAppManager>;

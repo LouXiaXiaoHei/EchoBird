@@ -289,6 +289,7 @@ pub(super) fn read_openscience() -> Option<ModelInfo> {
         display_model: None,
         relay_mode: None,
         web_search: None,
+        image_input: None,
         one_m_context: None,
     })
 }
