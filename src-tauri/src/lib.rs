@@ -1301,7 +1301,6 @@ pub fn run() {
             qwenwork_account_commands::poll_qwenwork_login,
             qwenwork_account_commands::cancel_qwenwork_login,
             qwenwork_account_commands::refresh_qwenwork_account_quota,
-            qwenwork_account_commands::claim_qwenwork_daily_credits,
             qwenwork_account_commands::delete_qwenwork_account,
             qwenwork_account_commands::switch_qwenwork_account,
             kilo_account_commands::list_kilo_accounts,

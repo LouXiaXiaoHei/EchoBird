@@ -24,13 +24,6 @@ pub async fn refresh_qwenwork_account_quota(
     qwenwork_accounts::refresh(edition, &account_id).await
 }
 #[tauri::command]
-pub async fn claim_qwenwork_daily_credits(
-    edition: Edition,
-    account_id: String,
-) -> Result<Account, String> {
-    qwenwork_accounts::claim(edition, &account_id).await
-}
-#[tauri::command]
 pub async fn delete_qwenwork_account(edition: Edition, account_id: String) -> Result<(), String> {
     qwenwork_accounts::delete(edition, &account_id).await
 }

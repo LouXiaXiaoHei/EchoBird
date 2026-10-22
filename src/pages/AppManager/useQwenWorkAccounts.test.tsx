@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import * as api from '../../api/tauri';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useQwenWorkAccounts } from './useQwenWorkAccounts';
-import { qwenWorkPlanLabel, qwenWorkRewardStatus } from './qwenWorkAccountDisplay';
+import { qwenWorkPlanLabel } from './qwenWorkAccountDisplay';
 
 vi.mock('../../hooks/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock('../../components/ConfirmDialog', () => ({ useConfirm: () => async () => true }));
@@ -16,7 +16,6 @@ vi.mock('../../api/tauri', () => ({
   openExternal: vi.fn().mockResolvedValue(undefined),
   deleteQwenWorkAccount: vi.fn().mockResolvedValue(undefined),
   refreshQwenWorkAccountQuota: vi.fn(),
-  claimQwenWorkDailyCredits: vi.fn(),
 }));
 
 let state: ReturnType<typeof useQwenWorkAccounts>;
@@ -59,20 +58,6 @@ async function mount(edition: api.QwenWorkEdition = 'qwenworkcn', enabled = true
     await vi.advanceTimersByTimeAsync(0);
   });
 }
-it('collects batch claim errors without a second dialog and keeps individual errors visible', async () => {
-  await mount();
-  const collect = vi.fn();
-  vi.mocked(api.claimQwenWorkDailyCredits).mockRejectedValue('accountError.network');
-  await act(async () => {
-    await state.claimDaily(state.accounts[0], collect);
-  });
-  expect(collect).toHaveBeenCalledExactlyOnceWith('accountError.network');
-  expect(showError).not.toHaveBeenCalled();
-  await act(async () => {
-    await state.claimDaily(state.accounts[0]);
-  });
-  expect(showError).toHaveBeenCalledExactlyOnceWith('accountError.network');
-});
 beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
@@ -88,16 +73,6 @@ beforeEach(() => {
     ...account(edition),
     remaining: 42,
   }));
-  vi.mocked(api.claimQwenWorkDailyCredits).mockImplementation(async (edition) => ({
-    ...account(edition),
-    dailyReward: {
-      status: 'CLAIMED_TODAY',
-      rewardCredits: 127,
-      checkedAt: Date.now() / 1000,
-      nextClaimAt: Date.now() / 1000 + 3600,
-      expiresAt: null,
-    },
-  }));
 });
 afterEach(() => {
   act(() => {
@@ -107,34 +82,19 @@ afterEach(() => {
 });
 
 it.each(['qwenworkcn', 'qwenwork'] as const)(
-  '%s navigation only lists saved rows; explicit refresh and check-in are separate',
+  '%s navigation only lists saved rows; explicit refresh keeps selection',
   async (edition) => {
     await mount(edition);
     expect(state.selectedId).toBe(edition);
     expect(state.accounts[0].remaining).toBeNull();
     expect(api.refreshQwenWorkAccountQuota).not.toHaveBeenCalled();
-    expect(api.claimQwenWorkDailyCredits).not.toHaveBeenCalled();
     expect(api.startQwenWorkLogin).not.toHaveBeenCalled();
     await act(async () => {
       await state.refresh(state.accounts[0]);
     });
     expect(api.refreshQwenWorkAccountQuota).toHaveBeenCalledExactlyOnceWith(edition, edition);
     expect(state.accounts[0].remaining).toBe(42);
-    expect(api.claimQwenWorkDailyCredits).not.toHaveBeenCalled();
-    await act(async () => {
-      await state.claimDaily(state.accounts[0]);
-    });
-    if (edition === 'qwenwork') {
-      expect(api.claimQwenWorkDailyCredits).not.toHaveBeenCalled();
-      expect(showError).not.toHaveBeenCalled();
-      return;
-    }
-    expect(api.claimQwenWorkDailyCredits).toHaveBeenCalledExactlyOnceWith(edition, edition);
     expect(state.selectedId).toBe(edition);
-    await act(async () => {
-      await state.claimDaily(state.accounts[0]);
-    });
-    expect(api.claimQwenWorkDailyCredits).toHaveBeenCalledTimes(1);
     expect(showError).not.toHaveBeenCalled();
   }
 );
@@ -177,7 +137,6 @@ it('switching editions cancels a pending login and ignores the late result', asy
   expect(state.accounts.map((a) => a.edition)).toEqual(['qwenwork']);
   expect(state.busy).toBe(false);
   expect(api.refreshQwenWorkAccountQuota).not.toHaveBeenCalled();
-  expect(api.claimQwenWorkDailyCredits).not.toHaveBeenCalled();
 });
 it('passive loading failures retain cached rows without dialogs or quota requests', async () => {
   await mount();
@@ -193,7 +152,7 @@ it('passive loading failures retain cached rows without dialogs or quota request
   expect(showError).not.toHaveBeenCalled();
   expect(api.refreshQwenWorkAccountQuota).not.toHaveBeenCalled();
 });
-it('maps the five public plans and preserves unknown plans and real reward deadlines', () => {
+it('maps the five public plans and preserves unknown plans', () => {
   const t = (key: string) => key;
   for (const [plan, key] of [
     ['free', 'Free'],
@@ -222,14 +181,4 @@ it('maps the five public plans and preserves unknown plans and real reward deadl
       t
     )
   ).toBe('agent.qwenworkEnterprisePremium');
-  const a = account('qwenwork');
-  a.dailyReward = {
-    status: 'CLAIMED_TODAY',
-    rewardCredits: 0,
-    checkedAt: 100,
-    nextClaimAt: 200,
-    expiresAt: null,
-  };
-  expect(qwenWorkRewardStatus(a, 150)).toBe('claimed');
-  expect(qwenWorkRewardStatus(a, 200)).toBe('unknown');
 });

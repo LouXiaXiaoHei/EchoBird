@@ -6,7 +6,6 @@ import { workBuddyClaimedToday } from '../pages/AppManager/workBuddyDailyCredits
 import { traeClaimUnavailable } from '../pages/AppManager/traeDailyCredits';
 import { minimaxRewardStatus } from '../pages/AppManager/minimaxAccountDisplay';
 import { dumateRewardStatus } from '../pages/AppManager/dumateAccountDisplay';
-import { qwenWorkRewardStatus } from '../pages/AppManager/qwenWorkAccountDisplay';
 import { qoderRewardStatus } from '../pages/AppManager/qoderAccountDisplay';
 
 const canClaimStatus = (status: string) => status !== 'claimed' && status !== 'unavailable';
@@ -77,13 +76,6 @@ const providers = [
       (account) => api.claimDoubaoDailyCredits(edition, account.id),
       (account) => account.dailyReward?.status !== 'unavailable'
     )
-  ),
-  rewards(
-    'qwenworkcn',
-    ['qwenworkcn'],
-    () => api.listQwenWorkAccounts('qwenworkcn'),
-    (account) => api.claimQwenWorkDailyCredits('qwenworkcn', account.id),
-    (account) => canClaimStatus(qwenWorkRewardStatus(account))
   ),
   ...(['qoder', 'qodercn'] as const).map((edition) =>
     rewards(

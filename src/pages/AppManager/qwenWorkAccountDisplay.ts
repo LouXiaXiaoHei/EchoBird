@@ -88,23 +88,3 @@ export function qwenWorkCreditBalances(
     },
   };
 }
-export function qwenWorkRewardStatus(
-  account: Pick<QwenWorkAccount, 'dailyReward'>,
-  now = Date.now() / 1000
-): 'unknown' | 'claimed' | 'claimable' | 'unavailable' {
-  const reward = account.dailyReward;
-  if (
-    !reward ||
-    !Number.isFinite(reward.checkedAt) ||
-    reward.checkedAt <= 0 ||
-    reward.checkedAt > now
-  )
-    return 'unknown';
-  if (reward.nextClaimAt != null && now >= reward.nextClaimAt) return 'unknown';
-  if (reward.nextClaimAt == null && now - reward.checkedAt >= 300) return 'unknown';
-  return reward.status === 'CLAIMABLE'
-    ? 'claimable'
-    : reward.status === 'CLAIMED_TODAY'
-      ? 'claimed'
-      : 'unavailable';
-}

@@ -106,9 +106,7 @@ it.each(['qwenworkcn', 'qwenwork'] as const)(
     expect(calls('list_qwenwork_accounts')).toHaveLength(1);
     expect(calls('list_qwenwork_accounts')[0][1]).toEqual({ edition });
     expect(state.qwenWorkAccounts.selectedId).toBe(edition);
-    expect(renderer.root.findAllByType(AccountSectionRewardButton)).toHaveLength(
-      edition === 'qwenwork' ? 0 : 1
-    );
+    expect(renderer.root.findAllByType(AccountSectionRewardButton)).toHaveLength(0);
     if (edition === 'qwenwork')
       expect(renderer.root.findByType(AccountSectionRow).props.plan).toBe('Enterprise Premium');
     expect(calls('refresh_qwenwork_account_quota')).toHaveLength(0);
@@ -152,7 +150,7 @@ it('nested refresh keeps selection separate and uses the shared row controls', a
 });
 
 it.each(['CLAIMABLE', 'CLAIMED_TODAY', null] as const)(
-  'shows separate domestic balances and the cached reward status %s without passive requests',
+  'shows daily balance without claim controls even with cached reward status %s',
   async (status) => {
     const row: QwenWorkAccount = {
       ...account('qwenworkcn'),
@@ -178,18 +176,13 @@ it.each(['CLAIMABLE', 'CLAIMED_TODAY', null] as const)(
     await mount('qwenworkcn');
     const base = renderer.root.findByProps({ 'aria-label': 'agent.baseCredits' });
     expect(base.children).toEqual(['2000']);
-    if (status === 'CLAIMABLE') {
-      expect(
-        renderer.root.findByProps({ 'aria-label': 'agent.dailyCreditsUnclaimed' }).children
-      ).toEqual(['agent.dailyCreditsUnclaimed']);
-      expect(renderer.root.findAllByProps({ 'aria-label': 'agent.rewardCredits' })).toHaveLength(0);
-    } else {
-      expect(renderer.root.findByProps({ 'aria-label': 'agent.rewardCredits' }).children).toContain(
-        '99.75'
-      );
-    }
-    const reward = renderer.root.findByType(AccountSectionRewardButton);
-    expect(reward.props.claimed).toBe(status === 'CLAIMED_TODAY');
+    expect(renderer.root.findByProps({ 'aria-label': 'agent.rewardCredits' }).children).toContain(
+      '99.75'
+    );
+    expect(
+      renderer.root.findAllByProps({ 'aria-label': 'agent.dailyCreditsUnclaimed' })
+    ).toHaveLength(0);
+    expect(renderer.root.findAllByType(AccountSectionRewardButton)).toHaveLength(0);
     expect(calls('refresh_qwenwork_account_quota')).toHaveLength(0);
     expect(calls('claim_qwenwork_daily_credits')).toHaveLength(0);
   }

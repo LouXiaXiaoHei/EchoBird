@@ -244,11 +244,7 @@ it.each([
     handlers.set('list_qwenwork_accounts', () => [qwen]);
     const commands =
       action === 'claim'
-        ? [
-            'claim_doubao_daily_credits',
-            'claim_dumate_daily_credits',
-            'claim_qwenwork_daily_credits',
-          ]
+        ? ['claim_doubao_daily_credits', 'claim_dumate_daily_credits']
         : [
             'refresh_doubao_account_quota',
             'refresh_dumate_account_quota',
@@ -257,12 +253,13 @@ it.each([
     handlers.set(commands[0], () => {
       throw new Error('accountError.claim');
     });
-    handlers.set(commands[1], () => {
-      throw new Error('accountError.loginRequired');
-    });
+    if (action === 'refresh')
+      handlers.set(commands[1], () => {
+        throw new Error('accountError.loginRequired');
+      });
     let failLast!: (error: Error) => void;
     handlers.set(
-      commands[2],
+      commands[commands.length - 1],
       () =>
         new Promise((_, reject) => {
           failLast = reject;
@@ -298,7 +295,9 @@ it.each([
       if (mode === 'leave') useNavigationStore.getState().setActivePage('models');
     });
     await act(async () => {
-      failLast(new Error('accountError.network'));
+      failLast(
+        new Error(action === 'claim' ? 'accountError.loginRequired' : 'accountError.network')
+      );
       await task;
     });
     if (mode === 'leave') {
@@ -306,13 +305,14 @@ it.each([
       expect(errorEvents).toEqual([null]);
     } else {
       const label = (name: string) => (mode === 'hidden' ? ACCOUNT_NAME_MASK : name);
-      const summary = `Authorization failed: 1 (DuMate · ${label('DuMate user')}) ${action === 'claim' ? 'Claim' : 'Refresh'} failed: 2 (豆包工作 · ${label('doubaowork Fixture')}, 千问办公 · ${label('Qwen user')})`;
+      const summary = `Authorization failed: 1 (DuMate · ${label('DuMate user')}) ${action === 'claim' ? `Claim failed: 1 (豆包工作 · ${label('doubaowork Fixture')})` : `Refresh failed: 2 (豆包工作 · ${label('doubaowork Fixture')}, 千问办公 · ${label('Qwen user')})`}`;
       expect(state.applyError).toBe(summary);
       expect(errorEvents).toEqual([null, summary]);
       expect(state.dumateAccounts.authorizationFailedIds.has('dumate')).toBe(true);
       expect(state.doubaoAccountGroups.doubaowork.accounts).toEqual([doubao]);
       expect(state.qwenWorkAccountGroups.qwenworkcn.accounts).toEqual([qwen]);
     }
+    expect(calls('claim_qwenwork_daily_credits')).toHaveLength(0);
   }
 );
 

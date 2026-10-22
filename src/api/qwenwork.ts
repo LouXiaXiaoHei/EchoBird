@@ -42,8 +42,6 @@ export const cancelQwenWorkLogin = (loginId: string) =>
   invoke<void>('cancel_qwenwork_login', { loginId });
 export const refreshQwenWorkAccountQuota = (edition: QwenWorkEdition, accountId: string) =>
   invoke<QwenWorkAccount>('refresh_qwenwork_account_quota', { edition, accountId });
-export const claimQwenWorkDailyCredits = (edition: QwenWorkEdition, accountId: string) =>
-  invoke<QwenWorkAccount>('claim_qwenwork_daily_credits', { edition, accountId });
 export const deleteQwenWorkAccount = (edition: QwenWorkEdition, accountId: string) =>
   invoke<void>('delete_qwenwork_account', { edition, accountId });
 export const switchQwenWorkAccount = (edition: QwenWorkEdition, accountId: string) =>

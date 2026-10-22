@@ -313,9 +313,8 @@ describe('Account Center display data', () => {
       expect(account.metrics.map((metric) => metric.value)).toEqual(
         edition === 'qwenwork' ? ['80'] : ['80', '—']
       );
-      expect(typeof account.claim).toBe(edition === 'qwenwork' ? 'undefined' : 'function');
+      expect(account.claim).toBeUndefined();
       expect(state.qwenWorkAccountGroups[edition].refresh).not.toHaveBeenCalled();
-      expect(state.qwenWorkAccountGroups[edition].claimDaily).not.toHaveBeenCalled();
       state.qwenWorkAccountGroups[edition].accounts[0].remaining = null;
       state.qwenWorkAccountGroups[edition].accounts[0].total = null;
       state.qwenWorkAccountGroups[edition].accounts[0].creditBuckets = [];
@@ -349,14 +348,13 @@ describe('Account Center display data', () => {
           dailyReward: null,
         },
       ];
-      if (edition === 'qwenwork')
-        state.qwenWorkAccountGroups[edition].accounts[0].dailyReward = {
-          status: 'CLAIMABLE',
-          rewardCredits: 200,
-          checkedAt: Date.now() / 1000,
-          nextClaimAt: Date.now() / 1000 + 3600,
-          expiresAt: null,
-        };
+      state.qwenWorkAccountGroups[edition].accounts[0].dailyReward = {
+        status: 'CLAIMABLE',
+        rewardCredits: 200,
+        checkedAt: Date.now() / 1000,
+        nextClaimAt: Date.now() / 1000 + 3600,
+        expiresAt: null,
+      };
       const provider = providers(state).find((provider) => provider.id === edition)!;
       const account = provider.accounts[0];
       expect(account.metrics).toHaveLength(edition === 'qwenwork' ? 1 : 2);
@@ -387,7 +385,9 @@ describe('Account Center display data', () => {
         expect(html).not.toContain('aria-valuenow=');
         expect(account.plan).toBe('Free');
       }
-      expect(state.qwenWorkAccountGroups[edition].claimDaily).not.toHaveBeenCalled();
+      expect(account.claim).toBeUndefined();
+      expect(html).not.toContain('agent.claimDailyCredits');
+      expect(html).not.toContain('agent.dailyCreditsUnclaimed');
       expect(state.qwenWorkAccountGroups[edition].refresh).not.toHaveBeenCalled();
       state.qwenWorkAccountGroups[edition].accounts[0].creditBuckets[0].total = null;
       const updated = providers(state).find((p) => p.id === edition)!.accounts[0];

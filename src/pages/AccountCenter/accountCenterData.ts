@@ -21,7 +21,6 @@ import {
   qwenWorkIdentity,
   qwenWorkCreditBalances,
   qwenWorkPlanLabel,
-  qwenWorkRewardStatus,
 } from '../AppManager/qwenWorkAccountDisplay';
 import { kimiQuotaLabel } from '../AppManager/KimiAccountSection';
 import { codeArtsRemainingPercent } from '../AppManager/codeArtsAccountDisplay';
@@ -622,18 +621,6 @@ export function accountCenterProviders(
             identity: qwenWorkIdentity(account),
             plan: qwenWorkPlanLabel(account, t),
             subscriptionEndAt: account.expiresAt ?? undefined,
-            claim:
-              edition === 'qwenworkcn'
-                ? (onError) => context.qwenWorkAccountGroups[edition].claimDaily(account, onError)
-                : undefined,
-            dailyClaimed: edition === 'qwenworkcn' && qwenWorkRewardStatus(account) === 'claimed',
-            claimDisabled:
-              edition === 'qwenworkcn' && qwenWorkRewardStatus(account) === 'unavailable',
-            claimStatusExpiresAt:
-              edition === 'qwenworkcn'
-                ? (account.dailyReward?.nextClaimAt ??
-                  (account.dailyReward ? account.dailyReward.checkedAt + 300 : undefined))
-                : undefined,
             metrics: [
               metric(t('agent.baseCredits'), balances.package.remaining, balances.package.total),
               ...(balances.reward

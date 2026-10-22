@@ -1,28 +1,17 @@
 import { Gift } from 'lucide-react';
 import { useI18n } from '../../hooks/useI18n';
-import { useUsageClock } from '../../hooks/useUsageClock';
 import { useAppManager } from './context';
-import {
-  AccountSectionButton,
-  AccountSectionRewardButton,
-  AccountSectionRow,
-} from './AccountSectionPrimitives';
+import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimitives';
 import { QuotaCountdown } from './QuotaCountdown';
 import {
   qwenWorkIdentity,
   qwenWorkCreditBalances,
   qwenWorkPlanLabel,
-  qwenWorkRewardStatus,
 } from './qwenWorkAccountDisplay';
 
 export function QwenWorkAccountSection() {
   const { qwenWorkAccounts: group, selectedTool, isLaunching } = useAppManager();
   const { t, locale } = useI18n();
-  const now = useUsageClock(
-    group.accounts.some(
-      (account) => account.edition === 'qwenworkcn' && account.dailyReward != null
-    )
-  );
   const formatCredits = (value: number | null) =>
     value == null
       ? '—'
@@ -42,7 +31,6 @@ export function QwenWorkAccountSection() {
       <div className="space-y-2">
         {group.accounts.map((account) => {
           const balances = qwenWorkCreditBalances(account);
-          const status = qwenWorkRewardStatus(account, now / 1000);
           return (
             <AccountSectionRow
               key={account.id}
@@ -63,37 +51,20 @@ export function QwenWorkAccountSection() {
               onSelect={() => group.select(account.id)}
               onRefresh={() => void group.refresh(account)}
               onDelete={() => void group.remove(account)}
-              leadingAction={
-                account.edition === 'qwenworkcn' ? (
-                  <AccountSectionRewardButton
-                    email={qwenWorkIdentity(account)}
-                    claimed={status === 'claimed'}
-                    disabled={
-                      isLaunching || group.refreshing.has(account.id) || status === 'unavailable'
-                    }
-                    onClaim={() => void group.claimDaily(account)}
-                  />
-                ) : undefined
-              }
               secondary={
                 <span className="flex h-[16px] min-w-0 items-center gap-1 overflow-hidden text-[11px] font-semibold whitespace-nowrap">
                   <span className="flex-shrink-0" aria-label={t('agent.baseCredits')}>
                     {formatCredits(balances.package.remaining)}
                   </span>
-                  {balances.reward &&
-                    (status === 'claimable' ? (
-                      <span className="flex-shrink-0" aria-label={t('agent.dailyCreditsUnclaimed')}>
-                        {t('agent.dailyCreditsUnclaimed')}
-                      </span>
-                    ) : (
-                      <span
-                        className="flex flex-shrink-0 items-center gap-0.5"
-                        aria-label={t('agent.rewardCredits')}
-                      >
-                        <Gift size={10} aria-hidden="true" />
-                        {formatCredits(balances.reward.remaining)}
-                      </span>
-                    ))}
+                  {balances.reward && (
+                    <span
+                      className="flex flex-shrink-0 items-center gap-0.5"
+                      aria-label={t('agent.rewardCredits')}
+                    >
+                      <Gift size={10} aria-hidden="true" />
+                      {formatCredits(balances.reward.remaining)}
+                    </span>
+                  )}
                 </span>
               }
             />

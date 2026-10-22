@@ -1,4 +1,4 @@
-use super::{Account, Credentials, CreditBucket, DailyReward, Edition};
+use super::{Account, Credentials, CreditBucket, Edition};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -264,49 +264,6 @@ impl Client {
         }
         Ok(result)
     }
-    pub(super) async fn daily(&self, c: &Credentials) -> Result<DailyReward, String> {
-        if self.edition != Edition::QwenWorkCn {
-            return Err("accountError.unavailable".into());
-        }
-        let v = self
-            .request(
-                reqwest::Method::GET,
-                "/sash/api/v1/me/daily-check-in/status",
-                Some(token(c)?),
-                None,
-            )
-            .await?;
-        parse_daily(&v)
-    }
-    pub(super) async fn claim(
-        &self,
-        c: &Credentials,
-        mut daily: DailyReward,
-    ) -> Result<DailyReward, String> {
-        if self.edition != Edition::QwenWorkCn {
-            return Err("accountError.unavailable".into());
-        }
-        if daily.status != "CLAIMABLE" {
-            return Ok(daily);
-        }
-        let v = self
-            .request(
-                reqwest::Method::POST,
-                "/sash/api/v1/me/daily-check-in/claim",
-                Some(token(c)?),
-                None,
-            )
-            .await?;
-        let v = data(&v);
-        if !matches!(v["result"].as_str(), Some("CLAIMED" | "ALREADY_CLAIMED")) {
-            return Err("accountError.format".into());
-        }
-        daily.status = "CLAIMED_TODAY".into();
-        daily.checked_at = chrono::Utc::now().timestamp();
-        daily.reward_credits = number(&v["rewardCredits"]).or(daily.reward_credits);
-        daily.expires_at = timestamp(&v["expiresAt"]).or(daily.expires_at);
-        Ok(daily)
-    }
 }
 
 pub(super) fn token(c: &Credentials) -> Result<&str, String> {
@@ -482,25 +439,6 @@ fn parse_quota(env: &Value, value: &Value, enterprise: bool) -> Result<Quota, St
         buckets,
     })
 }
-fn parse_daily(v: &Value) -> Result<DailyReward, String> {
-    let v = data(v);
-    let status = text(v, &["status"])
-        .filter(|s| {
-            matches!(
-                *s,
-                "CLAIMABLE" | "CLAIMED_TODAY" | "DISABLED" | "NOT_STARTED" | "ENDED"
-            )
-        })
-        .ok_or("accountError.format")?;
-    Ok(DailyReward {
-        status: status.into(),
-        reward_credits: number(&v["rewardCredits"]),
-        checked_at: chrono::Utc::now().timestamp(),
-        next_claim_at: timestamp(&v["nextClaimAt"]),
-        expires_at: timestamp(&v["rewardExpiresAt"]),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,8 +514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_and_check_in_have_separate_real_http_operations_and_preserve_native_identity()
-    {
+    async fn quota_refresh_preserves_native_identity_without_check_in_requests() {
         let claims = Arc::new(AtomicUsize::new(0));
         let hits = claims.clone();
         let app=Router::new()
@@ -587,13 +524,10 @@ mod tests {
                 assert_eq!(v["refresh_token"],"fixture-refresh-secret");assert_eq!(v["target"],"c");assert!(v.get("team_id").is_none());
                 Json(json!({"device_token":"next-access","refresh_token":"next-refresh","expires_in":3600}))
             }))
-            .route("/sash/api/v1/me/daily-check-in/status",get(|headers:axum::http::HeaderMap|async move{
-                assert_eq!(headers["authorization"],"Bearer fixture-access-secret");
-                Json(json!({"data":{"status":"CLAIMABLE","rewardCredits":127,"nextClaimAt":2_000_000_000_000i64}}))
-            }))
-            .route("/sash/api/v1/me/daily-check-in/claim",post(move|body:axum::body::Bytes|{let hits=hits.clone();async move{
-                assert!(body.is_empty());hits.fetch_add(1,Ordering::SeqCst);Json(json!({"data":{"result":"CLAIMED","rewardCredits":127}}))
-            }}));
+            .fallback(move || { let hits=hits.clone(); async move {
+                hits.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::NOT_FOUND
+            }});
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -603,59 +537,10 @@ mod tests {
         assert_eq!(rotated.auth["token"], "next-access");
         assert_eq!(rotated.id(), c.id());
         assert_eq!(rotated.auth["loginDeviceId"], c.auth["loginDeviceId"]);
-        client.quota(&c).await.unwrap();
-        let daily = client.daily(&c).await.unwrap();
-        assert_eq!(daily.reward_credits, Some(127.0));
-        assert_eq!(daily.next_claim_at, Some(2_000_000_000));
+        let quota = client.quota(&c).await.unwrap();
+        assert_eq!(quota.remaining, Some(70.0));
         assert_eq!(claims.load(Ordering::SeqCst), 0);
-        let daily = client.claim(&c, daily).await.unwrap();
-        assert_eq!(daily.status, "CLAIMED_TODAY");
-        assert_eq!(claims.load(Ordering::SeqCst), 1);
-        client.claim(&c, daily).await.unwrap();
-        assert_eq!(claims.load(Ordering::SeqCst), 1);
-        server.abort();
-    }
-
-    #[test]
-    fn disabled_and_malformed_daily_status_never_become_claimable() {
-        for status in ["DISABLED", "NOT_STARTED", "ENDED", "CLAIMED_TODAY"] {
-            assert_eq!(
-                parse_daily(&json!({"data":{"status":status}}))
-                    .unwrap()
-                    .status,
-                status
-            );
-        }
-        assert!(parse_daily(&json!({"result":"CLAIMED"})).is_err());
-        assert!(parse_daily(&json!({"status":"future-state"})).is_err());
         assert!(normalize_user(&json!({"user":{"id":"fixture","is_biz":true}})).is_err());
-    }
-
-    #[tokio::test]
-    async fn international_accounts_never_query_or_claim_rewards_with_cached_claimable_status() {
-        let count = Arc::new(AtomicUsize::new(0));
-        let requests = count.clone();
-        let app = Router::new().fallback(move || {
-            let requests = requests.clone();
-            async move {
-                requests.fetch_add(1, Ordering::SeqCst);
-                Json(json!({"data":{"status":"CLAIMABLE","result":"CLAIMED","rewardCredits":127}}))
-            }
-        });
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let global = Client::new(Edition::QwenWork, &base, "fixture").unwrap();
-        let c = super::super::tests::fixture(Edition::QwenWork);
-        let cached = parse_daily(&json!({"status":"CLAIMABLE","rewardCredits":200})).unwrap();
-        assert!(matches!(global.daily(&c).await,Err(e) if e=="accountError.unavailable"));
-        assert!(matches!(global.claim(&c,cached).await,Err(e) if e=="accountError.unavailable"));
-        assert_eq!(count.load(Ordering::SeqCst), 0);
-        let domestic = Client::new(Edition::QwenWorkCn, &base, "fixture").unwrap();
-        let c = super::super::tests::fixture(Edition::QwenWorkCn);
-        let daily = domestic.daily(&c).await.unwrap();
-        domestic.claim(&c, daily).await.unwrap();
-        assert_eq!(count.load(Ordering::SeqCst), 2);
         server.abort();
     }
 }

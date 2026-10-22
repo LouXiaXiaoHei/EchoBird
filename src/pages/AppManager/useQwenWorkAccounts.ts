@@ -1,6 +1,6 @@
 import * as api from '../../api/tauri';
 import { useManagedAccounts } from './useManagedAccounts';
-import { qwenWorkIdentity, qwenWorkRewardStatus } from './qwenWorkAccountDisplay';
+import { qwenWorkIdentity } from './qwenWorkAccountDisplay';
 
 export function useQwenWorkAccounts(
   edition: api.QwenWorkEdition,
@@ -9,7 +9,7 @@ export function useQwenWorkAccounts(
   showError: (error: string) => void,
   navigationKey: string
 ) {
-  const managed = useManagedAccounts<api.QwenWorkAccount, api.QwenWorkLogin>(
+  return useManagedAccounts<api.QwenWorkAccount, api.QwenWorkLogin>(
     edition,
     enabled,
     false,
@@ -27,17 +27,4 @@ export function useQwenWorkAccounts(
     },
     navigationKey
   );
-  const claimDaily = (account: api.QwenWorkAccount, onError?: (error: unknown) => void) => {
-    if (edition !== 'qwenworkcn') return Promise.resolve();
-    const current = managed.accounts.find((row) => row.id === account.id);
-    if (account.edition !== edition || !current) return Promise.resolve();
-    const status = qwenWorkRewardStatus(current);
-    if (status === 'claimed' || status === 'unavailable') return Promise.resolve();
-    return managed.refresh(
-      current,
-      (row) => api.claimQwenWorkDailyCredits(edition, row.id),
-      onError
-    );
-  };
-  return { ...managed, claimDaily };
 }

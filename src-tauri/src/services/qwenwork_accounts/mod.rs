@@ -359,17 +359,11 @@ pub async fn refresh(edition: Edition, id: &str) -> Result<Account, String> {
     let client = api::Client::installed(edition)?;
     let c = rotate(&credentials(edition, id).await?, false, &client).await?;
     let result = client.quota(&c).await;
-    let (c, quota) = if matches!(&result, Err(e) if e == "accountError.loginRequired") {
+    let quota = if matches!(&result, Err(e) if e == "accountError.loginRequired") {
         let c = rotate(&c, true, &client).await?;
-        let quota = client.quota(&c).await?;
-        (c, quota)
+        client.quota(&c).await?
     } else {
-        (c, result?)
-    };
-    let daily = if edition == Edition::QwenWorkCn {
-        client.daily(&c).await.ok()
-    } else {
-        None
+        result?
     };
     let _guard = STORE_LOCK.lock().await;
     let path = path(edition)?;
@@ -377,36 +371,7 @@ pub async fn refresh(edition: Edition, id: &str) -> Result<Account, String> {
     credential(&store, edition, id)?;
     let saved = store.get_mut(id).ok_or("accountError.invalidAccount")?;
     quota.apply(&mut saved.account);
-    saved.account.daily_reward = daily;
-    let account = saved.account.clone();
-    super::cursor_auth::write(&path, &store)?;
-    Ok(account)
-}
-
-pub async fn claim(edition: Edition, id: &str) -> Result<Account, String> {
-    if edition != Edition::QwenWorkCn {
-        return Err("accountError.unavailable".into());
-    }
-    let request = request_lock(edition, id)?;
-    let _request = request.lock().await;
-    let client = api::Client::installed(edition)?;
-    let c = rotate(&credentials(edition, id).await?, false, &client).await?;
-    let daily = client.daily(&c).await?;
-    let daily = if daily.status == "CLAIMABLE" {
-        client.claim(&c, daily).await?
-    } else {
-        daily
-    };
-    let quota = client.quota(&c).await.ok();
-    let _guard = STORE_LOCK.lock().await;
-    let path = path(edition)?;
-    let mut store = load(&path)?;
-    credential(&store, edition, id)?;
-    let saved = store.get_mut(id).ok_or("accountError.invalidAccount")?;
-    saved.account.daily_reward = Some(daily);
-    if let Some(quota) = quota {
-        quota.apply(&mut saved.account);
-    }
+    saved.account.daily_reward = None;
     let account = saved.account.clone();
     super::cursor_auth::write(&path, &store)?;
     Ok(account)

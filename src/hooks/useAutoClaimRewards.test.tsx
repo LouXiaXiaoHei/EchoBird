@@ -102,6 +102,22 @@ it('makes no account or claim calls by default, including after navigation and h
   expect(mocks.invoke).not.toHaveBeenCalled();
 });
 
+it('never includes QwenWork in startup or hourly claims while other gifts still work', async () => {
+  installed('qwenworkcn', 'qwenwork', 'workbuddy');
+  rows.qwenwork[0].dailyReward = { status: 'CLAIMABLE', checkedAt: Date.now() / 1000 };
+  useRewardClaimStore.setState({ enabled: true });
+  useToolsStore.setState({ hasScanned: true });
+  await mount();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(3600_000);
+  });
+  expect(claims().map(([command]) => command)).toEqual([
+    'claim_workbuddy_daily_credits',
+    'claim_workbuddy_daily_credits',
+  ]);
+  expect(mocks.invoke.mock.calls.some(([command]) => command.includes('qwenwork'))).toBe(false);
+});
+
 it('starts after installation detection and keeps an hourly schedule across pages', async () => {
   useRewardClaimStore.setState({ enabled: true });
   await mount();
@@ -164,7 +180,7 @@ it('reuses only installed tools and their existing claim endpoints and eligibili
     'claim_codearts_credits',
   ]);
   expect(mocks.invoke.mock.calls.filter(([command]) => command.startsWith('list_'))).toHaveLength(
-    7
+    6
   );
   expect(mocks.invoke.mock.calls).not.toContainEqual([
     'list_workbuddy_accounts',
