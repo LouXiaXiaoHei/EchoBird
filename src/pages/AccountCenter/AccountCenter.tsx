@@ -192,7 +192,14 @@ export function AccountCard({
             </span>
           ) : (
             account.metrics.map((metric, index) => {
-              const colors = quotaColorClasses[quotaTone(metric.percent)];
+              const colors =
+                quotaColorClasses[
+                  metric.percent == null && metric.balanceState
+                    ? metric.balanceState === 'available'
+                      ? 'healthy'
+                      : 'critical'
+                    : quotaTone(metric.percent)
+                ];
               const loneBalance =
                 balanceOnly && singleMetric && metric.label === t('model.balance');
               const hideLabel =
@@ -242,7 +249,7 @@ export function AccountCard({
                     </span>
                     <span
                       aria-label={hideLabel ? `${metric.label} ${metric.value}` : undefined}
-                      className={`block ${metric.value === '—' ? 'min-w-0 truncate' : 'flex-shrink-0'} ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null ? colors.text : metric.balanceState === 'available' ? quotaColorClasses.healthy.text : ''}`}
+                      className={`block ${metric.value === '—' ? 'min-w-0 truncate' : 'flex-shrink-0'} ${loneBalance ? 'font-bold' : 'font-semibold'} tabular-nums ${balanceOnly ? 'text-2xl' : 'text-xs'} ${metric.percent != null || metric.balanceState ? colors.text : ''}`}
                     >
                       {loneBalance && <span className="mr-2">{metric.label}</span>}
                       {metric.value === '—' ? t('model.noUsageData') : metric.value}
@@ -265,7 +272,7 @@ export function AccountCard({
                   ) : metric.showProgress && metric.balanceState && metric.value !== '—' ? (
                     <div
                       aria-hidden="true"
-                      className={`-my-px h-0 flex-shrink-0 rounded-full border-t-[6px] ${metric.balanceState === 'available' ? quotaColorClasses.healthy.fill : 'border-cyber-border'}`}
+                      className={`-my-px h-0 flex-shrink-0 rounded-full border-t-[6px] ${metric.balanceState === 'available' ? colors.fill : colors.track}`}
                     />
                   ) : metric.showProgress && metric.value !== '—' && !balanceOnly ? (
                     <div

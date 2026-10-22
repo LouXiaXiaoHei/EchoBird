@@ -203,6 +203,63 @@ describe('Account Center display data', () => {
     row.enterprise = true;
     expect(providers(state).find((p) => p.id === 'dumate')!.accounts[0].claim).toBeUndefined();
   });
+  it.each([null, 0, 100])(
+    'colors exhausted DuMate credits red even when their capacity is %s',
+    (total) => {
+      const state = context();
+      const row: DuMateAccount = {
+        id: 'dumate-empty',
+        name: 'Fixture',
+        enterprise: false,
+        plan: 'free',
+        expiresAt: null,
+        active: false,
+        remaining: 100,
+        total: null,
+        dailyReward: null,
+        creditBuckets: [
+          {
+            name: 'package',
+            source: 'subscription',
+            reward: false,
+            remaining: 0,
+            total,
+            expiresAt: null,
+          },
+          {
+            name: 'reward',
+            source: 'login_bonus',
+            reward: true,
+            remaining: 100,
+            total: null,
+            expiresAt: null,
+          },
+        ],
+      };
+      state.dumateAccounts.accounts = [row];
+      let provider = providers(state).find((p) => p.id === 'dumate')!;
+      let html = renderToStaticMarkup(
+        <AccountCard provider={provider} account={provider.accounts[0]} />
+      );
+      expect(html).toMatch(/class="[^"]*text-cyber-error[^"]*"[^>]*>0<\/span>/);
+      expect(html).toContain('border-cyber-error/20');
+      expect(html).toMatch(/class="[^"]*text-green-500[^"]*"[^>]*>100<\/span>/);
+      expect(html).toContain('border-green-500');
+      expect(html.match(/role="progressbar"/g) ?? []).toHaveLength(total ? 1 : 0);
+
+      row.remaining = null;
+      row.creditBuckets = [];
+      provider = providers(state).find((p) => p.id === 'dumate')!;
+      html = renderToStaticMarkup(
+        <AccountCard provider={provider} account={provider.accounts[0]} />
+      );
+      expect(html).not.toContain('text-cyber-error');
+      expect(html).not.toContain('border-cyber-error');
+      expect(html).not.toContain('role="progressbar"');
+      expect(state.dumateAccounts.refresh).not.toHaveBeenCalled();
+      expect(state.dumateAccounts.claimDaily).not.toHaveBeenCalled();
+    }
+  );
   it.each(['qwenworkcn', 'qwenwork'] as const)(
     'shows %s identity and edition-specific credit rows without adding organization pools or passive requests',
     (edition) => {
@@ -375,6 +432,8 @@ describe('Account Center display data', () => {
       <AccountCard provider={provider} account={provider.accounts[0]} />
     );
     expect(html).not.toContain('border-green-500');
+    expect(html).toContain('text-cyber-error');
+    expect(html).toContain('border-cyber-error/20');
     expect(html).not.toContain('aria-valuenow=');
     row.remaining = 2099.75;
     row.creditBuckets = [
