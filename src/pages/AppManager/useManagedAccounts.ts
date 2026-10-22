@@ -251,7 +251,6 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
     setBusy(true);
     setLoginError(null);
     setRemainingSeconds(timeoutSeconds);
-    let started: L | null = null;
     let expires = Date.now() / 1000 + timeoutSeconds;
     let continued = false;
     let ticker: ReturnType<typeof setInterval> | undefined;
@@ -278,7 +277,7 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
       clearInterval(ticker);
     };
     try {
-      started = await adapter.start();
+      const started = await adapter.start();
       if (!active()) {
         if (started.loginId) void adapter.cancel(started.loginId).catch(() => {});
         return;

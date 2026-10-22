@@ -163,7 +163,11 @@ mod tests {
             let listener = TcpListener::from_std(listener).unwrap();
             let addr = listener.local_addr().unwrap();
             let shutdown = CancellationToken::new();
-            let server = ServerControl::start(listener, app, shutdown.clone());
+            let id = format!("runtime-fixture-{}", uuid::Uuid::new_v4());
+            let server = super::super::profiles::with(&id, || {
+                ServerControl::start(listener, app, shutdown.clone())
+            });
+            assert!(super::super::profiles::is_running(&id));
             let client = reqwest::Client::builder().no_proxy().build().unwrap();
             let request_client = client.clone();
             let request = tokio::spawn(async move {
@@ -180,6 +184,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(shutdown.is_cancelled());
+            assert!(!super::super::profiles::is_running(&id));
             assert!(!request.is_finished());
             // A draining connection can still reserve the old Windows port.
             // Restart with the same binding policy as production.
@@ -187,11 +192,13 @@ mod tests {
             let restarted_addr = listener.local_addr().unwrap();
             listener.set_nonblocking(true).unwrap();
             let listener = TcpListener::from_std(listener).unwrap();
-            let restarted = ServerControl::start(
-                listener,
-                axum::Router::new().route("/", axum::routing::get(|| async { "restarted" })),
-                CancellationToken::new(),
-            );
+            let restarted = super::super::profiles::with(&id, || {
+                ServerControl::start(
+                    listener,
+                    axum::Router::new().route("/", axum::routing::get(|| async { "restarted" })),
+                    CancellationToken::new(),
+                )
+            });
             assert_eq!(
                 client
                     .get(format!("http://{restarted_addr}/"))
@@ -210,7 +217,9 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(response.text().await.unwrap(), "completed");
+            assert!(super::super::profiles::is_running(&id));
             restarted.stop().await;
+            assert!(!super::super::profiles::is_running(&id));
         });
     }
 

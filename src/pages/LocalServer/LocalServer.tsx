@@ -459,7 +459,7 @@ export const LocalServerMain: React.FC = () => {
     // engine isn't set up yet — which is exactly when a bring-your-own-engine
     // user opens this to point at their own build — that call fails; treat it as
     // "no default" and still open the dialog rather than blocking on it.
-    let defText = '';
+    let defText: string;
     try {
       const def = await api.getLlmDefaultCommand(
         selectedModelPath || '',
