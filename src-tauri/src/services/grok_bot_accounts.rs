@@ -293,7 +293,7 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     let mut saved: Store = read(&path)?;
     let selected = saved.get(id).ok_or("accountError.invalidAccount")?;
     summary(id, &selected.row, None, &key)?;
-    close_app().await?;
+    super::process_manager::stop_desktop_for_account("grokbot").await?;
     // Re-read after exit, including any last token rotation made by the client.
     let mut document = native(&dir)?;
     let current = catalog(&document)?;
@@ -311,19 +311,6 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     write(&path, &saved)?;
     Ok(account)
 }
-async fn close_app() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        super::cursor_auth::close_windows_client("Grok Bot", true)
-            .await
-            .map_err(|_| "accountError.failed".into())
-    }
-    #[cfg(unix)]
-    {
-        super::cursor_auth::close_client("grokbot", "Grok Bot").await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

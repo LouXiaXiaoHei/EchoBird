@@ -462,16 +462,16 @@ describe('Claude Desktop account apply', () => {
     expect(openDialog).not.toHaveBeenCalled();
     expect(context.isLaunching).toBe(false);
   });
-  it('does not restore provider settings or launch when normal exit is required', async () => {
+  it('does not restore provider settings or launch when automatic desktop shutdown fails', async () => {
     await mount();
     expect(context.claudeDesktopAccounts.selectedId).toBe('desktop-saved');
     vi.mocked(api.switchClaudeDesktopAccount).mockRejectedValueOnce(
-      new Error('accountError.quitClaudeDesktop')
+      new Error('accountError.stopClient')
     );
     await act(async () => {
       await context.handleLaunch();
     });
-    expect(context.applyError).toBe('accountError.quitClaudeDesktop');
+    expect(context.applyError).toBe('accountError.stopClient');
     expect(context.isLaunching).toBe(false);
     expect(api.restoreToolToOfficial).not.toHaveBeenCalled();
     expect(api.startTool).not.toHaveBeenCalled();

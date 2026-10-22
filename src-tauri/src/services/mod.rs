@@ -1,3 +1,4 @@
+pub(crate) mod account_login_browser;
 pub mod account_model_sources;
 pub mod account_proxy;
 pub(crate) mod agent_context;

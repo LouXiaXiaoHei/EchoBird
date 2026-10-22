@@ -46,7 +46,6 @@ use claudecode::{
     apply_claudecode, normalize_model_info_for_tool, read_claudecode,
     restore_claudecode_to_official,
 };
-pub(crate) use claudedesktop::claude_desktop_uses_third_party_mode;
 use claudedesktop::{apply_claudedesktop, read_claudedesktop, restore_claudedesktop_to_official};
 pub(crate) use codex::{apply_codex, apply_codex_at};
 use codex::{read_codex, restore_codex_to_official};

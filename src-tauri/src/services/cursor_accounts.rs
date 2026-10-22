@@ -352,7 +352,7 @@ pub async fn switch(id: &str) -> Result<Account, String> {
         store.get(id).ok_or("accountError.invalidAccount")?,
         &key,
     )?;
-    close_app().await?;
+    super::process_manager::stop_desktop_for_account("cursor").await?;
     let mut db = database(&dir, true)?;
     let current = native(&db)?;
     sync_native(&mut store, current.as_ref(), &key)?;
@@ -370,17 +370,6 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     write(&path, &store)?;
     summary(&selected, Some(id))
 }
-async fn close_app() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        super::cursor_auth::close_windows_client("Cursor", false).await
-    }
-    #[cfg(unix)]
-    {
-        super::cursor_auth::close_client("cursor", "Cursor").await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

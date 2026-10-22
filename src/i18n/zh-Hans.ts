@@ -2,7 +2,8 @@
 import { Translations } from './types';
 const zhHans: Partial<Translations> = {
   'accountError.closeClient': '请保存工作并关闭客户端，然后重新切换账号。',
-  'accountError.quitClaudeDesktop': '请完全关闭 Claude 应用后重试。',
+  'accountError.stopClient': '关闭客户端失败，请重试。',
+  'accountError.stopClaudeDesktop': '关闭 Claude 失败，请重试。',
   'accountError.initializeClient': '请先打开一次客户端，再添加账号。',
   'accountError.failed': '账号操作失败，请重试。',
   'accountError.home': '无法获取用户目录。',
@@ -367,11 +368,6 @@ const zhHans: Partial<Translations> = {
   'agent.grantedCredits': '奖励积分',
   'agent.minimaxPurchasedCredits': '购买积分',
   'agent.waitingForBrowser': '等待浏览器操作({seconds})',
-  'agent.manusExitClient': '请手动退出 Manus({seconds})',
-  'agent.cueLoginClient': '请在 Cue 中登录({seconds})',
-  'agent.cueExitClient': '请完全关闭 Cue({seconds})',
-  'agent.claudeDesktopLoginClient': '请在 Claude 中登录({seconds})',
-  'agent.claudeDesktopExitClient': '请完全关闭 Claude({seconds})',
   'agent.refreshAccount': '刷新账号额度',
   'agent.baseCredits': '套餐积分',
   'agent.additionalCredits': '额外积分',

@@ -417,10 +417,7 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     if !rows.contains_key(id) {
         return Err("accountError.invalidAccount".into());
     }
-    #[cfg(windows)]
-    super::cursor_auth::close_windows_client("Open Design", false).await?;
-    #[cfg(unix)]
-    super::cursor_auth::close_client("opendesign", "Open Design").await?;
+    super::process_manager::stop_desktop_for_account("opendesign").await?;
     let native = native_path()?;
     if let Some(current) = native_at(&native)? {
         remember(&mut rows, current);

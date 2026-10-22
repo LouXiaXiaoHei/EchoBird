@@ -87,10 +87,7 @@ pub(super) async fn apply(c: &Credentials) -> Result<Update, String> {
         return Err("accountError.initializeClient".into());
     }
     let cipher = cipher(&directory, c.edition)?;
-    process_manager::stop_desktop_for_config(c.edition.tool()).await;
-    if process_manager::desktop_tool_is_running(c.edition.tool()).await? {
-        return Err("accountError.closeClient".into());
-    }
+    process_manager::stop_desktop_for_account(c.edition.tool()).await?;
     let (transaction, lock) = write_at(c, &directory, &cipher)?;
     Ok(Update {
         transaction,

@@ -220,7 +220,7 @@ describe('Grok Build account lifecycle', () => {
     });
     expect(state.accounts[0].plan).toBe('SuperGrok');
   });
-  it('opens the system browser even with saved Manus accounts and saves only the new polled result', async () => {
+  it('uses the built-in browser with saved Manus accounts and saves only the verified result', async () => {
     const manus = { ...account, credits: null };
     vi.mocked(api.listManusAccounts).mockResolvedValue([manus]);
     vi.mocked(api.startManusLogin).mockResolvedValue({
@@ -238,9 +238,7 @@ describe('Grok Build account lifecycle', () => {
     await act(async () => {
       operation = state.add();
     });
-    expect(api.openExternal).toHaveBeenCalledWith(
-      'https://manus.im/login?from=desktop&type=signIn&nonce=fixture'
-    );
+    expect(api.openExternal).not.toHaveBeenCalled();
     expect(api.pollManusLogin).toHaveBeenCalledWith('manus-login');
     expect(state.busy).toBe(true);
     expect(state.selectedId).toBe(selectedBeforeLogin);
@@ -262,7 +260,7 @@ describe('Grok Build account lifecycle', () => {
     expect(api.refreshManusAccount).toHaveBeenCalledWith(manus.id);
     expect(state.accounts[0]).toMatchObject({ credits: { total: 1300 } });
   });
-  it('opens the official Manus login for another account and cancels after 60 seconds', async () => {
+  it('allows ten minutes for isolated Manus login and cancels a late result', async () => {
     const manus = { ...account, credits: null };
     const waiting = deferred<api.ManusLoginPoll>();
     vi.mocked(api.listManusAccounts).mockResolvedValue([manus]);
@@ -277,9 +275,15 @@ describe('Grok Build account lifecycle', () => {
     await act(async () => {
       operation = state.add();
     });
-    expect(api.openExternal).toHaveBeenCalledTimes(1);
+    expect(api.openExternal).not.toHaveBeenCalled();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(state.busy).toBe(true);
+    expect(api.cancelManusLogin).not.toHaveBeenCalled();
+    expect(state.remainingSeconds).toBe(540);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(540_000);
     });
     expect(api.cancelManusLogin).toHaveBeenCalledWith('manus-login');
     expect(api.refreshManusAccount).not.toHaveBeenCalled();
@@ -328,7 +332,7 @@ describe('Grok Build account lifecycle', () => {
         await act(async () => {
           await vi.advanceTimersByTimeAsync(1000);
         });
-        expect(state.awaitingClientExit).toBe(true);
+        expect(state.awaitingClientExit).toBe(false);
       }
       act(() => {
         renderer.update(
@@ -373,7 +377,7 @@ describe('Grok Build account lifecycle', () => {
     expect(api.switchManusAccount).not.toHaveBeenCalled();
   });
 
-  it('shows the required native-exit stage, continues polling and clears it on cancellation', async () => {
+  it('ignores legacy native-exit hints, continues polling and cancels the current browser login', async () => {
     vi.mocked(api.listManusAccounts).mockResolvedValue([]);
     vi.mocked(api.pollManusLogin).mockResolvedValue({
       account: null,
@@ -385,7 +389,7 @@ describe('Grok Build account lifecycle', () => {
     await act(async () => {
       operation = state.add();
     });
-    expect(state.awaitingClientExit).toBe(true);
+    expect(state.awaitingClientExit).toBe(false);
     expect(state.busy).toBe(true);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
@@ -402,7 +406,7 @@ describe('Grok Build account lifecycle', () => {
     expect(api.refreshManusAccount).not.toHaveBeenCalled();
   });
 
-  it('keeps a newer Manus exit stage when an earlier login finishes starting late', async () => {
+  it('keeps the newer Manus browser attempt when an earlier login finishes starting late', async () => {
     vi.mocked(api.listManusAccounts).mockResolvedValue([]);
     const earlier = deferred<api.ManusLogin>();
     vi.mocked(api.startManusLogin).mockReturnValueOnce(earlier.promise);
@@ -425,7 +429,7 @@ describe('Grok Build account lifecycle', () => {
     await act(async () => {
       newOperation = state.add();
     });
-    expect(state.awaitingClientExit).toBe(true);
+    expect(state.awaitingClientExit).toBe(false);
     await act(async () => {
       earlier.resolve({
         loginId: 'old-login',
@@ -438,9 +442,9 @@ describe('Grok Build account lifecycle', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
-    expect(state.awaitingClientExit).toBe(true);
+    expect(state.awaitingClientExit).toBe(false);
     expect(state.login?.loginId).toBe('manus-login');
-    expect(api.openExternal).toHaveBeenCalledTimes(1);
+    expect(api.openExternal).not.toHaveBeenCalled();
     await act(async () => state.cancelLogin());
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
@@ -449,48 +453,42 @@ describe('Grok Build account lifecycle', () => {
   });
 
   it.each(['success', 'timeout'] as const)(
-    'gives manual Manus exit a fresh 60 seconds after a 45-second browser login: %s',
+    'keeps a single 60-second Manus browser deadline: %s',
     async (outcome) => {
       const manus = { ...account, credits: null };
       vi.mocked(api.listManusAccounts).mockResolvedValue([]);
-      const browser = deferred<api.ManusLoginPoll>();
-      const exit = deferred<api.ManusLoginPoll>();
+      const initial = deferred<api.ManusLoginPoll>();
+      const result = deferred<api.ManusLoginPoll>();
       vi.mocked(api.pollManusLogin)
-        .mockReturnValueOnce(browser.promise)
-        .mockReturnValue(exit.promise);
+        .mockReturnValueOnce(initial.promise)
+        .mockReturnValue(result.promise);
       await mount('manus');
       let operation!: Promise<void>;
       await act(async () => {
         operation = state.add();
         await vi.advanceTimersByTimeAsync(45_000);
-        browser.resolve({
+        initial.resolve({
           account: null,
           awaitingClientExit: true,
           expiresAt: Date.now() / 1000 + 60,
         });
       });
-      expect(state.remainingSeconds).toBe(60);
-      expect(state.awaitingClientExit).toBe(true);
+      expect(state.remainingSeconds).toBe(15);
+      expect(state.awaitingClientExit).toBe(false);
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(14_000);
       });
       expect(state.busy).toBe(true);
-      expect(state.remainingSeconds).toBe(45);
-      expect(api.cancelManusLogin).not.toHaveBeenCalled();
+      expect(state.remainingSeconds).toBe(1);
       if (outcome === 'success') {
         vi.mocked(api.listManusAccounts).mockResolvedValue([manus]);
         await act(async () => {
-          exit.resolve({ account: manus, awaitingClientExit: false, expiresAt: null });
+          result.resolve({ account: manus, awaitingClientExit: false, expiresAt: null });
           await operation;
         });
         expect(state.accounts).toEqual([manus]);
         expect(showError).not.toHaveBeenCalled();
       } else {
-        await act(async () => {
-          await vi.advanceTimersByTimeAsync(44_000);
-        });
-        expect(state.busy).toBe(true);
-        expect(state.remainingSeconds).toBe(1);
         await act(async () => {
           await vi.advanceTimersByTimeAsync(1000);
         });
@@ -498,7 +496,7 @@ describe('Grok Build account lifecycle', () => {
         expect(showError).toHaveBeenCalledWith('accountError.expired');
         expect(api.cancelManusLogin).toHaveBeenCalledWith('manus-login');
         await act(async () => {
-          exit.resolve({ account: manus, awaitingClientExit: false, expiresAt: null });
+          result.resolve({ account: manus, awaitingClientExit: false, expiresAt: null });
           await operation;
         });
         expect(state.accounts).toEqual([]);
@@ -506,13 +504,13 @@ describe('Grok Build account lifecycle', () => {
         expect(clearModel).not.toHaveBeenCalled();
       }
       expect(state.busy).toBe(false);
-      expect(state.awaitingClientExit).toBe(false);
       expect(api.refreshManusAccount).not.toHaveBeenCalled();
       expect(api.switchManusAccount).not.toHaveBeenCalled();
+      expect(api.openExternal).not.toHaveBeenCalled();
     }
   );
 
-  it('does not extend the exit deadline on repeated stage progress', async () => {
+  it('does not extend the browser deadline on repeated legacy progress hints', async () => {
     vi.mocked(api.listManusAccounts).mockResolvedValue([]);
     const browser = deferred<api.ManusLoginPoll>();
     vi.mocked(api.pollManusLogin)
@@ -534,7 +532,7 @@ describe('Grok Build account lifecycle', () => {
       });
     });
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(59_000);
+      await vi.advanceTimersByTimeAsync(14_000);
     });
     expect(state.remainingSeconds).toBe(1);
     expect(state.busy).toBe(true);
@@ -547,14 +545,20 @@ describe('Grok Build account lifecycle', () => {
     expect(showError).toHaveBeenCalledWith('accountError.expired');
   });
 
-  it('reports system-browser opening failure and cleans up without polling or applying', async () => {
+  it('can finish Manus login when the system browser opener is unavailable', async () => {
     vi.mocked(api.listManusAccounts).mockResolvedValue([]);
     vi.mocked(api.openExternal).mockRejectedValueOnce(new Error('accountError.failed'));
+    vi.mocked(api.pollManusLogin).mockResolvedValue({
+      account: { ...account, credits: null },
+      awaitingClientExit: false,
+      expiresAt: null,
+    });
     await mount('manus');
     await act(async () => state.add());
-    expect(showError).toHaveBeenCalledWith('accountError.failed');
+    expect(api.openExternal).not.toHaveBeenCalled();
+    expect(showError).not.toHaveBeenCalled();
     expect(api.cancelManusLogin).toHaveBeenCalledWith('manus-login');
-    expect(api.pollManusLogin).not.toHaveBeenCalled();
+    expect(api.pollManusLogin).toHaveBeenCalledWith('manus-login');
     expect(api.switchManusAccount).not.toHaveBeenCalled();
     expect(state.busy).toBe(false);
   });
@@ -571,7 +575,7 @@ describe('Grok Build account lifecycle', () => {
     expect(api.switchManusAccount).not.toHaveBeenCalled();
   });
 
-  it('captures Cue through its native client, resets the exit deadline once and keeps Manus isolated', async () => {
+  it('captures Cue through its isolated browser with one deadline and keeps Manus untouched', async () => {
     const cue = {
       ...account,
       credits: { total: 1300, free: null, refresh: null, nextRefreshAt: null },
@@ -586,10 +590,10 @@ describe('Grok Build account lifecycle', () => {
       await vi.advanceTimersByTimeAsync(45_000);
       first.resolve({ account: null, awaitingClientExit: true, expiresAt: Date.now() / 1000 + 60 });
     });
-    expect(state.awaitingClientExit).toBe(true);
-    expect(state.remainingSeconds).toBe(60);
+    expect(state.awaitingClientExit).toBe(false);
+    expect(state.remainingSeconds).toBe(15);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(16_000);
+      await vi.advanceTimersByTimeAsync(5000);
     });
     expect(state.busy).toBe(true);
     vi.mocked(api.listCueAccounts).mockResolvedValue([cue]);

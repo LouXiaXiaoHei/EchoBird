@@ -1,7 +1,9 @@
 //! Official Claude Desktop sessions; the CLI OAuth store is intentionally separate.
+use super::account_login_browser::Login;
 pub use super::claude_code_accounts::ClaudeCodeAccount as Account;
 use super::cursor_auth::{read, write};
-use super::electron_storage::{cipher, decrypt, decrypt_bytes, encrypt, Cipher};
+mod browser;
+use super::electron_storage::{cipher, decrypt_bytes, Cipher};
 use rusqlite::{types::Value as SqlValue, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -26,9 +28,8 @@ const AUTH_CONFIG: &[&str] = &[
     "oauth:tokenCache",
     "oauth:tokenCacheV2",
 ];
-const LOGIN_SECONDS: i64 = 60;
 static ACCOUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static PENDING: std::sync::Mutex<Option<Pending>> = std::sync::Mutex::new(None);
+static PENDING: std::sync::Mutex<Option<Login>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, Serialize, Deserialize)]
 enum Cell {
@@ -79,30 +80,6 @@ struct Saved {
     snapshot: Snapshot,
 }
 type Store = BTreeMap<String, Saved>;
-#[derive(Clone)]
-struct Pending {
-    id: String,
-    dir: PathBuf,
-    expires: i64,
-    awaiting_exit: bool,
-}
-impl Pending {
-    fn validate(&self, id: &str, now: i64) -> Result<(), String> {
-        if self.id != id {
-            return Err("accountError.cancelled".into());
-        }
-        if now >= self.expires {
-            return Err("accountError.expired".into());
-        }
-        Ok(())
-    }
-    fn begin_exit(&mut self, now: i64) {
-        if !self.awaiting_exit {
-            self.awaiting_exit = true;
-            self.expires = now + LOGIN_SECONDS;
-        }
-    }
-}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginStart {
@@ -136,9 +113,11 @@ fn store_path() -> Result<PathBuf, String> {
         .join(".echobird/claude-desktop-accounts.json"))
 }
 fn load_store() -> Result<Store, String> {
-    let path = store_path()?;
+    load_store_at(&store_path()?)
+}
+fn load_store_at(path: &Path) -> Result<Store, String> {
     if path.exists() {
-        read(&path)
+        read(path)
     } else {
         Ok(Store::new())
     }
@@ -161,8 +140,13 @@ fn cookie_db(dir: &Path, writable: bool) -> Result<Connection, String> {
     } else {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     };
-    let db = Connection::open_with_flags(cookie_path(dir)?, flags)
-        .map_err(|_| "accountError.closeClient")?;
+    let db = Connection::open_with_flags(cookie_path(dir)?, flags).map_err(|_| {
+        if writable {
+            "accountError.write"
+        } else {
+            "accountError.read"
+        }
+    })?;
     db.busy_timeout(Duration::from_millis(100))
         .map_err(|_| "accountError.read")?;
     Ok(db)
@@ -243,6 +227,9 @@ fn primary_cookie<'a>(snapshot: &'a Snapshot, name: &str) -> Option<&'a Cookie> 
         })
 }
 fn cookie_value(version: i64, cookie: &Cookie, cipher: &Cipher) -> Result<String, String> {
+    if version == browser::COOKIE_VERSION {
+        return browser::value(cookie);
+    }
     if let Some(value) = cookie.text("value").filter(|v| !v.is_empty()) {
         return Ok(value.into());
     }
@@ -268,23 +255,73 @@ fn cookie_value(version: i64, cookie: &Cookie, cipher: &Cipher) -> Result<String
     String::from_utf8(bytes.to_vec()).map_err(|_| "accountError.format".into())
 }
 fn session_values(dir: &Path, snapshot: &Snapshot) -> Result<(String, String), String> {
-    let key = cipher(dir)?;
-    let session = cookie_value(
-        snapshot.cookie_version,
-        primary_cookie(snapshot, "sessionKey").ok_or("accountError.loginRequired")?,
-        &key,
-    )?;
-    let org = cookie_value(
-        snapshot.cookie_version,
-        primary_cookie(snapshot, "lastActiveOrg").ok_or("accountError.loginRequired")?,
-        &key,
-    )?;
+    let session_cookie =
+        primary_cookie(snapshot, "sessionKey").ok_or("accountError.loginRequired")?;
+    let org_cookie =
+        primary_cookie(snapshot, "lastActiveOrg").ok_or("accountError.loginRequired")?;
+    let browser = snapshot.cookie_version == browser::COOKIE_VERSION;
+    let plain = [session_cookie, org_cookie]
+        .iter()
+        .all(|cookie| cookie.text("value").is_some_and(|value| !value.is_empty()));
+    let key = if browser || plain {
+        None
+    } else {
+        Some(cipher(dir)?)
+    };
+    let value = |cookie: &Cookie| match &key {
+        Some(key) => cookie_value(snapshot.cookie_version, cookie, key),
+        None if browser => browser::value(cookie),
+        None => cookie
+            .text("value")
+            .map(str::to_owned)
+            .ok_or_else(|| "accountError.format".into()),
+    };
+    let session = value(session_cookie)?;
+    let org = value(org_cookie)?;
     uuid::Uuid::parse_str(&org).map_err(|_| "accountError.authResponse")?;
     if session.is_empty() || session.contains(['\r', '\n', ';']) {
         return Err("accountError.format".into());
     }
     Ok((session, org))
 }
+fn account_id(uuid: &str, org: &str) -> String {
+    format!("{:x}", Sha256::digest(format!("{uuid}\n{org}").as_bytes()))
+}
+fn validate_saved_identity(saved: &Saved, id: &str, org: &str) -> Result<(), String> {
+    if uuid::Uuid::parse_str(&saved.account_uuid).is_err()
+        || saved.account.id != id
+        || account_id(&saved.account_uuid, org) != id
+        || org != saved.organization_uuid
+        || saved
+            .snapshot
+            .config
+            .get("lastKnownAccountUuid")
+            .and_then(Value::as_str)
+            .is_some_and(|uuid| uuid != saved.account_uuid)
+        || saved
+            .snapshot
+            .config
+            .keys()
+            .any(|name| !AUTH_CONFIG.contains(&name.as_str()))
+        || saved.snapshot.cookies.iter().any(|cookie| {
+            !is_auth_cookie(
+                cookie.text("host_key").unwrap_or_default(),
+                cookie.text("name").unwrap_or_default(),
+            )
+        })
+    {
+        return Err("accountError.authResponse".into());
+    }
+    Ok(())
+}
+
+// Unit tests must not contact the public Claude service. This also makes an
+// accidental live verification in cached account application fail immediately.
+#[cfg(test)]
+async fn request(_session: &str, _org: &str, _endpoint: &str) -> Result<Value, String> {
+    Err("accountError.network".into())
+}
+#[cfg(not(test))]
 async fn request(session: &str, org: &str, endpoint: &str) -> Result<Value, String> {
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -361,7 +398,7 @@ fn account_from_profile(body: &Value, org: &str) -> Result<(Account, String), St
     };
     Ok((
         Account {
-            id: format!("{:x}", Sha256::digest(format!("{uuid}\n{org}").as_bytes())),
+            id: account_id(uuid, org),
             email: email.into(),
             plan: plan.map(str::to_owned),
             five_hour: None,
@@ -425,31 +462,6 @@ fn fingerprint(snapshot: &Snapshot) -> Option<String> {
         )
     })
 }
-fn scope_token_caches(
-    snapshot: &mut Snapshot,
-    key: &Cipher,
-    account_uuid: &str,
-    org: &str,
-) -> Result<(), String> {
-    // Native caches use acct:<account>|<client>:<org>:<host>:<scope> keys.
-    for name in ["oauth:tokenCache", "oauth:tokenCacheV2"] {
-        if let Some(value) = snapshot.config.get_mut(name) {
-            let mut cache: serde_json::Map<String, Value> =
-                serde_json::from_str(&decrypt(key, value.as_str().ok_or("accountError.format")?)?)
-                    .map_err(|_| "accountError.format")?;
-            let prefix = format!("acct:{account_uuid}|");
-            cache.retain(|key, _| {
-                if key.starts_with("acct:") {
-                    key.starts_with(&prefix)
-                } else {
-                    key.split(':').nth(1) == Some(org)
-                }
-            });
-            *value = Value::String(encrypt(key, &Value::Object(cache).to_string())?);
-        }
-    }
-    Ok(())
-}
 pub async fn list() -> Result<Vec<Account>, String> {
     let _guard = ACCOUNT_LOCK.lock().await;
     let mut store = load_store()?;
@@ -465,121 +477,100 @@ pub async fn list() -> Result<Vec<Account>, String> {
     accounts.sort_by(|a, b| a.email.cmp(&b.email).then(a.id.cmp(&b.id)));
     Ok(accounts)
 }
-pub async fn start_login() -> Result<LoginStart, String> {
-    if super::tool_config_manager::claude_desktop_uses_third_party_mode()
-        .map_err(|_| "accountError.read")?
-    {
-        // Reuse the existing official-model restart flow before native sign-in.
-        // No fresh official login has happened yet, so there is no new session to flush.
-        super::process_manager::stop_desktop_for_config("claudedesktop").await;
-        if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-            return Err("accountError.quitClaudeDesktop".into());
-        }
-        let restored = super::tool_config_manager::restore_tool_to_official("claudedesktop").await;
-        if !restored.success {
-            return Err("accountError.write".into());
-        }
+pub async fn start_login(app: tauri::AppHandle) -> Result<LoginStart, String> {
+    let login = Login::start(
+        &app,
+        "Claude",
+        "https://claude.ai/login",
+        &[
+            "claude.ai",
+            "claude.com",
+            "anthropic.com",
+            "google.com",
+            "googleusercontent.com",
+            "apple.com",
+        ],
+    )?;
+    let old = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
+        .replace(login.clone());
+    if let Some(old) = old {
+        old.cancel(&app);
     }
-    let now = chrono::Utc::now().timestamp();
-    let pending = Pending {
-        id: uuid::Uuid::new_v4().to_string(),
-        dir: data_dir()?,
-        expires: now + LOGIN_SECONDS,
-        awaiting_exit: false,
-    };
-    let login = LoginStart {
-        login_id: pending.id.clone(),
-        expires_at: pending.expires,
-    };
-    *PENDING.lock().map_err(|_| "accountError.busy")? = Some(pending);
-    if let Err(error) = super::process_manager::open_tool_for_login("claudedesktop").await {
-        cancel_login(&login.login_id).await?;
-        return Err(error);
-    }
+    Ok(LoginStart {
+        login_id: login.id,
+        expires_at: login.expires,
+    })
+}
+fn pending_login(id: &str) -> Result<Login, String> {
+    let login = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
+        .as_ref()
+        .filter(|login| login.id == id)
+        .cloned()
+        .ok_or("accountError.cancelled")?;
+    login.check()?;
     Ok(login)
 }
-pub async fn cancel_login(id: &str) -> Result<(), String> {
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    if guard.as_ref().is_some_and(|p| p.id == id) {
-        *guard = None;
+pub async fn cancel_login(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let login = {
+        let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+        if pending.as_ref().is_some_and(|login| login.id == id) {
+            pending.take()
+        } else {
+            None
+        }
+    };
+    if let Some(login) = login {
+        login.cancel(app);
     }
     Ok(())
 }
-pub async fn poll_login(id: &str) -> Result<LoginPoll, String> {
-    let pending = {
-        let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        let pending = guard.as_mut().ok_or("accountError.cancelled")?;
-        pending.validate(id, chrono::Utc::now().timestamp())?;
-        // This local hint only advances the prompt; the authenticated API below verifies identity.
-        if native_config(&pending.dir)
-            .ok()
-            .is_some_and(|c| c["windowSizeWasSignedIn"].as_bool() == Some(true))
-        {
-            pending.begin_exit(chrono::Utc::now().timestamp());
-        }
-        pending.clone()
+pub async fn poll_login(app: &tauri::AppHandle, id: &str) -> Result<LoginPoll, String> {
+    let login = pending_login(id)?;
+    let Some(mut snapshot) = browser::capture(&login.cookies(app)?)? else {
+        return Ok(LoginPoll::default());
     };
-    let waiting = || LoginPoll {
-        awaiting_client_exit: pending.awaiting_exit,
-        expires_at: Some(pending.expires),
-        ..Default::default()
+    let (session, org) = session_values(&data_dir()?, &snapshot)?;
+    let (mut account, account_uuid) = match profile(&session, &org).await {
+        Err(error) if error == "accountError.loginRequired" => return Ok(LoginPoll::default()),
+        result => result?,
     };
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Ok(waiting());
-    }
-    let mut snapshot = match snapshot(&pending.dir) {
-        Ok(s) => s,
-        Err(e) if e == "accountError.closeClient" || e == "accountError.initializeClient" => {
-            return Ok(waiting())
-        }
-        Err(e) => return Err(e),
-    };
-    if primary_cookie(&snapshot, "sessionKey").is_none() {
-        return Ok(waiting());
-    }
-    let (session, org) = session_values(&pending.dir, &snapshot)?;
-    let (account, account_uuid) = profile(&session, &org).await?;
-    if snapshot
+    account.active = false;
+    snapshot
         .config
-        .get("lastKnownAccountUuid")
-        .and_then(Value::as_str)
-        .is_some_and(|id| id != account_uuid)
-    {
-        return Err("accountError.authResponse".into());
-    }
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Ok(waiting());
-    }
-    scope_token_caches(&mut snapshot, &cipher(&pending.dir)?, &account_uuid, &org)?;
+        .insert("lastKnownAccountUuid".into(), json!(account_uuid));
     let _lock = ACCOUNT_LOCK.lock().await;
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    guard
+    let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+    pending
         .as_ref()
-        .ok_or("accountError.cancelled")?
-        .validate(id, chrono::Utc::now().timestamp())?;
-    // The client may reopen or switch accounts while the identity request was in flight.
-    if fingerprint(&snapshot) != fingerprint(&self::snapshot(&pending.dir)?) {
-        return Ok(waiting());
-    }
-    let mut store = load_store()?;
-    for saved in store.values_mut() {
-        saved.account.active = false;
-    }
-    store.insert(
-        account.id.clone(),
-        Saved {
-            account: account.clone(),
-            account_uuid,
-            organization_uuid: org,
-            snapshot,
-        },
-    );
-    write(&store_path()?, &store)?;
-    *guard = None;
-    Ok(LoginPoll {
-        account: Some(account),
-        ..Default::default()
-    })
+        .filter(|current| current.id == id)
+        .ok_or("accountError.cancelled")?;
+    let result = login.complete(app, || {
+        let mut store = load_store()?;
+        if let Some(previous) = store.get(&account.id) {
+            account.five_hour = previous.account.five_hour.clone();
+            account.seven_day = previous.account.seven_day.clone();
+        }
+        store.insert(
+            account.id.clone(),
+            Saved {
+                account: account.clone(),
+                account_uuid,
+                organization_uuid: org,
+                snapshot,
+            },
+        );
+        write(&store_path()?, &store)?;
+        Ok(LoginPoll {
+            account: Some(account),
+            ..Default::default()
+        })
+    })?;
+    *pending = None;
+    Ok(result)
 }
 fn restore(db: &mut Connection, config_path: &Path, snapshot: &Snapshot) -> Result<(), String> {
     let version = db
@@ -650,31 +641,49 @@ fn restore(db: &mut Connection, config_path: &Path, snapshot: &Snapshot) -> Resu
 }
 pub async fn switch(id: &str) -> Result<Account, String> {
     let _guard = ACCOUNT_LOCK.lock().await;
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Err("accountError.quitClaudeDesktop".into());
-    }
-    let mut store = load_store()?;
+    switch_at(
+        id,
+        &data_dir()?,
+        &store_path()?,
+        super::process_manager::stop_desktop_for_account("claudedesktop"),
+        |target| super::claude_desktop_history::prepare(Some(target)),
+    )
+    .await
+}
+async fn switch_at<S, H, HF>(
+    id: &str,
+    dir: &Path,
+    store_path: &Path,
+    stop: S,
+    prepare_history: H,
+) -> Result<Account, String>
+where
+    S: std::future::Future<Output = Result<(), String>>,
+    H: FnOnce(PathBuf) -> HF,
+    HF: std::future::Future<Output = Result<(), String>>,
+{
+    let mut store = load_store_at(store_path)?;
     let saved = store.get(id).ok_or("accountError.invalidAccount")?;
-    let dir = data_dir()?;
-    let (session, org) = session_values(&dir, &saved.snapshot)?;
-    let (verified, uuid) = profile(&session, &org).await?;
-    if verified.id != id || uuid != saved.account_uuid || org != saved.organization_uuid {
-        return Err("accountError.authResponse".into());
-    }
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Err("accountError.quitClaudeDesktop".into());
-    }
-    super::claude_desktop_history::prepare(Some(
+    let (_session, org) = session_values(dir, &saved.snapshot)?;
+    validate_saved_identity(saved, id, &org)?;
+    stop.await?;
+    prepare_history(
         dir.join("claude-code-sessions")
             .join(&saved.account_uuid)
             .join(&saved.organization_uuid),
-    ))
+    )
     .await?;
-    restore(
-        &mut cookie_db(&dir, true)?,
-        &dir.join("config.json"),
-        &saved.snapshot,
-    )?;
+    let mut db = cookie_db(dir, true)?;
+    let snapshot = if saved.snapshot.cookie_version == browser::COOKIE_VERSION {
+        browser::native_snapshot(&db, &saved.snapshot, &cipher(dir)?)?
+    } else {
+        saved.snapshot.clone()
+    };
+    restore(&mut db, &dir.join("config.json"), &snapshot)?;
+    store
+        .get_mut(id)
+        .ok_or("accountError.invalidAccount")?
+        .snapshot = snapshot;
     for (key, saved) in &mut store {
         saved.account.active = key == id;
     }
@@ -683,7 +692,7 @@ pub async fn switch(id: &str) -> Result<Account, String> {
         .ok_or("accountError.invalidAccount")?
         .account
         .clone();
-    write(&store_path()?, &store)?;
+    write(store_path, &store)?;
     Ok(account)
 }
 pub async fn refresh(id: &str) -> Result<Account, String> {
@@ -712,6 +721,200 @@ pub async fn delete(id: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ApplyFixture {
+        dir: PathBuf,
+        id: String,
+    }
+    impl ApplyFixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("echobird-claude-apply-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&dir).unwrap();
+            let db = database("");
+            db.execute("VACUUM INTO ?1", [dir.join("Cookies").to_str().unwrap()])
+                .unwrap();
+            let account_uuid = "11111111-1111-4111-8111-111111111111";
+            let org = "22222222-2222-4222-8222-222222222222";
+            let id = account_id(account_uuid, org);
+            let mut session = cookies(&db).unwrap().remove(0);
+            session
+                .0
+                .insert("value".into(), Cell::Text("offline-fixture-session".into()));
+            let mut organization = session.clone();
+            organization
+                .0
+                .insert("name".into(), Cell::Text("lastActiveOrg".into()));
+            organization
+                .0
+                .insert("value".into(), Cell::Text(org.into()));
+            write(
+                &dir.join("accounts.json"),
+                &Store::from([(
+                    id.clone(),
+                    Saved {
+                        account: Account {
+                            id: id.clone(),
+                            email: "fixture@example.test".into(),
+                            plan: Some("Pro".into()),
+                            five_hour: None,
+                            seven_day: None,
+                            active: false,
+                        },
+                        account_uuid: account_uuid.into(),
+                        organization_uuid: org.into(),
+                        snapshot: Snapshot {
+                            cookies: vec![session, organization],
+                            config: BTreeMap::from([(
+                                "lastKnownAccountUuid".into(),
+                                json!(account_uuid),
+                            )]),
+                            cookie_version: 24,
+                        },
+                    },
+                )]),
+            )
+            .unwrap();
+            write(
+                &dir.join("config.json"),
+                &json!({"locale":"ja","lastKnownAccountUuid":"old"}),
+            )
+            .unwrap();
+            Self { dir, id }
+        }
+        fn state(&self) -> Vec<Vec<u8>> {
+            ["accounts.json", "config.json", "Cookies"]
+                .iter()
+                .map(|name| std::fs::read(self.dir.join(name)).unwrap())
+                .collect()
+        }
+    }
+    impl Drop for ApplyFixture {
+        fn drop(&mut self) {
+            for name in ["accounts.json", "config.json", "Cookies"] {
+                std::fs::remove_file(self.dir.join(name)).unwrap();
+            }
+            std::fs::remove_dir(&self.dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_apply_works_offline_and_stops_before_history_and_native_writes() {
+        let fixture = ApplyFixture::new();
+        let path = fixture.dir.join("accounts.json");
+        let store = load_store_at(&path).unwrap();
+        let saved = &store[&fixture.id];
+        let (session, org) = session_values(&fixture.dir, &saved.snapshot).unwrap();
+        // Positive control: online identity verification is unavailable in this test.
+        assert!(
+            matches!(profile(&session, &org).await, Err(error) if error == "accountError.network")
+        );
+        let stage = std::cell::Cell::new(0);
+        let before = fixture.state();
+        let account = switch_at(
+            &fixture.id,
+            &fixture.dir,
+            &path,
+            async {
+                assert_eq!(stage.replace(1), 0);
+                assert_eq!(fixture.state(), before);
+                Ok(())
+            },
+            |target| {
+                assert_eq!(stage.replace(2), 1);
+                assert_eq!(fixture.state(), before);
+                assert_eq!(
+                    target,
+                    fixture
+                        .dir
+                        .join("claude-code-sessions")
+                        .join(&saved.account_uuid)
+                        .join(&saved.organization_uuid)
+                );
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stage.get(), 2);
+        assert_eq!(account.id, fixture.id);
+        assert!(account.active);
+        assert!(load_store_at(&path).unwrap()[&fixture.id].account.active);
+        let native = snapshot(&fixture.dir).unwrap();
+        assert_eq!(
+            session_values(&fixture.dir, &native).unwrap(),
+            (session, org)
+        );
+        assert_eq!(
+            native.config["lastKnownAccountUuid"],
+            json!(saved.account_uuid)
+        );
+        assert_eq!(native_config(&fixture.dir).unwrap()["locale"], json!("ja"));
+        let db = cookie_db(&fixture.dir, false).unwrap();
+        let unrelated: Vec<String> = db.prepare("SELECT value FROM cookies WHERE name='theme' OR host_key='example.test' ORDER BY value")
+            .unwrap().query_map([], |row| row.get(0)).unwrap()
+            .collect::<Result<_, _>>().unwrap();
+        assert_eq!(unrelated, ["dark", "other-app"]);
+    }
+
+    #[tokio::test]
+    async fn invalid_cached_identity_does_not_stop_or_write() {
+        for field in [
+            "account_id",
+            "account_uuid",
+            "organization_uuid",
+            "config_uuid",
+        ] {
+            let fixture = ApplyFixture::new();
+            let path = fixture.dir.join("accounts.json");
+            let mut store = load_store_at(&path).unwrap();
+            let saved = store.get_mut(&fixture.id).unwrap();
+            match field {
+                "account_id" => saved.account.id = "wrong".into(),
+                "account_uuid" => {
+                    saved.account_uuid = "33333333-3333-4333-8333-333333333333".into()
+                }
+                "organization_uuid" => {
+                    saved.organization_uuid = "33333333-3333-4333-8333-333333333333".into()
+                }
+                "config_uuid" => {
+                    saved
+                        .snapshot
+                        .config
+                        .insert("lastKnownAccountUuid".into(), json!("other-account"));
+                }
+                _ => unreachable!(),
+            }
+            write(&path, &store).unwrap();
+            let before = fixture.state();
+            let result = switch_at(
+                &fixture.id,
+                &fixture.dir,
+                &path,
+                async { panic!("invalid identity must not stop the client") },
+                |_| async { panic!("invalid identity must not prepare history") },
+            )
+            .await;
+            assert!(matches!(result, Err(error) if error == "accountError.authResponse"));
+            assert_eq!(fixture.state(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_stop_does_not_prepare_history_or_write_credentials() {
+        let fixture = ApplyFixture::new();
+        let before = fixture.state();
+        let result = switch_at(
+            &fixture.id,
+            &fixture.dir,
+            &fixture.dir.join("accounts.json"),
+            async { Err("accountError.stopClient".into()) },
+            |_| async { panic!("failed stop must not prepare history") },
+        )
+        .await;
+        assert!(matches!(result, Err(error) if error == "accountError.stopClient"));
+        assert_eq!(fixture.state(), before);
+    }
 
     fn database(extra: &str) -> Connection {
         let db = Connection::open_in_memory().unwrap();
@@ -844,42 +1047,6 @@ mod tests {
         assert!(primary_cookie(&snapshot, "sessionKey").is_none());
     }
     #[test]
-    fn token_caches_keep_only_verified_account_and_legacy_organization_entries() {
-        for key in super::super::electron_storage::test_ciphers() {
-            let cache = json!({
-                "acct:current|client:org:host:scope": {"token":"fixture-current"},
-                "acct:other|client:org:host:scope": {"token":"fixture-other"},
-                "client:org:host:scope": {"token":"fixture-legacy"},
-                "client:other-org:host:scope": {"token":"fixture-wrong-org"}
-            });
-            let mut snapshot = Snapshot {
-                cookies: vec![],
-                config: ["oauth:tokenCache", "oauth:tokenCacheV2"]
-                    .into_iter()
-                    .map(|name| {
-                        (
-                            name.into(),
-                            json!(encrypt(&key, &cache.to_string()).unwrap()),
-                        )
-                    })
-                    .collect(),
-                cookie_version: 24,
-            };
-            scope_token_caches(&mut snapshot, &key, "current", "org").unwrap();
-            for value in snapshot.config.values() {
-                let actual: Value =
-                    serde_json::from_str(&decrypt(&key, value.as_str().unwrap()).unwrap()).unwrap();
-                assert_eq!(
-                    actual,
-                    json!({
-                        "acct:current|client:org:host:scope": {"token":"fixture-current"},
-                        "client:org:host:scope": {"token":"fixture-legacy"}
-                    })
-                );
-            }
-        }
-    }
-    #[test]
     fn profile_uses_only_the_active_organizations_plan_and_rejects_unknown_identity() {
         let org = "12345678-1234-1234-1234-123456789abc";
         let uuid = "12345678-1234-1234-1234-123456789def";
@@ -964,28 +1131,6 @@ mod tests {
             "weekly"
         )
         .is_none());
-    }
-    #[test]
-    fn exit_phase_has_its_own_fixed_deadline_and_old_attempts_cannot_save() {
-        let mut pending = Pending {
-            id: "current".into(),
-            dir: PathBuf::new(),
-            expires: 60,
-            awaiting_exit: false,
-        };
-        pending.validate("current", 50).unwrap();
-        pending.begin_exit(50);
-        assert_eq!(pending.expires, 110);
-        pending.begin_exit(109);
-        assert_eq!(pending.expires, 110);
-        assert_eq!(
-            pending.validate("current", 110).unwrap_err(),
-            "accountError.expired"
-        );
-        assert_eq!(
-            pending.validate("old", 55).unwrap_err(),
-            "accountError.cancelled"
-        );
     }
     #[test]
     fn access_time_updates_do_not_change_account_fingerprint() {

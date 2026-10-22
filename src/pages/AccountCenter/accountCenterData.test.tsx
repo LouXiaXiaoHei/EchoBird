@@ -1286,10 +1286,10 @@ describe('Account Center display data', () => {
       ).not.toContain('aria-label="accountCenter.subscription"');
     }
   );
-  it('keeps Cue sign-in stages and balance independent of Manus', () => {
+  it('keeps Cue browser waiting and balance independent of Manus', () => {
     const state = context();
     state.cueAccounts.busy = true;
-    expect(providers(state).find((p) => p.id === 'cue')?.waitingLabel).toBe('agent.cueLoginClient');
+    expect(providers(state).find((p) => p.id === 'cue')?.waitingLabel).toBeUndefined();
     state.cueAccounts.awaitingClientExit = true;
     state.cueAccounts.accounts = [
       {
@@ -1302,7 +1302,7 @@ describe('Account Center display data', () => {
     ];
     const groups = providers(state);
     expect(groups.find((p) => p.id === 'cue')).toMatchObject({
-      waitingLabel: 'agent.cueExitClient',
+      waitingLabel: undefined,
       accounts: [{ plan: 'Free', metrics: [{ value: '0' }] }],
     });
     expect(groups.find((p) => p.id === 'manus')).toMatchObject({
@@ -1310,18 +1310,14 @@ describe('Account Center display data', () => {
       accounts: [],
     });
   });
-  it('shows native Claude sign-in and exit instructions in their respective stages', () => {
+  it('uses the shared browser waiting label for Claude desktop', () => {
     const state = context();
     state.claudeDesktopAccounts.busy = true;
-    expect(providers(state).find((provider) => provider.id === 'claudedesktop')?.waitingLabel).toBe(
-      'agent.claudeDesktopLoginClient'
-    );
-    state.claudeDesktopAccounts.awaitingClientExit = true;
-    expect(providers(state).find((provider) => provider.id === 'claudedesktop')?.waitingLabel).toBe(
-      'agent.claudeDesktopExitClient'
-    );
+    expect(
+      providers(state).find((provider) => provider.id === 'claudedesktop')?.waitingLabel
+    ).toBeUndefined();
   });
-  it('shows the Manus exit instruction only during its native login capture stage', () => {
+  it('keeps Manus on shared browser waiting even if an older backend reports native progress', () => {
     const state = context();
     expect(providers(state).every((provider) => provider.waitingLabel === undefined)).toBe(true);
     state.manusAccounts.awaitingClientExit = true;
@@ -1329,7 +1325,7 @@ describe('Account Center display data', () => {
     state.manusAccounts.remainingSeconds = 30;
     const groups = providers(state);
     expect(groups.find((provider) => provider.id === 'manus')).toMatchObject({
-      waitingLabel: 'agent.manusExitClient',
+      waitingLabel: undefined,
       busy: true,
       remainingSeconds: 30,
     });

@@ -496,10 +496,7 @@ pub async fn switch_account(id: &str, tool_id: &str) -> Result<Account, String> 
     let auth_path = native_auth_path()?;
     native_auth(&auth_path)?; // Refuse malformed auth before changing model selection.
     if super::tool_manager::get_tool_exe_path("kilodesktop").is_some() {
-        super::process_manager::stop_desktop_for_config("kilodesktop").await;
-        if super::process_manager::desktop_tool_is_running("kilodesktop").await? {
-            return Err("accountError.closeClient".into());
-        }
+        super::process_manager::stop_desktop_for_account("kilodesktop").await?;
     }
     super::tool_config_manager::kilo_apply_account_selection(
         tool_id == "kilodesktop",

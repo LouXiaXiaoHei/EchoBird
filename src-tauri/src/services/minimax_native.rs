@@ -42,10 +42,7 @@ pub(crate) async fn apply(account_id: &str, tool_id: &str) -> Result<Account, St
         dir
     };
     if tool_id == "minimaxdesktop" {
-        super::process_manager::stop_desktop_for_config(tool_id).await;
-        if super::process_manager::desktop_tool_is_running(tool_id).await? {
-            return Err("accountError.closeClient".into());
-        }
+        super::process_manager::stop_desktop_for_account(tool_id).await?;
     }
     let _lock = DirectoryLock::acquire(&home.join("config.yaml"))?;
     let auth_home = home

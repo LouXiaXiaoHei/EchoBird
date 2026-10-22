@@ -24,8 +24,11 @@ pub(super) struct SourceSession {
 /// Explicit apply can defer until the existing restart path has stopped Claude.
 /// Passive account loading/navigation never calls this service.
 pub(crate) async fn prepare(extra_target: Option<PathBuf>) -> Result<(), String> {
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Err("accountError.quitClaudeDesktop".into());
+    if super::process_manager::desktop_tool_is_running("claudedesktop")
+        .await
+        .map_err(|_| "accountError.stopClaudeDesktop")?
+    {
+        return Err("accountError.stopClaudeDesktop".into());
     }
     let cli_home = super::claude_code_accounts::config_dir()?;
     let cli_home = if cli_home == Path::new("~") {
@@ -41,10 +44,12 @@ pub(crate) async fn prepare(extra_target: Option<PathBuf>) -> Result<(), String>
         "[ClaudeHistory] inspecting {} native data roots",
         native.roots.len()
     );
-    // Account switching performs network verification before reaching this point.
-    // Recheck immediately before the filesystem phase as in the account adapter.
-    if super::process_manager::desktop_tool_is_running("claudedesktop").await? {
-        return Err("accountError.quitClaudeDesktop".into());
+    // Recheck before writing in case Claude was relaunched during discovery.
+    if super::process_manager::desktop_tool_is_running("claudedesktop")
+        .await
+        .map_err(|_| "accountError.stopClaudeDesktop")?
+    {
+        return Err("accountError.stopClaudeDesktop".into());
     }
     if let Some(root) = native.threep_root.as_ref() {
         ensure_installation_id(root)?;

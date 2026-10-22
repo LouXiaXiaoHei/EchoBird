@@ -975,18 +975,23 @@ pub async fn list_claude_desktop_accounts(
 }
 #[tauri::command]
 pub async fn start_claude_desktop_login(
+    app: tauri::AppHandle,
 ) -> Result<crate::services::claude_desktop_accounts::LoginStart, String> {
-    crate::services::claude_desktop_accounts::start_login().await
+    crate::services::claude_desktop_accounts::start_login(app).await
 }
 #[tauri::command]
 pub async fn poll_claude_desktop_login(
+    app: tauri::AppHandle,
     login_id: String,
 ) -> Result<crate::services::claude_desktop_accounts::LoginPoll, String> {
-    crate::services::claude_desktop_accounts::poll_login(&login_id).await
+    crate::services::claude_desktop_accounts::poll_login(&app, &login_id).await
 }
 #[tauri::command]
-pub async fn cancel_claude_desktop_login(login_id: String) -> Result<(), String> {
-    crate::services::claude_desktop_accounts::cancel_login(&login_id).await
+pub async fn cancel_claude_desktop_login(
+    app: tauri::AppHandle,
+    login_id: String,
+) -> Result<(), String> {
+    crate::services::claude_desktop_accounts::cancel_login(&app, &login_id).await
 }
 #[tauri::command]
 pub async fn switch_claude_desktop_account(
@@ -1011,18 +1016,21 @@ pub async fn list_manus_accounts() -> Result<Vec<crate::services::manus_accounts
     crate::services::manus_accounts::list().await
 }
 #[tauri::command]
-pub async fn start_manus_login() -> Result<crate::services::manus_accounts::LoginStart, String> {
-    crate::services::manus_accounts::start_login().await
+pub async fn start_manus_login(
+    app: tauri::AppHandle,
+) -> Result<crate::services::manus_accounts::LoginStart, String> {
+    crate::services::manus_accounts::start_login(app).await
 }
 #[tauri::command]
 pub async fn poll_manus_login(
+    app: tauri::AppHandle,
     login_id: String,
 ) -> Result<crate::services::manus_accounts::LoginPoll, String> {
-    crate::services::manus_accounts::poll_login(&login_id).await
+    crate::services::manus_accounts::poll_login(&app, &login_id).await
 }
 #[tauri::command]
-pub async fn cancel_manus_login(login_id: String) -> Result<(), String> {
-    crate::services::manus_accounts::cancel_login(&login_id).await
+pub async fn cancel_manus_login(app: tauri::AppHandle, login_id: String) -> Result<(), String> {
+    crate::services::manus_accounts::cancel_login(&app, &login_id).await
 }
 #[tauri::command]
 pub async fn switch_manus_account(
@@ -1046,18 +1054,21 @@ pub async fn list_cue_accounts() -> Result<Vec<crate::services::cue_accounts::Ac
     crate::services::cue_accounts::list().await
 }
 #[tauri::command]
-pub async fn start_cue_login() -> Result<crate::services::cue_accounts::LoginStart, String> {
-    crate::services::cue_accounts::start_login().await
+pub async fn start_cue_login(
+    app: tauri::AppHandle,
+) -> Result<crate::services::cue_accounts::LoginStart, String> {
+    crate::services::cue_accounts::start_login(app).await
 }
 #[tauri::command]
 pub async fn poll_cue_login(
+    app: tauri::AppHandle,
     login_id: String,
 ) -> Result<crate::services::cue_accounts::LoginPoll, String> {
-    crate::services::cue_accounts::poll_login(&login_id).await
+    crate::services::cue_accounts::poll_login(&app, &login_id).await
 }
 #[tauri::command]
-pub async fn cancel_cue_login(login_id: String) -> Result<(), String> {
-    crate::services::cue_accounts::cancel_login(&login_id).await
+pub async fn cancel_cue_login(app: tauri::AppHandle, login_id: String) -> Result<(), String> {
+    crate::services::cue_accounts::cancel_login(&app, &login_id).await
 }
 #[tauri::command]
 pub async fn switch_cue_account(

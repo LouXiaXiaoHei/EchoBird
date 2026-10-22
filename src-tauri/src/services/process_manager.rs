@@ -1186,6 +1186,27 @@ impl ProcessManager {
         // kill below terminates that process anyway.
         self.processes.remove(tool_id);
 
+        #[cfg(windows)]
+        if tool_id == "claudedesktop" {
+            let executable = crate::services::tool_manager::get_tool_exe_path(tool_id);
+            let launch_uri = crate::services::tool_manager::get_tool_launch_uri(tool_id);
+            // Use the existing PID/path revalidation instead of killing every
+            // Claude.exe image: the standalone Claude Code CLI has the same name.
+            return qoder_process_snapshot().is_ok_and(|processes| {
+                let desktop = processes
+                    .into_iter()
+                    .filter(|process| {
+                        claude_desktop_windows_process(
+                            &process.path,
+                            executable.as_deref(),
+                            launch_uri.as_deref(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                stop_qoder_account_instances(&desktop)
+            });
+        }
+
         if matches!(tool_id, "qoder" | "qodercn" | "qwenwork" | "qwenworkcn") {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
                 return false;
@@ -1222,17 +1243,18 @@ impl ProcessManager {
                 .is_ok_and(|output| output.status.success());
         }
 
-        // CodeArts Desktop shares its image name with an unrelated native CLI;
-        // MiniMax editions and macOS WorkBuddy also need exact executable paths.
-        if matches!(tool_id, "minimaxdesktop" | "codearts" | "dumate")
-            || (cfg!(target_os = "macos") && matches!(tool_id, "workbuddy" | "workbuddyai"))
+        // CodeArts and Devin share image names with standalone CLIs; MiniMax
+        // editions and macOS bundles also need the resolved executable path.
+        if matches!(tool_id, "minimaxdesktop" | "codearts" | "dumate" | "devin")
+            || (cfg!(target_os = "macos")
+                && matches!(tool_id, "workbuddy" | "workbuddyai" | "kirocrew"))
         {
             let Some(path) = crate::services::tool_manager::get_tool_exe_path(tool_id) else {
                 return false;
             };
             #[cfg(target_os = "macos")]
-            let path = if matches!(tool_id, "workbuddy" | "workbuddyai") {
-                // Also handle the legacy WorkBuddy -> Electron symlink workaround.
+            let path = if matches!(tool_id, "workbuddy" | "workbuddyai" | "kirocrew") {
+                // Also handle bundle executable symlinks, including legacy Electron links.
                 let Ok(path) = std::fs::canonicalize(path) else {
                     return false;
                 };
@@ -1963,9 +1985,74 @@ fn stop_qoder_account_instances(processes: &[QoderAccountProcess]) -> bool {
     stopped
 }
 
+#[cfg(any(windows, test))]
+fn claude_desktop_windows_process(
+    path: &std::path::Path,
+    executable: Option<&str>,
+    launch_uri: Option<&str>,
+) -> bool {
+    let normalized = |value: &str| value.replace('/', "\\").to_ascii_lowercase();
+    let path = normalized(&path.to_string_lossy());
+    if let Some(executable) = executable.filter(|value| !value.is_empty()).map(normalized) {
+        if path == executable {
+            return true;
+        }
+        // Squirrel's launcher lives beside app-<version>/Claude.exe.
+        if let Some((root, "claude.exe")) = executable.rsplit_once('\\') {
+            if path
+                .strip_prefix(&format!("{root}\\"))
+                .and_then(|relative| relative.split_once('\\'))
+                .is_some_and(|(directory, file)| {
+                    directory
+                        .strip_prefix("app-")
+                        .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+                        && file == "claude.exe"
+                })
+            {
+                return true;
+            }
+        }
+    }
+    let Some(family) = launch_uri
+        .and_then(|uri| uri.strip_prefix("shell:AppsFolder\\"))
+        .and_then(|uri| uri.split('!').next())
+    else {
+        return false;
+    };
+    let Some((name, publisher)) = family.rsplit_once('_') else {
+        return false;
+    };
+    let Some((_, package_path)) = path.split_once("\\windowsapps\\") else {
+        return false;
+    };
+    let Some((package, relative)) = package_path.split_once('\\') else {
+        return false;
+    };
+    package.starts_with(&format!("{}_", name.to_ascii_lowercase()))
+        && package.ends_with(&format!("_{}", publisher.to_ascii_lowercase()))
+        && matches!(relative, "claude.exe" | "app\\claude.exe")
+}
+
 /// Account storage must not be replaced while its owning desktop app is alive.
 pub async fn desktop_tool_is_running(tool_id: &str) -> Result<bool, String> {
     let path = super::tool_manager::get_tool_exe_path(tool_id).unwrap_or_default();
+    #[cfg(windows)]
+    if tool_id == "claudedesktop" {
+        let launch_uri = super::tool_manager::get_tool_launch_uri(tool_id);
+        return tokio::task::spawn_blocking(move || {
+            qoder_process_snapshot().map(|processes| {
+                processes.iter().any(|process| {
+                    claude_desktop_windows_process(
+                        &process.path,
+                        Some(&path),
+                        launch_uri.as_deref(),
+                    )
+                })
+            })
+        })
+        .await
+        .map_err(|_| "accountError.closeClient")?;
+    }
     if matches!(tool_id, "qoder" | "qodercn" | "qwenwork" | "qwenworkcn") {
         let tool_id = tool_id.to_owned();
         return tokio::task::spawn_blocking(move || {
@@ -2098,90 +2185,102 @@ fn appimage_matches(environment: &[u8], executable: &std::path::Path) -> bool {
 /// Release native desktop storage before an explicit model or account change. Uses the same
 /// process scope as launch/restart; it never targets standalone CLI instances.
 pub(crate) async fn stop_desktop_for_config(tool_id: &str) {
-    // DuMate account changes need closed auth storage, while an ordinary launch
-    // of this no-model-config app should only focus its existing instance.
-    if tool_id != "dumate" && !crate::services::tool_manager::is_managed_desktop_tool(tool_id) {
+    if !crate::services::tool_manager::is_managed_desktop_tool(tool_id) {
         return;
     }
+    stop_desktop_instances(tool_id).await;
+}
+
+/// Explicit account changes also own storage in no-model-config desktop clients.
+/// Ordinary launch behavior remains governed by is_managed_desktop_tool.
+pub(crate) async fn stop_desktop_for_account(tool_id: &str) -> Result<(), String> {
+    stop_desktop_instances(tool_id).await;
+    if desktop_tool_is_running(tool_id)
+        .await
+        .map_err(|_| "accountError.stopClient")?
+    {
+        return Err("accountError.stopClient".into());
+    }
+    Ok(())
+}
+
+async fn stop_desktop_instances(tool_id: &str) {
     let mgr = get_manager().await;
     if mgr.lock().await.kill_desktop_instances(tool_id) {
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     }
 }
 
-/// Close only the desktop executable; the bundled and exported CLI share its leaf name.
-pub(crate) async fn close_devin_desktop() -> Result<(), String> {
-    let path =
-        super::tool_manager::get_tool_exe_path("devin").ok_or("accountError.initializeClient")?;
-    #[cfg(windows)]
-    {
-        let script = "$ErrorActionPreference='Stop'; $exe=$env:ECHOBIRD_DESKTOP_EXE; Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $exe} | ForEach-Object { $p=Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if($p -and $p.MainWindowHandle -ne 0){[void]$p.CloseMainWindow()} }; $end=[DateTime]::UtcNow.AddSeconds(10); do { $alive=Get-CimInstance Win32_Process | Where-Object {$_.ExecutablePath -eq $exe}; if(-not $alive){exit 0}; Start-Sleep -Milliseconds 200 } while([DateTime]::UtcNow -lt $end); exit 1";
-        let status = crate::utils::process::async_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .env("ECHOBIRD_DESKTOP_EXE", path)
-            .status()
-            .await
-            .map_err(|_| "accountError.closeClient")?;
-        if !status.success() {
-            return Err("accountError.closeClient".into());
-        }
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = path;
-        super::cursor_auth::close_client("devin", "Devin").await
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let path = std::fs::canonicalize(path).map_err(|_| "accountError.closeClient")?;
-        let matching = || -> Result<Vec<i32>, String> {
-            let mut pids = Vec::new();
-            for entry in std::fs::read_dir("/proc")
-                .map_err(|_| "accountError.closeClient")?
-                .flatten()
-            {
-                let Some(pid) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|n| n.parse::<i32>().ok())
-                    .filter(|n| *n > 1)
-                else {
-                    continue;
-                };
-                if entry
-                    .metadata()
-                    .is_ok_and(|m| m.uid() == unsafe { libc::geteuid() })
-                    && std::fs::read_link(entry.path().join("exe")).is_ok_and(|p| p == path)
-                {
-                    pids.push(pid);
-                }
-            }
-            Ok(pids)
-        };
-        for pid in matching()? {
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
-        }
-        for _ in 0..50 {
-            if matching()?.is_empty() {
-                return Ok(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-        Err("accountError.closeClient".into())
-    }
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-    {
-        let _ = path;
-        Err("accountError.unavailable".into())
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_desktop_shutdown_excludes_standalone_cli_and_supports_store_and_squirrel() {
+        use super::claude_desktop_windows_process;
+        let executable = Some(r"C:\Users\fixture\AppData\Local\AnthropicClaude\Claude.exe");
+        let uri = Some(r"shell:AppsFolder\Claude_pzs8sxrjxfjjc!Claude");
+        for (path, expected) in [
+            (
+                r"c:/Users/fixture/AppData/Local/AnthropicClaude/claude.exe",
+                true,
+            ),
+            (
+                r"C:\Users\fixture\AppData\Local\AnthropicClaude\app-1.2.3\Claude.exe",
+                true,
+            ),
+            (r"C:\Users\fixture\.local\bin\claude.exe", false),
+            (
+                r"C:\Users\fixture\AppData\Local\AnthropicClaude\resources\claude.exe",
+                false,
+            ),
+            (
+                r"C:\Users\fixture\AppData\Local\AnthropicClaude\app-1.2.3\resources\claude.exe",
+                false,
+            ),
+            (r"C:\Other\Claude.exe", false),
+            (
+                r"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\app\Claude.exe",
+                true,
+            ),
+            (
+                r"D:\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\Claude.exe",
+                true,
+            ),
+            (
+                r"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__other\app\Claude.exe",
+                false,
+            ),
+            (
+                r"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\resources\claude.exe",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                claude_desktop_windows_process(std::path::Path::new(path), executable, uri),
+                expected,
+                "{path}"
+            );
+        }
+        assert!(!claude_desktop_windows_process(
+            std::path::Path::new(r"C:\Other\Claude.exe"),
+            None,
+            None
+        ));
+        assert!(claude_desktop_windows_process(
+            std::path::Path::new(
+                r"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\app\Claude.exe"
+            ),
+            None,
+            uri
+        ));
+        assert!(!claude_desktop_windows_process(
+            std::path::Path::new(
+                r"C:\Program Files\WindowsApps\Claude_1.2.3.0_x64__pzs8sxrjxfjjc\resources\claude.exe"
+            ),
+            None,
+            uri
+        ));
+    }
+
     #[test]
     fn devin_cli_launch_uses_resolved_binary_and_preserves_custom_commands() {
         let path = "C:/Program Files/Devin/resources/app/extensions/windsurf/devin/bin/devin.exe";

@@ -1,7 +1,8 @@
 //! Manus desktop sessions. Change only session credentials and login verification;
 //! unrelated Chromium storage and Manus settings remain owned by the native client.
+use super::account_login_browser::{self, Login};
 use super::cursor_auth::{read, write};
-use super::electron_storage::{cipher, decrypt, decrypt_bytes, encrypt, encrypt_bytes, Cipher};
+use super::electron_storage::{cipher, decrypt, decrypt_bytes, encrypt_bytes, Cipher};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,9 +11,8 @@ use std::{collections::BTreeMap, path::Path, path::PathBuf, time::Duration};
 
 const HOST: &str = "api.manus.im";
 const COOKIE: &str = "session_id";
-const LOGIN_SECONDS: i64 = 60;
 static ACCOUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static PENDING: std::sync::Mutex<Option<Pending>> = std::sync::Mutex::new(None);
+static PENDING: std::sync::Mutex<Option<Login>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +38,6 @@ pub struct Account {
 #[serde(rename_all = "camelCase")]
 pub struct LoginStart {
     pub login_id: String,
-    pub verification_uri: String,
     pub expires_at: i64,
 }
 
@@ -56,39 +55,6 @@ struct Saved {
     session: String,
 }
 type Store = BTreeMap<String, Saved>;
-
-#[derive(Clone)]
-struct Pending {
-    id: String,
-    device_id: String,
-    nonce: String,
-    started: i64,
-    previous: Option<String>,
-    expires: i64,
-    awaiting_client_exit: bool,
-    cancelled: bool,
-}
-
-impl Pending {
-    fn begin_client_exit(&mut self, id: &str, now: i64) -> Result<(), String> {
-        self.validate(id, now)?;
-        if !self.awaiting_client_exit {
-            self.awaiting_client_exit = true;
-            self.expires = now + LOGIN_SECONDS;
-        }
-        Ok(())
-    }
-
-    fn validate(&self, id: &str, now: i64) -> Result<(), String> {
-        if self.id != id || self.cancelled {
-            return Err("accountError.cancelled".into());
-        }
-        if now >= self.expires {
-            return Err("accountError.expired".into());
-        }
-        Ok(())
-    }
-}
 
 fn data_dir() -> Result<PathBuf, String> {
     #[cfg(windows)]
@@ -283,33 +249,18 @@ fn invalidate_verification(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn device_id(dir: &Path) -> Result<String, String> {
-    let value: Value = read(&dir.join("localStorage.json"))?;
-    value["deviceId"]
+pub(super) async fn profile(token: &str) -> Result<Account, String> {
+    Ok(profile_identity(token).await?.0)
+}
+
+pub(super) async fn profile_identity(token: &str) -> Result<(Account, String), String> {
+    let body = request(token, "UserInfo").await?;
+    let account = parse_profile(&body)?;
+    let user_id = body["userId"]
         .as_str()
         .filter(|id| !id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| "accountError.initializeClient".into())
-}
-
-async fn close_app() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        // Manus 2.x hides its main window on Close and keeps running in the tray.
-        super::cursor_auth::close_windows_client("Manus", true).await
-    }
-    #[cfg(target_os = "macos")]
-    {
-        super::cursor_auth::close_client("manus", "Manus").await
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        Err("accountError.unavailable".into())
-    }
-}
-
-pub(super) async fn profile(token: &str) -> Result<Account, String> {
-    parse_profile(&request(token, "UserInfo").await?)
+        .ok_or("accountError.authResponse")?;
+    Ok((account, user_id.to_owned()))
 }
 
 fn parse_profile(response: &Value) -> Result<Account, String> {
@@ -373,66 +324,6 @@ async fn request(token: &str, method: &str) -> Result<Value, String> {
         .map_err(|_| "accountError.format".into())
 }
 
-fn nonce(dir: &Path) -> Result<Option<String>, String> {
-    let value: Value = read(&dir.join("localStorage.json"))?;
-    Ok(value["login_nonce"].as_str().map(str::to_owned))
-}
-
-fn begin_nonce(dir: &Path, nonce: &str) -> Result<(), String> {
-    let path = dir.join("localStorage.json");
-    let mut data: Value = read(&path)?;
-    let object = data.as_object_mut().ok_or("accountError.format")?;
-    if object
-        .get("login_nonce")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Err("accountError.busy".into());
-    }
-    object.insert("login_nonce".into(), nonce.into());
-    write(&path, &data)
-}
-
-fn clear_nonce(dir: &Path, nonce: &str) -> Result<(), String> {
-    let path = dir.join("localStorage.json");
-    let mut data: Value = read(&path)?;
-    let object = data.as_object_mut().ok_or("accountError.format")?;
-    if object.get("login_nonce").and_then(Value::as_str) == Some(nonce) {
-        object.remove("login_nonce");
-        write(&path, &data)?;
-    }
-    Ok(())
-}
-
-fn login_session(
-    dir: &Path,
-    pending: &Pending,
-    load_cipher: impl FnOnce(&Path) -> Result<Cipher, String>,
-) -> Result<Option<String>, String> {
-    if !dir.join("Network/Cookies").exists() {
-        return Ok(None);
-    }
-    let mut db = cookie_db(dir, false)?;
-    let tx = db.transaction().map_err(cookie_read_error)?;
-    let updated: Option<i64> = tx
-        .query_row(
-            "SELECT last_update_utc FROM cookies WHERE host_key=?1 AND name=?2 AND path='/'",
-            params![HOST, COOKIE],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(cookie_read_error)?;
-    // Nonce consumption precedes the official async exchange. Never import its old Cookie.
-    if !updated.is_some_and(|updated| updated >= pending.started) {
-        return Ok(None);
-    }
-    let token = cookie_value(&tx, dir, load_cipher)?.filter(|token| !token.is_empty());
-    if token.is_some() && token == pending.previous {
-        return Ok(None);
-    }
-    Ok(token)
-}
-
 fn parse_credits(value: &Value) -> Result<Credits, String> {
     let total = value["totalCredits"].as_i64().ok_or("accountError.quota")?;
     if total < 0 {
@@ -457,172 +348,93 @@ pub async fn list() -> Result<Vec<Account>, String> {
         .collect())
 }
 
-pub async fn start_login() -> Result<LoginStart, String> {
+pub async fn start_login(app: tauri::AppHandle) -> Result<LoginStart, String> {
     if !cfg!(any(windows, target_os = "macos")) {
         return Err("accountError.unavailable".into());
     }
-    let _guard = ACCOUNT_LOCK.lock().await;
-    if PENDING.lock().map_err(|_| "accountError.busy")?.is_some() {
-        return Err("accountError.busy".into());
+    let login = Login::start_desktop(
+        &app,
+        "Manus",
+        "manus",
+        &[
+            "manus.im",
+            "google.com",
+            "googleusercontent.com",
+            "apple.com",
+            "facebook.com",
+        ],
+    )?;
+    let old = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
+        .replace(login.clone());
+    if let Some(old) = old {
+        old.cancel(&app);
     }
-    let dir = data_dir()?;
-    if !dir.is_dir() {
-        return Err("accountError.initializeClient".into());
-    }
-    let device_id = device_id(&dir)?;
-    let previous = match native_session(&dir) {
-        Ok(token) => token,
-        Err(error) if error == "accountError.closeClient" => None,
-        Err(error) => return Err(error),
-    };
-    let id = uuid::Uuid::new_v4().to_string();
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now();
-    let expires = now.timestamp() + LOGIN_SECONDS;
-    let mut url = url::Url::parse("https://manus.im/login").map_err(|_| "accountError.auth")?;
-    url.query_pairs_mut().extend_pairs([
-        ("from", "desktop"),
-        ("type", "signIn"),
-        ("nonce", nonce.as_str()),
-    ]);
-    begin_nonce(&dir, &nonce)?;
-    *PENDING.lock().map_err(|_| "accountError.busy")? = Some(Pending {
-        id: id.clone(),
-        device_id,
-        nonce,
-        started: now.timestamp_micros() + 11_644_473_600_000_000,
-        previous,
-        expires,
-        awaiting_client_exit: false,
-        cancelled: false,
-    });
-    // Remove this attempt's nonce even if its frontend disappears.
-    let expired_id = id.clone();
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let remaining = {
-                let Ok(mut guard) = PENDING.lock() else {
-                    return;
-                };
-                let Some(pending) = guard
-                    .as_mut()
-                    .filter(|pending| pending.id == expired_id && !pending.cancelled)
-                else {
-                    return;
-                };
-                let remaining = (pending.expires - chrono::Utc::now().timestamp()).max(0);
-                if remaining == 0 {
-                    pending.cancelled = true;
-                }
-                remaining as u64
-            };
-            if remaining == 0 {
-                let _ = cancel_login(&expired_id).await;
-                return;
-            }
-            tokio::time::sleep(Duration::from_secs(remaining)).await;
-        }
-    });
     Ok(LoginStart {
-        login_id: id,
-        expires_at: expires,
-        verification_uri: url.into(),
+        login_id: login.id,
+        expires_at: login.expires,
     })
 }
-
-pub async fn poll_login(id: &str) -> Result<LoginPoll, String> {
-    let _guard = ACCOUNT_LOCK.lock().await;
-    let pending = {
-        let guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        let Some(pending) = guard
-            .as_ref()
-            .filter(|pending| pending.id == id && !pending.cancelled)
-        else {
-            return Ok(LoginPoll::default());
-        };
-        pending.validate(id, chrono::Utc::now().timestamp())?;
-        pending.clone()
-    };
-    let dir = data_dir()?;
-    match nonce(&dir)? {
-        Some(nonce) if nonce == pending.nonce => return Ok(LoginPoll::default()),
-        Some(_) => return Err("accountError.cancelled".into()),
-        None => {}
+pub(super) fn saved_session(dir: &Path, stored: &str) -> Result<String, String> {
+    if stored.starts_with("enc:v1:") {
+        account_login_browser::unseal(stored)
+    } else {
+        decrypt(&cipher(dir)?, stored)
     }
-    if device_id(&dir)? != pending.device_id {
-        return Err("accountError.initializeClient".into());
-    }
-    let pending = {
-        let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        let current = guard.as_mut().ok_or("accountError.cancelled")?;
-        current.begin_client_exit(id, chrono::Utc::now().timestamp())?;
-        current.clone()
-    };
-    let token = match login_session(&dir, &pending, cipher) {
-        Ok(token) => token,
-        // The official Windows client holds an exclusive lock. Wait for normal tray Quit.
-        Err(error) if error == "accountError.closeClient" => None,
-        Err(error) => return Err(error),
-    };
-    let Some(token) = token else {
-        return Ok(LoginPoll {
-            account: None,
-            awaiting_client_exit: true,
-            expires_at: Some(pending.expires),
-        });
-    };
-    let mut account = profile(&token).await?;
-    // Cancellation wins while UserInfo is pending; guard the synchronous save too.
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    let Some(current) = guard
+}
+pub async fn poll_login(app: &tauri::AppHandle, id: &str) -> Result<LoginPoll, String> {
+    let login = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
         .as_ref()
-        .filter(|pending| pending.id == id && !pending.cancelled)
-    else {
+        .filter(|login| login.id == id)
+        .cloned()
+        .ok_or("accountError.cancelled")?;
+    let Some(token) = login.desktop_token()? else {
         return Ok(LoginPoll::default());
     };
-    current.validate(id, chrono::Utc::now().timestamp())?;
-    if device_id(&dir)? != pending.device_id || nonce(&dir)?.is_some() {
-        return Err("accountError.cancelled".into());
-    }
-    let mut store = load_store()?;
-    account.credits = store
-        .get(&account.id)
-        .and_then(|saved| saved.account.credits.clone());
-    // The official browser callback already logged this account into Manus.
-    for saved in store.values_mut() {
-        saved.account.active = false;
-    }
-    account.active = true;
-    store.insert(
-        account.id.clone(),
-        Saved {
-            account: account.clone(),
-            session: encrypt(&cipher(&dir)?, &token)?,
-        },
-    );
-    write(&store_path()?, &store)?;
-    *guard = None;
-    Ok(LoginPoll {
-        account: Some(account),
-        awaiting_client_exit: false,
-        expires_at: None,
-    })
+    let mut account = profile(&token).await?;
+    let session = account_login_browser::seal(&token)?;
+    let _lock = ACCOUNT_LOCK.lock().await;
+    let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+    pending
+        .as_ref()
+        .filter(|current| current.id == id)
+        .ok_or("accountError.cancelled")?;
+    let result = login.complete(app, || {
+        let mut store = load_store()?;
+        if let Some(previous) = store.get(&account.id) {
+            account.credits = previous.account.credits.clone();
+            account.active = previous.account.active;
+        }
+        store.insert(
+            account.id.clone(),
+            Saved {
+                account: account.clone(),
+                session,
+            },
+        );
+        write(&store_path()?, &store)?;
+        Ok(LoginPoll {
+            account: Some(account),
+            ..Default::default()
+        })
+    })?;
+    *pending = None;
+    Ok(result)
 }
-
-pub async fn cancel_login(id: &str) -> Result<(), String> {
-    {
-        let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        let Some(pending) = guard.as_mut().filter(|pending| pending.id == id) else {
-            return Ok(());
-        };
-        pending.cancelled = true;
-    }
-    let _guard = ACCOUNT_LOCK.lock().await;
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    if let Some(pending) = guard.as_ref().filter(|pending| pending.id == id) {
-        let result = clear_nonce(&data_dir()?, &pending.nonce);
-        *guard = None;
-        result?;
+pub async fn cancel_login(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let login = {
+        let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+        if pending.as_ref().is_some_and(|login| login.id == id) {
+            pending.take()
+        } else {
+            None
+        }
+    };
+    if let Some(login) = login {
+        login.cancel(app);
     }
     Ok(())
 }
@@ -633,11 +445,11 @@ pub async fn switch(id: &str) -> Result<Account, String> {
     let path = store_path()?;
     let mut store = load_store()?;
     let saved = store.get(id).ok_or("accountError.invalidAccount")?;
-    let token = decrypt(&cipher(&dir)?, &saved.session)?;
+    let token = saved_session(&dir, &saved.session)?;
     if profile(&token).await?.id != id {
         return Err("accountError.invalidAccount".into());
     }
-    close_app().await?;
+    super::process_manager::stop_desktop_for_account("manus").await?;
     let previous = native_session(&dir)?;
     if let Err(error) = write_native(&dir, Some(&token)) {
         let _ = super::process_manager::start_tool("manus", None, None).await;
@@ -664,7 +476,7 @@ pub async fn refresh(id: &str) -> Result<Account, String> {
     let dir = data_dir()?;
     let mut store = load_store()?;
     let saved = store.get_mut(id).ok_or("accountError.invalidAccount")?;
-    let token = decrypt(&cipher(&dir)?, &saved.session)?;
+    let token = saved_session(&dir, &saved.session)?;
     let profile = profile(&token).await?;
     if profile.id != id {
         return Err("accountError.invalidAccount".into());
@@ -793,147 +605,10 @@ mod tests {
         dir
     }
 
-    fn pending_fixture() -> Pending {
-        Pending {
-            id: "fixture-login".into(),
-            device_id: "fixture-device".into(),
-            nonce: "fixture-nonce".into(),
-            started: 100,
-            previous: Some("old-session".into()),
-            expires: 60,
-            awaiting_client_exit: false,
-            cancelled: false,
-        }
-    }
-
-    #[test]
-    fn native_exit_has_its_own_deadline_and_repeated_polls_do_not_extend_it() {
-        let mut pending = pending_fixture();
-        pending.begin_client_exit("fixture-login", 45).unwrap();
-        assert!(pending.awaiting_client_exit);
-        assert_eq!(pending.expires, 105);
-        // The browser-stage cleanup wake at 60 must honor the new deadline.
-        assert!(pending.validate("fixture-login", 60).is_ok());
-        pending.begin_client_exit("fixture-login", 104).unwrap();
-        assert_eq!(pending.expires, 105);
-        assert_eq!(
-            pending.validate("fixture-login", 105).unwrap_err(),
-            "accountError.expired"
-        );
-    }
-
-    #[test]
-    fn expired_cancelled_or_replaced_login_cannot_start_an_exit_stage() {
-        for (id, now, cancelled, expected) in [
-            ("fixture-login", 60, false, "accountError.expired"),
-            ("fixture-login", 45, true, "accountError.cancelled"),
-            ("older-login", 45, false, "accountError.cancelled"),
-        ] {
-            let mut pending = pending_fixture();
-            pending.cancelled = cancelled;
-            assert_eq!(pending.begin_client_exit(id, now).unwrap_err(), expected);
-            assert_eq!(pending.expires, 60);
-            assert!(!pending.awaiting_client_exit);
-        }
-    }
-
-    #[test]
-    fn native_login_waits_for_a_new_cookie_written_during_this_attempt() {
-        let dir = login_fixture(Some("old-session"));
-        let pending = pending_fixture();
-        let fixture_cipher = |_: &Path| Err("fixture must not request the native keychain".into());
-        assert!(login_session(&dir, &pending, fixture_cipher)
-            .unwrap()
-            .is_none());
-        let db = cookie_db(&dir, true).unwrap();
-        // Consuming the callback nonce does not mean token exchange has finished.
-        db.execute("UPDATE cookies SET last_update_utc=101", [])
-            .unwrap();
-        assert!(login_session(&dir, &pending, fixture_cipher)
-            .unwrap()
-            .is_none());
-        db.execute(
-            "UPDATE cookies SET value='new-session',last_update_utc=99",
-            [],
-        )
-        .unwrap();
-        assert!(login_session(&dir, &pending, fixture_cipher)
-            .unwrap()
-            .is_none());
-        db.execute("UPDATE cookies SET last_update_utc=100", [])
-            .unwrap();
-        assert_eq!(
-            login_session(&dir, &pending, fixture_cipher)
-                .unwrap()
-                .as_deref(),
-            Some("new-session")
-        );
-        db.execute("UPDATE cookies SET value=''", []).unwrap();
-        assert!(login_session(&dir, &pending, fixture_cipher)
-            .unwrap()
-            .is_none());
-        drop(db);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn native_cookie_file_lock_stays_pending_until_normal_client_exit() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let dir = login_fixture(Some("new-session"));
-        let db = cookie_db(&dir, true).unwrap();
-        db.execute("UPDATE cookies SET last_update_utc=101", [])
-            .unwrap();
-        drop(db);
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(dir.join("Network/Cookies"))
-            .unwrap();
-        let fixture_cipher = |_: &Path| Err("fixture must not request the native keychain".into());
-        assert_eq!(
-            login_session(&dir, &pending_fixture(), fixture_cipher).unwrap_err(),
-            "accountError.closeClient"
-        );
-        drop(lock);
-        // Positive control: the same database is imported as soon as its owner releases it.
-        assert_eq!(
-            login_session(&dir, &pending_fixture(), fixture_cipher)
-                .unwrap()
-                .as_deref(),
-            Some("new-session")
-        );
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn nonce_cleanup_preserves_settings_cookies_and_other_login_attempts() {
-        let dir = login_fixture(Some("old-session"));
-        let path = dir.join("localStorage.json");
-        let before = std::fs::read(&path).unwrap();
-        begin_nonce(&dir, "ours").unwrap();
-        assert_eq!(nonce(&dir).unwrap().as_deref(), Some("ours"));
-        let ours = std::fs::read(&path).unwrap();
-        assert_eq!(begin_nonce(&dir, "other").unwrap_err(), "accountError.busy");
-        clear_nonce(&dir, "other").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), ours);
-        clear_nonce(&dir, "ours").unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), before);
-        assert_eq!(
-            native_session(&dir).unwrap().as_deref(),
-            Some("old-session")
-        );
-        begin_nonce(&dir, "replacement").unwrap();
-        clear_nonce(&dir, "ours").unwrap();
-        assert_eq!(nonce(&dir).unwrap().as_deref(), Some("replacement"));
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
     #[test]
     fn reading_device_identity_preserves_settings_and_cookie_state() {
         let dir = login_fixture(None);
         let before = std::fs::read(dir.join("localStorage.json")).unwrap();
-        assert_eq!(device_id(&dir).unwrap(), "fixture-device");
         assert_eq!(
             std::fs::read(dir.join("localStorage.json")).unwrap(),
             before
@@ -952,41 +627,6 @@ mod tests {
             .get("desktopLoginVerifiedDeviceId:https://api.manus.im/")
             .is_none());
         std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn late_login_results_cannot_commit_after_cancel_expiry_or_replacement() {
-        let mut pending = Pending {
-            id: "current".into(),
-            device_id: "fixture-device".into(),
-            nonce: "fixture-nonce".into(),
-            started: 100,
-            previous: Some("previous".into()),
-            expires: 60,
-            awaiting_client_exit: false,
-            cancelled: false,
-        };
-        let mut saved = Vec::new();
-        let mut commit = |pending: &Pending, id: &str, now| {
-            pending.validate(id, now)?;
-            saved.push(id.to_string());
-            Ok::<_, String>(())
-        };
-        assert!(commit(&pending, "current", 59).is_ok());
-        assert_eq!(
-            commit(&pending, "current", 60).unwrap_err(),
-            "accountError.expired"
-        );
-        assert_eq!(
-            commit(&pending, "earlier", 59).unwrap_err(),
-            "accountError.cancelled"
-        );
-        pending.cancelled = true;
-        assert_eq!(
-            commit(&pending, "current", 59).unwrap_err(),
-            "accountError.cancelled"
-        );
-        assert_eq!(saved, ["current"]);
     }
 
     #[test]

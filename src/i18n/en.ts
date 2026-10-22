@@ -3,7 +3,8 @@ import { Translations } from './types';
 
 const en: Translations = {
   'accountError.closeClient': 'Save your work and close the client, then try switching again.',
-  'accountError.quitClaudeDesktop': 'Please quit the Claude app normally, then try again.',
+  'accountError.stopClient': 'Could not stop the client. Please try again.',
+  'accountError.stopClaudeDesktop': 'Could not stop Claude. Please try again.',
   'accountError.initializeClient': 'Open the client once before adding an account.',
   'accountError.failed': 'Account operation failed. Please try again.',
   'accountError.home': 'Could not locate the user directory.',
@@ -408,11 +409,6 @@ const en: Translations = {
   'agent.grantedCredits': 'Reward credits',
   'agent.minimaxPurchasedCredits': 'Purchased credits',
   'agent.waitingForBrowser': 'Waiting for browser ({seconds})',
-  'agent.manusExitClient': 'Please quit Manus ({seconds})',
-  'agent.cueLoginClient': 'Please sign in to Cue ({seconds})',
-  'agent.cueExitClient': 'Please quit the Cue app ({seconds})',
-  'agent.claudeDesktopLoginClient': 'Please sign in to Claude ({seconds})',
-  'agent.claudeDesktopExitClient': 'Please quit the Claude app ({seconds})',
   'agent.refreshAccount': 'Refresh account quota',
   'agent.baseCredits': 'Plan credits',
   'agent.additionalCredits': 'Extra credits',

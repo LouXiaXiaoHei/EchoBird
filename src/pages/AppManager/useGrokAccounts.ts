@@ -1,6 +1,5 @@
-import { useRef, useState } from 'react';
 import * as api from '../../api/tauri';
-import { useManagedAccounts } from './useManagedAccounts';
+import { BROWSER_LOGIN_TIMEOUT_SECONDS, useManagedAccounts } from './useManagedAccounts';
 
 const clients = {
   grok: {
@@ -37,44 +36,21 @@ export function useGrokAccounts(
   tool: 'grok' | 'manus' | 'cue' = 'grok'
 ) {
   const client = clients[tool];
-  const currentAttempt = useRef<string | null>(null);
-  const startGeneration = useRef(0);
-  const [exitAttempt, setExitAttempt] = useState<string | null>(null);
   const managed = useManagedAccounts<
     api.GrokAccount | api.ManusAccount | api.CueAccount,
     api.GrokLogin | api.ManusLogin
   >(tool, enabled, hasModel, clearModel, showError, {
     ...client,
-    start: async () => {
-      const generation = ++startGeneration.current;
-      const login = await client.start();
-      if (startGeneration.current === generation) {
-        currentAttempt.current = login.loginId;
-        setExitAttempt(null);
-      }
-      return login;
-    },
-    open: (login) =>
-      'verificationUri' in login ? api.openExternal(login.verificationUri) : Promise.resolve(),
-    poll: async (id, nextStage) => {
+    start: client.start,
+    poll: async (id) => {
       if (tool === 'grok') return api.pollGrokLogin(id);
-      const result = await (tool === 'cue' ? api.pollCueLogin(id) : api.pollManusLogin(id));
-      if (currentAttempt.current === id) {
-        setExitAttempt(result.awaitingClientExit ? id : null);
-        if (result.awaitingClientExit && result.expiresAt !== null) nextStage(result.expiresAt);
-      }
-      return result.account;
+      return (await (tool === 'cue' ? api.pollCueLogin(id) : api.pollManusLogin(id))).account;
     },
-    cancel: (id) => {
-      if (currentAttempt.current === id) {
-        currentAttempt.current = null;
-        setExitAttempt(null);
-      }
-      return client.cancel(id);
-    },
+    cancel: client.cancel,
     remove: (account) => client.remove(account.id),
     refresh: (account) => client.refresh(account.id),
     label: (account) => account.email,
+    loginTimeoutSeconds: tool === 'grok' ? 60 : BROWSER_LOGIN_TIMEOUT_SECONDS,
   });
   const switchAccount = async () => {
     if (!managed.selectedId) return;
@@ -83,8 +59,7 @@ export function useGrokAccounts(
   };
   return {
     ...managed,
-    awaitingClientExit:
-      tool !== 'grok' && enabled && managed.busy && exitAttempt === managed.login?.loginId,
+    awaitingClientExit: false,
     switchAccount,
   };
 }

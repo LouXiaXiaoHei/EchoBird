@@ -26,26 +26,26 @@ pub(crate) async fn apply(
     }
     let executable =
         super::tool_manager::get_tool_exe_path(tool_id).ok_or("accountError.unavailable")?;
-    if super::process_manager::desktop_tool_is_running(tool_id).await? {
-        return Err("accountError.closeClient".into());
-    }
     let session = qoder_accounts::credentials_for_native(edition, account_id).await?;
     let credentials = &session.credentials;
     let executable = std::fs::canonicalize(executable).map_err(|_| "accountError.unavailable")?;
-    let account = match desktop::identity(&executable) {
-        Some((e, desktop::ProductKind::Ide)) if e == edition => {
+    let identity = desktop::identity(&executable)
+        .filter(|(e, _)| *e == edition)
+        .ok_or("accountError.invalidAccount")?;
+    super::process_manager::stop_desktop_for_account(tool_id).await?;
+    let account = match identity.1 {
+        desktop::ProductKind::Ide => {
             let transaction = desktop::apply(credentials, &executable).await?;
             let account = qoder_accounts::mark_active(edition, account_id).await?;
             transaction.commit();
             account
         }
-        Some((e, desktop::ProductKind::App)) if e == edition => {
+        desktop::ProductKind::App => {
             let transaction = app::apply(credentials, &executable).await?;
             let account = qoder_accounts::mark_active(edition, account_id).await?;
             transaction.commit();
             account
         }
-        _ => return Err("accountError.invalidAccount".into()),
     };
     Ok(account)
 }

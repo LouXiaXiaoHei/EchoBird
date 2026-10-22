@@ -191,10 +191,7 @@ pub(super) async fn apply(c: &Credentials) -> Result<Update, String> {
     super::api::installed()?;
     let root = data_dir()?;
     key(&root)?;
-    process_manager::stop_desktop_for_config("dumate").await;
-    if process_manager::desktop_tool_is_running("dumate").await? {
-        return Err("accountError.closeClient".into());
-    }
+    process_manager::stop_desktop_for_account("dumate").await?;
     let (transaction, lock) = write_at(c, &root)?;
     Ok(Update {
         transaction,

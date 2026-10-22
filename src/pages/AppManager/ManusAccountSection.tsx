@@ -18,13 +18,6 @@ export const ManusAccountSection: React.FC<{ tool?: 'manus' | 'cue' }> = ({ tool
         busy={accounts.busy}
         disabled={isLaunching}
         remainingSeconds={accounts.remainingSeconds}
-        waitingLabel={
-          tool === 'cue' && accounts.busy
-            ? t(accounts.awaitingClientExit ? 'agent.cueExitClient' : 'agent.cueLoginClient')
-            : accounts.awaitingClientExit
-              ? t('agent.manusExitClient')
-              : undefined
-        }
         onClick={() => void accounts.add()}
         onCancel={accounts.cancelLogin}
       />

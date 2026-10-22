@@ -907,9 +907,6 @@ pub async fn switch_account(account_id: &str) -> Result<Account, String> {
     if super::tool_manager::get_tool_exe_path(TOOL_ID).is_none() {
         return Err("accountError.unavailable".into());
     }
-    if super::process_manager::desktop_tool_is_running(TOOL_ID).await? {
-        return Err("accountError.closeClient".into());
-    }
     let _guard = ACCOUNTS.lock().await;
     let mut rows = load()?;
     let saved = rows.get_mut(account_id).ok_or("accountError.notFound")?;
@@ -923,6 +920,7 @@ pub async fn switch_account(account_id: &str) -> Result<Account, String> {
         save(&rows)?;
     }
     let saved = rows.get(account_id).ok_or("accountError.notFound")?;
+    super::process_manager::stop_desktop_for_account(TOOL_ID).await?;
     let tx = native::apply(saved)?;
     tx.commit();
     let mut account = saved.account.clone();

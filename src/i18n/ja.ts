@@ -5,7 +5,8 @@ import { Translations } from './types';
 const ja: Partial<Translations> = {
   'accountError.closeClient':
     '作業を保存してクライアントを閉じてから、アカウントを再度切り替えてください。',
-  'accountError.quitClaudeDesktop': 'Claude アプリを通常の手順で終了してから、再試行してください。',
+  'accountError.stopClient': 'クライアントを終了できませんでした。再試行してください。',
+  'accountError.stopClaudeDesktop': 'Claude を終了できませんでした。再試行してください。',
   'accountError.initializeClient': 'アカウントを追加する前に、クライアントを一度起動してください。',
   'accountError.failed': 'アカウント操作に失敗しました。再試行してください。',
   'accountError.home': 'ユーザーディレクトリが見つかりません。',
@@ -424,11 +425,6 @@ const ja: Partial<Translations> = {
   'agent.grantedCredits': '報酬クレジット',
   'agent.minimaxPurchasedCredits': '購入クレジット',
   'agent.waitingForBrowser': 'ブラウザ操作を待機中({seconds})',
-  'agent.manusExitClient': 'Manusを手動で終了({seconds})',
-  'agent.cueLoginClient': 'Cue にログインしてください({seconds})',
-  'agent.cueExitClient': 'Cueアプリを終了({seconds})',
-  'agent.claudeDesktopLoginClient': 'Claude にログインしてください({seconds})',
-  'agent.claudeDesktopExitClient': 'Claudeアプリを終了({seconds})',
   'agent.refreshAccount': 'アカウントの使用量を更新',
   'agent.baseCredits': 'プランクレジット',
   'agent.additionalCredits': '追加クレジット',

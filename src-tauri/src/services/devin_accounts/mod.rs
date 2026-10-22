@@ -391,7 +391,7 @@ pub async fn switch(account_id: &str, tool_id: &str) -> Result<Account, String> 
         .ok_or("accountError.invalidAccount")?;
     let c = decode(saved)?;
     if tool_id == "devin" {
-        super::process_manager::close_devin_desktop().await?;
+        super::process_manager::stop_desktop_for_account("devin").await?;
         native::apply_desktop(&c)?;
     } else {
         native::apply_cli(&c)?;

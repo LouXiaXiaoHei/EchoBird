@@ -131,7 +131,8 @@ pub(super) async fn start(app: tauri::AppHandle) -> Result<LoginStart, String> {
         candidate.filter(|c| !saved.contains_key(&c.id()))
     };
     let id = uuid::Uuid::new_v4().to_string();
-    let expires = chrono::Utc::now().timestamp() + 60;
+    let expires =
+        chrono::Utc::now().timestamp() + super::super::account_login_browser::LOGIN_TIMEOUT_SECONDS;
     let old = {
         let mut pending = pending().lock().map_err(|_| "accountError.read")?;
         pending.replace(Pending {

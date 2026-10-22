@@ -3,7 +3,8 @@
 // Translation key definitions
 export type TKey =
   | 'accountError.closeClient'
-  | 'accountError.quitClaudeDesktop'
+  | 'accountError.stopClient'
+  | 'accountError.stopClaudeDesktop'
   | 'accountError.initializeClient'
   | 'accountError.failed'
   | 'accountError.home'
@@ -342,11 +343,6 @@ export type TKey =
   | 'agent.grantedCredits'
   | 'agent.minimaxPurchasedCredits'
   | 'agent.waitingForBrowser'
-  | 'agent.manusExitClient'
-  | 'agent.cueLoginClient'
-  | 'agent.cueExitClient'
-  | 'agent.claudeDesktopLoginClient'
-  | 'agent.claudeDesktopExitClient'
   | 'agent.refreshAccount'
   | 'agent.baseCredits'
   | 'agent.additionalCredits'

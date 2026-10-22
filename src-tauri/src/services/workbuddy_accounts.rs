@@ -829,28 +829,17 @@ async fn close_app(edition: Edition) -> Result<(), String> {
             .map_err(|_| "accountError.failed")?;
         if !status.success() {
             log::warn!("[WorkBuddy] Client shutdown failed: {name}, status={status}");
-            return Err(format!("accountError.failed|Close {name} and try again."));
+            return Err("accountError.stopClient".into());
         }
         Ok(())
     }
     #[cfg(target_os = "macos")]
     {
-        let bundle = match edition {
-            Edition::Cn => "com.tencent.workbuddy.mac",
-            Edition::Ai => "com.workbuddy.workbuddy-ai",
+        let tool = match edition {
+            Edition::Cn => "workbuddy",
+            Edition::Ai => "workbuddyai",
         };
-        let script = format!("tell application \"System Events\"\nif exists (processes whose bundle identifier is \"{bundle}\") then\ntell application id \"{bundle}\" to quit\nrepeat 100 times\nif not (exists (processes whose bundle identifier is \"{bundle}\")) then return\ndelay 0.2\nend repeat\nerror \"WorkBuddy is still running\"\nend if\nend tell");
-        let status = crate::utils::process::async_command("osascript")
-            .args(["-e", &script])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map_err(|_| "accountError.failed")?;
-        if !status.success() {
-            return Err("accountError.failed".into());
-        }
-        Ok(())
+        super::process_manager::stop_desktop_for_account(tool).await
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {

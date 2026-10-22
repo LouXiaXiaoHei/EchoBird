@@ -328,17 +328,6 @@ async fn ensure_cli_closed() -> Result<(), String> {
     Ok(())
 }
 
-async fn close_desktop() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        super::cursor_auth::close_windows_client("Antigravity", false).await
-    }
-    #[cfg(unix)]
-    {
-        super::cursor_auth::close_client("antigravitydesktop", "Antigravity").await
-    }
-}
-
 pub async fn switch(id: &str) -> Result<Account, String> {
     let _guard = ACCOUNT_LOCK.lock().await;
     let mut accounts = load()?;
@@ -362,7 +351,7 @@ pub async fn switch(id: &str) -> Result<Account, String> {
         }
     }
     ensure_cli_closed().await?;
-    close_desktop().await?;
+    super::process_manager::stop_desktop_for_account("antigravitydesktop").await?;
     native::write(&raw)?;
     let verified = native::read()
         .and_then(|value| value.as_deref().map(identity).transpose())

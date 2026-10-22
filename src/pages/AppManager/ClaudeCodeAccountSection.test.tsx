@@ -93,11 +93,12 @@ describe('Claude Code account card', () => {
     expect(markup).toContain('agent.waitingForBrowser');
     expect(markup).not.toContain('agent.addCurrentAccount');
   });
-  it('reuses the Claude layout and shows the desktop normal-exit stage', () => {
+  it('reuses the Claude layout while waiting for the isolated login browser', () => {
     const markup = renderAccount(null, true, true);
     expect(markup).toContain('/icons/tools/claudedesktop.svg');
     expect(markup).toContain('claude-account-pill');
-    expect(markup).toContain('agent.claudeDesktopExitClient');
+    expect(markup).toContain('agent.waitingForBrowser');
+    expect(markup).not.toContain('agent.claudeDesktopExitClient');
     expect(markup).not.toContain('—');
     expect(markup).toContain('82%');
     expect(markup).not.toContain('5h:');
@@ -106,10 +107,10 @@ describe('Claude Code account card', () => {
     expect(markup).not.toContain('cursor-');
     expect(markup).not.toContain('title=');
   });
-  it('asks for native sign-in rather than browser operation in the desktop login stage', () => {
+  it('uses the same browser waiting label throughout desktop authorization', () => {
     const markup = renderAccount(null, true, true, false);
-    expect(markup).toContain('agent.claudeDesktopLoginClient');
-    expect(markup).not.toContain('agent.waitingForBrowser');
+    expect(markup).not.toContain('agent.claudeDesktopLoginClient');
+    expect(markup).toContain('agent.waitingForBrowser');
     expect(markup).not.toContain('agent.claudeDesktopExitClient');
   });
 });

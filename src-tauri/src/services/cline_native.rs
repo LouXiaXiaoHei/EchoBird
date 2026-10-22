@@ -365,10 +365,7 @@ pub(crate) async fn apply(id: &str, tool: &str) -> Result<Account, String> {
     }
     if sync_desktop {
         cline::desktop::read()?;
-        super::process_manager::stop_desktop_for_config("clinedesktop").await;
-        if super::process_manager::desktop_tool_is_running("clinedesktop").await? {
-            return Err("accountError.closeClient".into());
-        }
+        super::process_manager::stop_desktop_for_account("clinedesktop").await?;
     }
     let storage = if sync_desktop {
         Some(Storage::open()?)

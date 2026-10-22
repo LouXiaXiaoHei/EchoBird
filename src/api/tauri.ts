@@ -642,7 +642,7 @@ export interface ManusAccount extends GrokAccount {
   } | null;
 }
 export interface ManusLogin extends GrokLogin {
-  verificationUri: string;
+  verificationUri?: string;
 }
 export interface ManusLoginPoll {
   account: ManusAccount | null;

@@ -30,13 +30,6 @@ impl Edition {
         }
     }
 
-    fn app_name(self) -> &'static str {
-        match self {
-            Self::Trae => "Trae",
-            Self::Traecn => "Trae CN",
-        }
-    }
-
     fn api(self) -> &'static str {
         match self {
             Self::Trae => "https://growsg-normal.trae.ai",
@@ -661,10 +654,7 @@ pub async fn activate_account(edition: Edition, id: &str) -> Result<(), String> 
     }
     unprotect(&selected(edition, id).await?)?;
     let _guard = ACCOUNT_LOCK.lock().await;
-    #[cfg(windows)]
-    super::cursor_auth::close_windows_client(edition.app_name(), false).await?;
-    #[cfg(unix)]
-    super::cursor_auth::close_client(edition.tool(), edition.app_name()).await?;
+    super::process_manager::stop_desktop_for_account(edition.tool()).await?;
     let dir = native::data_dir(edition)?;
     let mut accounts = load(edition)?;
     if let Some(current) = native::read(&dir, edition)? {

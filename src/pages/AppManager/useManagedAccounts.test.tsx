@@ -76,6 +76,38 @@ afterEach(() => {
 });
 
 describe('shared account request boundaries', () => {
+  it('honors a longer browser deadline while keeping the backend expiry authoritative', async () => {
+    client.loginTimeoutSeconds = 600;
+    const poll = deferred<Account | null>();
+    vi.mocked(client.start).mockResolvedValue({
+      loginId: 'browser',
+      expiresAt: Date.now() / 1000 + 600,
+    });
+    vi.mocked(client.poll!).mockReturnValue(poll.promise);
+    await mount();
+    let adding!: Promise<void>;
+    await act(async () => {
+      adding = state.add();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(state.busy).toBe(true);
+    expect(state.remainingSeconds).toBe(540);
+    expect(client.cancel).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(540_000);
+    });
+    expect(state.busy).toBe(false);
+    expect(client.cancel).toHaveBeenCalledWith('browser');
+    expect(showError).toHaveBeenCalledWith('accountError.expired');
+    await act(async () => {
+      poll.resolve({ id: 'late-browser-account' });
+      await adding;
+    });
+    expect(state.accounts).toEqual([account]);
+  });
+
   it('uses the shared unavailable error for reward failures and treats already claimed results as success', async () => {
     await mount();
     const claim = vi.fn().mockRejectedValueOnce('accountError.unavailable');

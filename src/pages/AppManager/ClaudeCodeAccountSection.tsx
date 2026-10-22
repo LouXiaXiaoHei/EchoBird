@@ -3,13 +3,11 @@ import { useAppManager } from './context';
 import { ModelSwitchDivider } from './ModelSwitchDivider';
 import { AccountSectionButton, AccountSectionRow } from './AccountSectionPrimitives';
 import { QuotaCountdown } from './QuotaCountdown';
-import { useI18n } from '../../hooks/useI18n';
 export const ClaudeCodeAccountSection: React.FC<{ showDivider?: boolean; desktop?: boolean }> = ({
   showDivider = true,
   desktop = false,
 }) => {
   const { claudeCodeAccounts, claudeDesktopAccounts, isLaunching } = useAppManager();
-  const { t } = useI18n();
   const group = desktop ? claudeDesktopAccounts : claudeCodeAccounts;
   const { accounts, selectedId, select, busy, remainingSeconds, refreshing, add, refresh, remove } =
     group;
@@ -21,15 +19,6 @@ export const ClaudeCodeAccountSection: React.FC<{ showDivider?: boolean; desktop
         busy={busy}
         disabled={desktop && isLaunching}
         remainingSeconds={remainingSeconds}
-        waitingLabel={
-          desktop
-            ? t(
-                claudeDesktopAccounts.awaitingClientExit
-                  ? 'agent.claudeDesktopExitClient'
-                  : 'agent.claudeDesktopLoginClient'
-              )
-            : undefined
-        }
         onClick={() => void add()}
         onCancel={group.cancelLogin}
       />

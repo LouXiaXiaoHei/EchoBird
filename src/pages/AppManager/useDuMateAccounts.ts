@@ -1,5 +1,5 @@
 import * as api from '../../api/tauri';
-import { useManagedAccounts } from './useManagedAccounts';
+import { BROWSER_LOGIN_TIMEOUT_SECONDS, useManagedAccounts } from './useManagedAccounts';
 import { dumateRewardStatus } from './dumateAccountDisplay';
 
 export function useDuMateAccounts(
@@ -22,6 +22,7 @@ export function useDuMateAccounts(
       remove: (a) => api.deleteDuMateAccount(a.id),
       refresh: (a) => api.refreshDuMateAccountQuota(a.id),
       label: (a) => a.name || a.id,
+      loginTimeoutSeconds: BROWSER_LOGIN_TIMEOUT_SECONDS,
     },
     navigationKey
   );

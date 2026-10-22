@@ -54,7 +54,7 @@ fn valid(id: &str, credentials: &Credentials) -> Result<(), String> {
     Ok(())
 }
 
-fn current(path: &Path, id: &str) -> Result<(Saved, Credentials), String> {
+pub(super) fn current(path: &Path, id: &str) -> Result<(Saved, Credentials), String> {
     let store = load_at(path)?;
     let saved = store
         .get(id)

@@ -2807,14 +2807,6 @@ for (const page of ['apps', 'accounts'] as const) {
       });
       vi.mocked(api[cancelName]).mockResolvedValue(undefined);
       vi.mocked(api[pollName]).mockImplementation(() => new Promise<never>(() => {}));
-      const awaitingExit = ['cue', 'manus', 'claudedesktop'].includes(tool);
-      if (awaitingExit) {
-        vi.mocked(api[pollName]).mockResolvedValueOnce({
-          account: null,
-          awaitingClientExit: true,
-          expiresAt: Date.now() / 1000 + 60,
-        } as never);
-      }
       try {
         if (page === 'accounts') await showAccountCenter([tool]);
         else {
@@ -2837,15 +2829,9 @@ for (const page of ['apps', 'accounts'] as const) {
         };
         await act(async () => clickAdd());
         await tick();
-        if (awaitingExit) {
-          const group = {
-            cue: state.cueAccounts,
-            manus: state.manusAccounts,
-            claudedesktop: state.claudeDesktopAccounts,
-          }[tool as 'cue' | 'manus' | 'claudedesktop'];
-          expect(group.awaitingClientExit).toBe(true);
-        }
         const browserCalls = vi.mocked(api.openExternal).mock.calls.length;
+        if (tool === 'claudedesktop' || tool === 'manus' || tool === 'cue')
+          expect(browserCalls).toBe(0);
         const clickCancel = () => {
           const button = renderer.root.findByProps({ 'aria-label': 'btn.cancel' });
           expect(button.props.disabled).not.toBe(true);
@@ -3974,12 +3960,12 @@ it('Kiro: an explicit switch failure preserves rows and prevents launch', async 
     quota: [],
   };
   vi.mocked(api.listKiroAccounts).mockResolvedValue([row]);
-  vi.mocked(api.switchKiroAccount).mockRejectedValueOnce(new Error('accountError.closeClient'));
+  vi.mocked(api.switchKiroAccount).mockRejectedValueOnce(new Error('accountError.stopClient'));
   await mount('kirocrew');
   await act(async () => {
     await state.handleLaunch();
   });
-  expect(state.applyError).toBe('accountError.closeClient');
+  expect(state.applyError).toBe('accountError.stopClient');
   expect(state.kiroAccounts.accounts).toEqual([row]);
   expect(api.startTool).not.toHaveBeenCalled();
   expect(folderPicker).not.toHaveBeenCalled();

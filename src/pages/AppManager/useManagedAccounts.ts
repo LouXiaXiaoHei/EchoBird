@@ -4,6 +4,8 @@ import { useConfirm } from '../../components/ConfirmDialog';
 import { useI18n } from '../../hooks/useI18n';
 import { useNavigationStore } from '../../stores/navigationStore';
 
+export const BROWSER_LOGIN_TIMEOUT_SECONDS = 10 * 60;
+
 export interface ManagedAccount {
   id: string;
   active?: boolean;
@@ -26,6 +28,7 @@ export interface AccountClient<A extends ManagedAccount, L extends ManagedLogin>
   refresh: (account: A) => Promise<A>;
   label: (account: A) => string;
   pollInterval?: number;
+  loginTimeoutSeconds?: number;
   refreshLimit?: number;
   refreshError?: (account: A, message: string) => string;
 }
@@ -232,13 +235,14 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
     const activeAttempt = ++attempt.current;
     const active = () => current === generation.current && activeAttempt === attempt.current;
     const adapter = clientRef.current;
+    const timeoutSeconds = adapter.loginTimeoutSeconds ?? 60;
     loginRevision.current = revision.current;
     adding.current = true;
     setBusy(true);
     setLoginError(null);
-    setRemainingSeconds(60);
+    setRemainingSeconds(timeoutSeconds);
     let started: L | null = null;
-    let expires = Date.now() / 1000 + 60;
+    let expires = Date.now() / 1000 + timeoutSeconds;
     let continued = false;
     let ticker: ReturnType<typeof setInterval> | undefined;
     const expire = () => {
@@ -249,12 +253,12 @@ export function useManagedAccounts<A extends ManagedAccount, L extends ManagedLo
         void previous.client.cancel(previous.login.loginId).catch(() => {});
       showError(t('accountError.expired'));
     };
-    let deadline = setTimeout(expire, 60_000);
+    let deadline = setTimeout(expire, timeoutSeconds * 1000);
     // A native handoff can start one new stage; repeated progress must not extend it.
     const nextStage = (expiresAt: number) => {
       if (!active() || continued) return;
       continued = true;
-      expires = Math.min(expiresAt, Date.now() / 1000 + 60);
+      expires = Math.min(expiresAt, Date.now() / 1000 + timeoutSeconds);
       clearTimeout(deadline);
       deadline = setTimeout(expire, Math.max(0, (expires - Date.now() / 1000) * 1000));
       setRemainingSeconds(Math.max(0, Math.ceil(expires - Date.now() / 1000)));

@@ -194,18 +194,7 @@ export function accountCenterProviders(
     readFailed: group.readFailed,
     mutationRevision: group.mutationRevision,
     remainingSeconds: group.remainingSeconds,
-    waitingLabel:
-      id === 'cue' && group.busy
-        ? t(group.awaitingClientExit ? 'agent.cueExitClient' : 'agent.cueLoginClient')
-        : id === 'claudedesktop' && group.busy
-          ? t(
-              group.awaitingClientExit
-                ? 'agent.claudeDesktopExitClient'
-                : 'agent.claudeDesktopLoginClient'
-            )
-          : group.awaitingClientExit
-            ? t('agent.manusExitClient')
-            : undefined,
+    waitingLabel: undefined,
     add: () => void group.add(),
     cancelLogin: group.cancelLogin,
     accounts: group.accounts.map((account) => {

@@ -277,33 +277,11 @@ pub async fn switch(id: &str, locale: &str) -> Result<Account, String> {
     if verified.summary.id != id {
         return Err("accountError.invalidAccount".into());
     }
-    close_app().await?;
+    super::process_manager::stop_desktop_for_account("dsh").await?;
     let _config = dsh::CONFIG_LOCK.lock().map_err(|_| "accountError.busy")?;
     dsh::apply_account_at(&dsh::dsh_config_dir(), &saved.token, &saved.device)?;
     saved.summary.active = true;
     Ok(saved.summary)
-}
-
-async fn close_app() -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        super::cursor_auth::close_windows_client("DeepSeek Harness", true)
-            .await
-            .map_err(|_| "accountError.failed".into())
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let status = crate::utils::process::async_command("osascript").args(["-e", "tell application \"System Events\"\nif exists (processes whose bundle identifier is \"com.deepseek.dsh\") then\ntell application id \"com.deepseek.dsh\" to quit\nrepeat 100 times\nif not (exists (processes whose bundle identifier is \"com.deepseek.dsh\")) then return\ndelay 0.2\nend repeat\nerror \"DeepSeek Harness is still running\"\nend if\nend tell"])
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().await.map_err(|_| "accountError.failed")?;
-        if !status.success() {
-            return Err("accountError.failed".into());
-        }
-        Ok(())
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        Err("accountError.unavailable".into())
-    }
 }
 
 #[cfg(test)]

@@ -475,10 +475,19 @@ pub async fn activate_account(edition: Edition, id: &str) -> Result<(), String> 
         if !installed(edition) {
             return Err("accountError.initializeClient".into());
         }
-        if super::process_manager::desktop_tool_is_running(edition.tool()).await? {
+        if edition == Edition::Cli
+            && super::process_manager::desktop_tool_is_running(edition.tool()).await?
+        {
             return Err("accountError.closeClient".into());
         }
         let path = store_path()?;
+        {
+            let _guard = ACCOUNT_LOCK.lock().await;
+            proxy::current(&path, &id)?;
+        }
+        if edition == Edition::Crew {
+            super::process_manager::stop_desktop_for_account(edition.tool()).await?;
+        }
         let targets = native::targets()?;
         let running = proxy::running(&path, &id, &targets).await?;
         let credentials =

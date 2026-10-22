@@ -1,9 +1,10 @@
-//! Cue owns its browser nonce in memory. Let the official client sign in and
-//! capture only the flushed session cookie and its verified owner after Quit.
+//! Cue shares Manus authentication; membership and quota remain Cue-specific.
+use super::account_login_browser::{self, Login};
 use super::cursor_auth::{read, write};
-use super::electron_storage::{cipher, decrypt, encrypt};
+use super::electron_storage::cipher;
 use super::manus_accounts::{
-    cookie_db, native_session, profile, set_cookie, Account as ManusAccount, Credits,
+    cookie_db, native_session, profile, profile_identity, saved_session, set_cookie,
+    Account as ManusAccount, Credits,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,9 +15,8 @@ use std::{
     time::Duration,
 };
 
-const LOGIN_SECONDS: i64 = 60;
 static ACCOUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static PENDING: std::sync::Mutex<Option<Pending>> = std::sync::Mutex::new(None);
+static PENDING: std::sync::Mutex<Option<Login>> = std::sync::Mutex::new(None);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +48,16 @@ struct Owner {
     user_id: String,
 }
 impl Owner {
+    fn verified(token: &str, user_id: &str, account_id: &str) -> Result<Self, String> {
+        let owner = Self {
+            user_id: user_id.to_owned(),
+            token_hash: format!("{:x}", Sha256::digest(token.as_bytes())),
+        };
+        if !owner.matches(token, account_id) {
+            return Err("accountError.authResponse".into());
+        }
+        Ok(owner)
+    }
     fn matches(&self, token: &str, id: &str) -> bool {
         !token.is_empty()
             && !self.user_id.is_empty()
@@ -62,42 +72,6 @@ struct Saved {
     owner: Owner,
 }
 type Store = BTreeMap<String, Saved>;
-#[derive(Clone)]
-struct Pending {
-    id: String,
-    dir: PathBuf,
-    device: Option<String>,
-    expires: i64,
-    awaiting_exit: bool,
-}
-impl Pending {
-    fn validate(&self, id: &str, now: i64) -> Result<(), String> {
-        if self.id != id {
-            return Err("accountError.cancelled".into());
-        }
-        if now >= self.expires {
-            return Err("accountError.expired".into());
-        }
-        Ok(())
-    }
-    fn begin_exit(&mut self, now: i64) {
-        if !self.awaiting_exit {
-            self.awaiting_exit = true;
-            self.expires = now + LOGIN_SECONDS;
-        }
-    }
-    fn bind_device(&mut self, device: &str) -> Result<(), String> {
-        if self
-            .device
-            .as_deref()
-            .is_some_and(|expected| expected != device)
-        {
-            return Err("accountError.initializeClient".into());
-        }
-        self.device = Some(device.into());
-        Ok(())
-    }
-}
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoginStart {
@@ -142,6 +116,7 @@ fn device_id(dir: &Path) -> Result<Option<String>, String> {
     }
     Ok(Some(device))
 }
+
 fn owner(dir: &Path) -> Result<Option<Owner>, String> {
     let path = dir.join("session-owner.json");
     if path.exists() {
@@ -180,136 +155,98 @@ pub async fn list() -> Result<Vec<Account>, String> {
         .map(|saved| saved.account)
         .collect())
 }
-pub async fn start_login() -> Result<LoginStart, String> {
+pub async fn start_login(app: tauri::AppHandle) -> Result<LoginStart, String> {
     if !cfg!(any(windows, target_os = "macos")) {
         return Err("accountError.unavailable".into());
     }
-    let _lock = ACCOUNT_LOCK.lock().await;
-    let dir = data_dir()?;
-    let pending = Pending {
-        id: uuid::Uuid::new_v4().to_string(),
-        device: device_id(&dir)?,
-        dir,
-        expires: chrono::Utc::now().timestamp() + LOGIN_SECONDS,
-        awaiting_exit: false,
-    };
-    let login = LoginStart {
-        login_id: pending.id.clone(),
-        expires_at: pending.expires,
-    };
-    {
-        let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        if guard
-            .as_ref()
-            .is_some_and(|p| p.expires > chrono::Utc::now().timestamp())
-        {
-            return Err("accountError.busy".into());
-        }
-        *guard = Some(pending);
+    let login = Login::start_desktop(
+        &app,
+        "Cue",
+        "cue",
+        &[
+            "manus.im",
+            "google.com",
+            "googleusercontent.com",
+            "apple.com",
+            "facebook.com",
+        ],
+    )?;
+    let old = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
+        .replace(login.clone());
+    if let Some(old) = old {
+        old.cancel(&app);
     }
-    if let Err(error) = super::process_manager::open_tool_for_login("cue").await {
-        cancel_login(&login.login_id).await?;
-        return Err(error);
-    }
-    Ok(login)
+    Ok(LoginStart {
+        login_id: login.id,
+        expires_at: login.expires,
+    })
 }
-pub async fn cancel_login(id: &str) -> Result<(), String> {
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    if guard.as_ref().is_some_and(|p| p.id == id) {
-        *guard = None;
+pub async fn cancel_login(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let login = {
+        let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+        if pending.as_ref().is_some_and(|login| login.id == id) {
+            pending.take()
+        } else {
+            None
+        }
+    };
+    if let Some(login) = login {
+        login.cancel(app);
     }
     Ok(())
 }
-pub async fn poll_login(id: &str) -> Result<LoginPoll, String> {
-    let _lock = ACCOUNT_LOCK.lock().await;
-    let pending = {
-        let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-        let pending = guard.as_mut().ok_or("accountError.cancelled")?;
-        let now = chrono::Utc::now().timestamp();
-        pending.validate(id, now)?;
-        if let Some(device) = device_id(&pending.dir)? {
-            pending.bind_device(&device)?;
-        }
-        // This local hint changes only the prompt. Authenticated UserInfo verifies it below.
-        if owner(&pending.dir)?.is_some_and(|o| !o.user_id.is_empty() && !o.token_hash.is_empty()) {
-            pending.begin_exit(now);
-        }
-        pending.clone()
-    };
-    let waiting = || LoginPoll {
-        account: None,
-        awaiting_client_exit: pending.awaiting_exit,
-        expires_at: Some(pending.expires),
-    };
-    if super::process_manager::desktop_tool_is_running("cue").await? {
-        return Ok(waiting());
-    }
-    let Some(device) = pending.device.as_deref() else {
-        return Ok(waiting());
-    };
-    let token = match native_session(&pending.dir) {
-        Ok(Some(token)) if !token.is_empty() => token,
-        Ok(_) => return Ok(waiting()),
-        Err(e) if e == "accountError.closeClient" => return Ok(waiting()),
-        Err(e) => return Err(e),
-    };
-    let Some(owner) = owner(&pending.dir)? else {
-        return Ok(waiting());
-    };
-    let mut account = profile(&token).await?;
-    if !owner.matches(&token, &account.id) {
-        return Err("accountError.authResponse".into());
-    }
-    if super::process_manager::desktop_tool_is_running("cue").await? {
-        return Ok(waiting());
-    }
-    let mut guard = PENDING.lock().map_err(|_| "accountError.busy")?;
-    guard
+pub async fn poll_login(app: &tauri::AppHandle, id: &str) -> Result<LoginPoll, String> {
+    let login = PENDING
+        .lock()
+        .map_err(|_| "accountError.busy")?
         .as_ref()
-        .ok_or("accountError.cancelled")?
-        .validate(id, chrono::Utc::now().timestamp())?;
-    if device_id(&pending.dir)?.as_deref() != Some(device)
-        || native_session(&pending.dir)?.as_deref() != Some(&token)
-        || !self::owner(&pending.dir)?.is_some_and(|o| o.matches(&token, &account.id))
-    {
-        return Err("accountError.cancelled".into());
-    }
-    let mut store = load_store()?;
-    // Cue subscriptions are independent of the Manus plan returned by UserInfo.
-    account.plan = store
-        .get(&account.id)
-        .and_then(|s| s.account.base.plan.clone());
-    account.credits = store
-        .get(&account.id)
-        .and_then(|s| s.account.base.credits.clone());
-    let weekly = store
-        .get(&account.id)
-        .and_then(|s| s.account.weekly.clone());
-    account.subscription_end_at = store
-        .get(&account.id)
-        .and_then(|s| s.account.base.subscription_end_at);
-    for saved in store.values_mut() {
-        saved.account.base.active = false;
-    }
-    account.active = true;
-    let account = Account {
-        base: account,
-        weekly,
+        .filter(|login| login.id == id)
+        .cloned()
+        .ok_or("accountError.cancelled")?;
+    let Some(token) = login.desktop_token()? else {
+        return Ok(LoginPoll::default());
     };
-    store.insert(
-        account.base.id.clone(),
-        Saved {
-            account: account.clone(),
-            session: encrypt(&cipher(&pending.dir)?, &token)?,
-            owner,
-        },
-    );
-    write(&store_path()?, &store)?;
-    *guard = None;
-    Ok(LoginPoll {
-        account: Some(account),
-        ..Default::default()
-    })
+    let (mut account, user_id) = profile_identity(&token).await?;
+    let owner = Owner::verified(&token, &user_id, &account.id)?;
+    let session = account_login_browser::seal(&token)?;
+    let _lock = ACCOUNT_LOCK.lock().await;
+    let mut pending = PENDING.lock().map_err(|_| "accountError.busy")?;
+    pending
+        .as_ref()
+        .filter(|current| current.id == id)
+        .ok_or("accountError.cancelled")?;
+    let result = login.complete(app, || {
+        let mut store = load_store()?;
+        let previous = store.get(&account.id);
+        // UserInfo's plan belongs to Manus; only Cue membership responses populate these fields.
+        account.plan = previous.and_then(|saved| saved.account.base.plan.clone());
+        account.credits = previous.and_then(|saved| saved.account.base.credits.clone());
+        account.subscription_end_at =
+            previous.and_then(|saved| saved.account.base.subscription_end_at);
+        account.active = previous.is_some_and(|saved| saved.account.base.active);
+        let weekly = previous.and_then(|saved| saved.account.weekly.clone());
+        let account = Account {
+            base: account,
+            weekly,
+        };
+        store.insert(
+            account.base.id.clone(),
+            Saved {
+                account: account.clone(),
+                session,
+                owner,
+            },
+        );
+        write(&store_path()?, &store)?;
+        Ok(LoginPoll {
+            account: Some(account),
+            ..Default::default()
+        })
+    })?;
+    *pending = None;
+    Ok(result)
 }
 
 pub async fn switch(id: &str) -> Result<Account, String> {
@@ -318,23 +255,18 @@ pub async fn switch(id: &str) -> Result<Account, String> {
         .lock()
         .map_err(|_| "accountError.busy")?
         .as_ref()
-        .is_some_and(|p| p.expires > chrono::Utc::now().timestamp())
+        .is_some_and(|p| p.check().is_ok())
     {
         return Err("accountError.busy".into());
     }
     let dir = data_dir()?;
     let mut store = load_store()?;
     let saved = store.get(id).ok_or("accountError.invalidAccount")?;
-    let token = decrypt(&cipher(&dir)?, &saved.session)?;
+    let token = saved_session(&dir, &saved.session)?;
     if !saved.owner.matches(&token, id) || profile(&token).await?.id != id {
         return Err("accountError.invalidAccount".into());
     }
-    #[cfg(target_os = "macos")]
-    super::cursor_auth::close_client("cue", "Cue").await?;
-    // Windows Close hides Cue; never force-kill work or replace a live cookie database.
-    if super::process_manager::desktop_tool_is_running("cue").await? {
-        return Err("accountError.closeClient".into());
-    }
+    super::process_manager::stop_desktop_for_account("cue").await?;
     let previous = native_session(&dir)?;
     let previous_owner = owner(&dir)?;
     write_native(&dir, Some(&token), Some(&saved.owner))?;
@@ -433,7 +365,7 @@ pub async fn refresh(id: &str) -> Result<Account, String> {
     let dir = data_dir()?;
     let mut store = load_store()?;
     let saved = store.get_mut(id).ok_or("accountError.invalidAccount")?;
-    let token = decrypt(&cipher(&dir)?, &saved.session)?;
+    let token = saved_session(&dir, &saved.session)?;
     let device = device_id(&dir)?.ok_or("accountError.initializeClient")?;
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -684,26 +616,12 @@ mod tests {
         assert!(owner.matches("session-one", &id));
         assert!(!owner.matches("session-two", &id));
         assert!(!owner.matches("session-one", "other-account"));
+        assert!(Owner::verified("session-one", "user-one", &id)
+            .unwrap()
+            .matches("session-one", &id));
+        assert!(Owner::verified("session-one", "other-user", &id).is_err());
+        assert!(Owner::verified("", "user-one", &id).is_err());
     }
-    #[test]
-    fn device_and_exit_deadline_are_bound_to_the_current_attempt() {
-        let mut pending = Pending {
-            id: "one".into(),
-            dir: PathBuf::new(),
-            device: None,
-            expires: 60,
-            awaiting_exit: false,
-        };
-        pending.bind_device("device-one").unwrap();
-        assert!(pending.bind_device("device-two").is_err());
-        pending.begin_exit(45);
-        pending.begin_exit(100);
-        assert_eq!(pending.expires, 105);
-        assert!(pending.validate("one", 104).is_ok());
-        assert!(pending.validate("one", 105).is_err());
-        assert!(pending.validate("old-attempt", 50).is_err());
-    }
-
     #[cfg(windows)]
     #[test]
     fn native_switch_changes_only_cue_session_and_owner_and_can_roll_back() {
@@ -753,24 +671,5 @@ mod tests {
         );
         drop(db);
         std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn cancelling_cue_does_not_cancel_a_newer_attempt_or_write_native_storage() {
-        let pending = Pending {
-            id: "cue-new".into(),
-            dir: PathBuf::new(),
-            device: None,
-            expires: i64::MAX,
-            awaiting_exit: false,
-        };
-        *PENDING.lock().unwrap() = Some(pending);
-        tauri::async_runtime::block_on(cancel_login("cue-old")).unwrap();
-        assert_eq!(PENDING.lock().unwrap().as_ref().unwrap().id, "cue-new");
-        tauri::async_runtime::block_on(cancel_login("cue-new")).unwrap();
-        assert!(PENDING.lock().unwrap().is_none());
-        assert!(store_path()
-            .unwrap()
-            .ends_with(".echobird/cue-accounts.json"));
     }
 }

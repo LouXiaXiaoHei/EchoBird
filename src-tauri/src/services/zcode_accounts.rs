@@ -720,7 +720,7 @@ pub async fn switch(account_id: &str) -> Result<Account, String> {
     if !accounts.contains_key(account_id) {
         return Err("accountError.invalidAccount".into());
     }
-    super::process_manager::stop_desktop_for_config("zcode").await;
+    super::process_manager::stop_desktop_for_account("zcode").await?;
     let paths = super::zcode_paths::resolve()?;
     let dir = &paths.config_dir;
     if let Some(mut current) = native_account_at(dir)? {

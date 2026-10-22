@@ -85,7 +85,7 @@ it('keeps model and account selection exclusive without applying native changes'
   expect(api.startClaudeDesktopLogin).not.toHaveBeenCalled();
   expect(api.refreshClaudeDesktopAccount).not.toHaveBeenCalled();
 });
-it('gives normal exit a fresh deadline, saves once and does not auto-refresh quota', async () => {
+it('uses one browser deadline, saves once and does not auto-refresh quota', async () => {
   await mount();
   let task!: Promise<void>;
   act(() => {
@@ -99,8 +99,9 @@ it('gives normal exit a fresh deadline, saves once and does not auto-refresh quo
     expiresAt: deadline,
   });
   await tick(2000);
-  expect(state.awaitingClientExit).toBe(true);
-  await tick(12_000);
+  expect(state.busy).toBe(true);
+  expect(state.remainingSeconds).toBeLessThanOrEqual(8);
+  await tick(2000);
   expect(state.busy).toBe(true);
   vi.mocked(api.listClaudeDesktopAccounts).mockResolvedValue([saved, captured]);
   vi.mocked(api.pollClaudeDesktopLogin).mockResolvedValue({
@@ -113,7 +114,6 @@ it('gives normal exit a fresh deadline, saves once and does not auto-refresh quo
     await task;
   });
   expect(state.busy).toBe(false);
-  expect(state.awaitingClientExit).toBe(false);
   expect(state.accounts.map((a) => a.id)).toEqual(['saved', 'new']);
   expect(api.startClaudeDesktopLogin).toHaveBeenCalledTimes(1);
   expect(api.refreshClaudeDesktopAccount).not.toHaveBeenCalled();
@@ -152,6 +152,5 @@ it('cancels on timeout and never imports a late account after leaving the tool',
     await task;
   });
   expect(state.accounts).toEqual([saved]);
-  expect(state.awaitingClientExit).toBe(false);
   expect(api.cancelClaudeDesktopLogin).toHaveBeenCalledWith('next');
 });

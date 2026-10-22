@@ -84,12 +84,7 @@ fn read_config_object(path: &Path) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
-pub(crate) fn claude_desktop_uses_third_party_mode() -> Result<bool, String> {
-    let paths = resolve_claudedesktop_paths()
-        .ok_or_else(|| "Cannot resolve the Claude Desktop configuration directory.".to_string())?;
-    third_party_mode_at(&paths)
-}
-
+#[cfg(test)]
 fn third_party_mode_at(paths: &ClaudeDesktopLayout) -> Result<bool, String> {
     Ok(read_config_object(&paths.cfg_official)?["deploymentMode"] == "3p")
 }
