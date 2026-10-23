@@ -32,15 +32,6 @@
 <table>
   <tr>
     <td width="150" align="center">
-      <a href="https://go.apimart.ai/gh-echobird"><img src="docs/sponsors/apimart.png" width="140" alt="APIMart" /></a>
-    </td>
-    <td>
-      <a href="https://go.apimart.ai/gh-echobird"><strong>APIMart</strong></a><br/>
-      感谢 <strong>APIMart</strong> 赞助了本项目!APIMart 是专注 AI 图片/视频生成的低价 API 平台,GPT-Image-2 低至 $0.006/张,1 美元可出图 160+ 张。图片、视频一套异步 API 通吃,提交任务拿 ID、回调取结果,跑批万张不超时、换模型不改代码。按量付费、无月费,通过<a href="https://go.apimart.ai/gh-echobird">此链接</a>注册即可开用。
-    </td>
-  </tr>
-  <tr>
-    <td width="150" align="center">
       <a href="https://88api.ai/sign-up?aff=knFS"><img src="docs/sponsors/88api.png" width="92" alt="88API Token聚合平台" /></a>
     </td>
     <td>

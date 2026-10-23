@@ -90,8 +90,6 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
     // 88API — token aggregation relay hosting many model brands; matches on
     // its own name only, so it never outranks a recognized model brand above.
     [['88api'], '88api'],
-    // APIMart — API image/video relay; own-name match only (model brands win).
-    [['apimart', 'api mart'], 'apimart'],
     [['grooroute'], 'grooroute'],
     [['sidrune', 'fluxion'], 'sidrune'],
   ];
@@ -101,7 +99,6 @@ export const getModelIcon = (name: string, modelId?: string): string | null => {
       if (icon === 'kilo') return './icons/tools/kilo.png';
       if (icon === 'ccvibe') return './icons/models/ccvibe.png';
       if (icon === '88api') return './icons/models/88api.png';
-      if (icon === 'apimart') return './icons/models/apimart.png';
       if (icon === 'grooroute') return './icons/models/grooroute.png';
       if (icon === 'sidrune') return './icons/models/sidrune.png';
       if (icon === 'byteplus') return './icons/models/byteplus.png';
