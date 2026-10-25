@@ -1,0 +1,113 @@
+name: Sync Upstream
+
+# Keeps this fork close to edison7009/EchoBird so the fork's own features keep
+# working on top of upstream's fixes.
+#
+# Merge (not rebase): the fork's commits stay intact and upstream's history is
+# pulled in with a merge commit, so a conflict is a normal, resolvable state
+# rather than a rewritten history that would break everyone's clone.
+#
+# A clean merge is pushed straight to main, which triggers CI. A conflict is
+# aborted and reported as an issue — never half-merged, never force-pushed.
+
+on:
+  schedule:
+    # Daily at 03:17 UTC — off the hour so we don't queue behind everyone
+    # else's cron at :00.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  UPSTREAM_REPO: edison7009/EchoBird
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          # Full history: the merge-base test below needs upstream's commits to
+          # be present locally, not just the fork's.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream main
+        id: merge
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}" --no-tags
+
+          if git merge-base --is-ancestor FETCH_HEAD HEAD; then
+            echo "Already up to date with upstream."
+            echo "status=current" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Conflict policy: abort and report. A human decides how the fork's
+          # changes interact with upstream's — silently resolving risks
+          # dropping either side's work.
+          if git merge --no-ff --no-edit FETCH_HEAD; then
+            echo "status=merged" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            git diff --name-only HEAD FETCH_HEAD > /tmp/upstream-changed.txt || true
+            exit 0
+          fi
+
+      - name: Push merge commit
+        if: steps.merge.outputs.status == 'merged'
+        run: |
+          set -euo pipefail
+          git push origin HEAD:main
+          echo "Pushed upstream merge to main."
+
+      - name: Open an issue when the merge conflicts
+        if: steps.merge.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          TITLE="Upstream sync needs a manual merge"
+          # Reuse an existing open issue instead of piling one up per run.
+          EXISTING=$(gh issue list --repo "$REPO" --state open \
+            --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          BODY=$(cat <<'EOF'
+          Automatic merge of `edison7009/EchoBird@main` into this fork conflicted,
+          so nothing was pushed. The fork is unchanged and safe.
+
+          Resolve locally:
+
+          ```bash
+          git fetch upstream main
+          git merge upstream/main      # fix the conflicts
+          git push origin main
+          ```
+
+          Then close this issue — the next nightly run will confirm the fork is
+          back in sync.
+          EOF
+          )
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" \
+              --body "Still conflicting as of $(date -u +%Y-%m-%d)."
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+          fi
+          echo "::warning title=Upstream sync::Merge conflict — see the tracking issue."

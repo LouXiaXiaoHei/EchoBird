@@ -93,6 +93,25 @@ jobs:
           fi
           mv "$TMP" "$MANIFEST"
 
+      # Also publish the manifest as a release asset. The in-app update check
+      # (src/config/release.ts) tries `releases/latest/download/index.json`
+      # FIRST, because that copy flips atomically with the release notes
+      # instead of waiting for a CDN to re-fetch the branch.
+      - name: Publish manifest as a release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG not found; skipping asset upload."
+            exit 0
+          fi
+          gh release upload "$TAG" docs/api/version/index.json \
+            --repo "$REPO" --clobber
+          echo "Uploaded index.json to release $TAG"
+
       # The GitHub release body is hand-written per release and has drifted to
       # Chinese-only since v5.5.8, while the manifest's `releaseNotesI18n` always
       # carries an English translation. Sync the release body to a collapsible

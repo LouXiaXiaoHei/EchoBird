@@ -124,12 +124,21 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Verify Antigravity OAuth build credentials
+      # Upstream hard-failed the build here unless its OWN Antigravity OAuth
+      # app id/secret were present. A fork has no access to those secrets, so
+      # the gate is gone: src/services/antigravity_accounts/quota.rs reads them
+      # with `option_env!` and falls back to upstream's public defaults, which
+      # keeps the build green and the feature working.
+      - name: Report missing Antigravity OAuth secrets (non-fatal)
         shell: bash
         env:
           ANTIGRAVITY_OAUTH_CLIENT_ID: ${{ secrets.ANTIGRAVITY_OAUTH_CLIENT_ID }}
-          ANTIGRAVITY_OAUTH_CLIENT_SECRET: ${{ secrets.ANTIGRAVITY_OAUTH_CLIENT_SECRET }}
-        run: test -n "$ANTIGRAVITY_OAUTH_CLIENT_ID" && test -n "$ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+        run: |
+          if [ -n "$ANTIGRAVITY_OAUTH_CLIENT_ID" ]; then
+            echo "Using repository Antigravity OAuth credentials."
+          else
+            echo "::notice title=Antigravity OAuth::No repository secrets set — building with the upstream public defaults."
+          fi
 
       - name: Build the app
         uses: tauri-apps/tauri-action@v0
