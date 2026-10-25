@@ -5,6 +5,7 @@
 
 import { lazy, useState, useEffect } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
+import { fetchVersionManifest } from './config/release';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listen } from '@tauri-apps/api/event';
 import { IS_MACOS } from './utils/platform';
@@ -247,16 +248,11 @@ function AppContent() {
           /* localStorage unavailable — skip the auto-open */
         }
       }
-      try {
-        const res = await fetch('https://echobird.ai/api/version/index.json');
-        if (res.ok && appVersion) {
-          const data = await res.json();
-          if (data.version && isNewerVersion(data.version, appVersion)) {
-            setUpdateAvailable(data.version);
-          }
-        }
-      } catch {
-        /* network error — ignore silently */
+      // Returns null when every source is unreachable — stay quiet, as offline
+      // users expect. See config/release.ts for the source order.
+      const manifest = await fetchVersionManifest();
+      if (manifest?.version && appVersion && isNewerVersion(manifest.version, appVersion)) {
+        setUpdateAvailable(manifest.version);
       }
     };
     preload();

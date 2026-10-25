@@ -1,28 +1,34 @@
-//! In-app self-update (Windows) — DIY flow.
+//! In-app self-update (Windows + macOS) — DIY flow.
 //!
-//! Download the installer from GitHub releases, launch its wizard, then exit
-//! so the installer can
-//! replace our files. The user clicks through the official installer; there is
-//! NO silent run and NO signature verification here — the signed + silent +
-//! auto-relaunch alternative is `tauri-plugin-updater`, deliberately not adopted
-//! yet (it needs signing keys + an updater manifest in the release flow).
+//! Download the release artifact from GitHub, then hand off to the OS:
 //!
-//! Non-Windows is not supported in-app (the caller opens the download page
-//! instead): macOS .dmg / Linux .deb|.rpm aren't "run the installer and exit".
+//! * Windows: launch the installer's wizard and exit so it can replace our
+//!   running files. The user clicks through the official installer;
+//! * macOS: download the .dmg and open it in Finder, leaving this process
+//!   running — the user drags the new app across when convenient.
+//!
+//! There is NO silent run and NO signature verification here — the signed +
+//! silent + auto-relaunch alternative is `tauri-plugin-updater`, deliberately
+//! not adopted yet (it needs signing keys + an updater manifest in the release
+//! flow). Linux has no in-app path: .deb/.rpm are not "run and exit", so the
+//! caller opens the release page instead.
+//!
+//! Artifact names are fixed by `fork-release.yml`, not by tauri's defaults, so
+//! the two stay in sync as a matter of policy.
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::path::Path;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::time::Duration;
 use tauri::AppHandle;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use tauri::Emitter;
 
 /// Event the Settings dialog listens to for a progress bar.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const PROGRESS_EVENT: &str = "self-update-progress";
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 #[derive(Clone, serde::Serialize)]
 struct UpdateProgress {
     /// "speed_test" | "downloading" | "launching" | "error"
@@ -30,13 +36,17 @@ struct UpdateProgress {
     percent: u8,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn emit(app: &AppHandle, status: &'static str, percent: u8) {
     let _ = app.emit(PROGRESS_EVENT, UpdateProgress { status, percent });
 }
 
-/// Windows x64 installer asset name — the only in-app update target. Matches
-/// the released asset on GitHub.
+/// Repository that publishes this fork's releases. Upstream hard-coded its own
+/// repo here, which made a fork update itself with upstream binaries.
+const RELEASE_REPO: &str = "LouXiaXiaoHei/EchoBird";
+
+/// Windows x64 installer asset name. Must match the name `fork-release.yml`
+/// uploads.
 #[cfg(target_os = "windows")]
 fn installer_asset(version: &str) -> String {
     format!("EchoBird_{version}_Windows_x64-setup.exe")
@@ -44,16 +54,16 @@ fn installer_asset(version: &str) -> String {
 
 /// Download candidate: GitHub releases is the only source now.
 /// `pick_fastest` probes it and falls back to it if unreachable.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn candidate_urls(version: &str, asset: &str) -> Vec<String> {
     vec![format!(
-        "https://github.com/edison7009/EchoBird/releases/download/v{version}/{asset}"
+        "https://github.com/{RELEASE_REPO}/releases/download/v{version}/{asset}"
     )]
 }
 
 /// Time a tiny ranged GET from each URL; return the fastest that responds.
 /// Falls back to the first candidate if none answer within the probe window.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 async fn pick_fastest(urls: &[String]) -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(6))
@@ -79,7 +89,7 @@ async fn pick_fastest(urls: &[String]) -> Option<String> {
     best.map(|(u, _)| u).or_else(|| urls.first().cloned())
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 async fn download_to(app: &AppHandle, url: &str, dest: &Path) -> Result<(), String> {
     use futures_util::StreamExt;
     use std::io::Write;
@@ -159,7 +169,40 @@ pub async fn download_and_install(app: AppHandle, version: String) -> Result<(),
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// macOS disk-image asset name. `fork-release.yml` renames tauri's artifact to
+/// this exact pattern so arm64 and x64 builds stay distinguishable.
+#[cfg(target_os = "macos")]
+fn macos_asset(version: &str) -> String {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    format!("EchoBird_{version}_macOS_{arch}.dmg")
+}
+
+/// macOS: download the disk image into the temp dir (writing to ~/Downloads
+/// would trigger a TCC prompt) and open it in Finder. Unlike Windows we keep
+/// running — the user finishes by dragging the app across, whenever they like.
+#[cfg(target_os = "macos")]
+pub async fn download_and_install(app: AppHandle, version: String) -> Result<(), String> {
+    let asset = macos_asset(&version);
+    let urls = candidate_urls(&version, &asset);
+    emit(&app, "speed_test", 0);
+    let url = pick_fastest(&urls)
+        .await
+        .ok_or_else(|| "no reachable download source".to_string())?;
+    let dest = std::env::temp_dir().join(&asset);
+    download_to(&app, &url, &dest).await?;
+    emit(&app, "launching", 100);
+    std::process::Command::new("open")
+        .arg(&dest)
+        .spawn()
+        .map_err(|e| format!("failed to open {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub async fn download_and_install(_app: AppHandle, _version: String) -> Result<(), String> {
-    Err("in-app update is Windows-only".to_string())
+    Err("in-app update is not available on this platform".to_string())
 }

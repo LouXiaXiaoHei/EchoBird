@@ -1,7 +1,7 @@
 // ChangelogDialog — "更新日志 / Changelog" modal. Opened from the title-bar
 // button (left of Feedback) and auto-opened once on the first launch after an
 // update. Content is the current release's notes read straight from the
-// version manifest (echobird.ai/api/version/index.json); only the section
+// version manifest (this fork's release index.json); only the section
 // matching the active UI locale is shown.
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { X } from 'lucide-react';
@@ -9,20 +9,12 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useI18n } from '../hooks/useI18n';
 import { mdComponents } from '../pages/MotherAgent/mdComponents';
+import { fetchVersionManifest, type VersionManifest } from '../config/release';
 
-const VERSION_MANIFEST_URL = 'https://echobird.ai/api/version/index.json';
-
-interface Manifest {
-  version?: string;
-  releaseDate?: string;
-  // Legacy single-blob notes ("## 中文 / ## English / ## 日本語"), kept for
-  // manifests written before the per-language split.
-  releaseNotes?: string;
-  // Preferred: notes stored per language, keyed by a short language code
-  // ("en" / "zh-cn" / "zh-tw" / "ja") — the marker the manifest author writes.
-  // The app maps its locale to the matching code (see LOCALE_TO_NOTES_CODE).
-  releaseNotesI18n?: Record<string, string>;
-}
+// The manifest shape (including the legacy single-blob `releaseNotes` and the
+// preferred per-language `releaseNotesI18n`) lives in config/release.ts, next
+// to the endpoints that serve it.
+type Manifest = VersionManifest;
 
 // Map an app locale to the manifest's language marker. The manifest uses
 // friendly codes (zh-cn / zh-tw) rather than the app's internal locale ids
@@ -126,10 +118,9 @@ export const ChangelogDialog: React.FC<ChangelogDialogProps> = ({ isOpen, onClos
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(VERSION_MANIFEST_URL);
-        if (!res.ok) throw new Error(String(res.status));
-        const data = (await res.json()) as Manifest;
+        const data = await fetchVersionManifest();
         if (cancelled) return;
+        if (!data) throw new Error('manifest unreachable');
         setManifest(data);
         setStatus('ready');
         loadedRef.current = true;

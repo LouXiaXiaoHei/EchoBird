@@ -22,6 +22,7 @@ import { useBackgroundStore } from '../stores/backgroundStore';
 import { useI18n } from '../hooks/useI18n';
 import * as api from '../api/tauri';
 import { isNewerVersion } from '../utils/version';
+import { RELEASE_PAGE_URL, fetchVersionManifest } from '../config/release';
 import { useThemeStore, type ThemeMode } from '../stores/themeStore';
 import { COLOR_THEMES, type ColorThemeId } from '../data/colorThemes';
 import { useUiScaleStore } from '../stores/uiScaleStore';
@@ -235,26 +236,21 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   }, [isOpen, handleClose]);
 
   // Auto-check for updates when the dialog opens — no manual button. Version
-  // truth is the canonical manifest (echobird.ai/api/version/index.json). Any
+  // truth is the canonical manifest (this fork's release index.json). Any
   // failure (offline / unreachable) silently stays on "latest" — no error UI,
   // just no update offered.
   useEffect(() => {
     if (!isOpen || !appVersion) return;
     let cancelled = false;
     void (async () => {
-      try {
-        const res = await fetch('https://echobird.ai/api/version/index.json');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (cancelled) return;
-        if (data.version && isNewerVersion(data.version, appVersion)) {
-          setLatestVersion(data.version);
-          setUpdateStatus('available');
-        } else {
-          setUpdateStatus('latest');
-        }
-      } catch {
-        /* offline / unreachable — stay on "latest", no update offered */
+      // null = every source unreachable — stay on "latest", no update offered.
+      const manifest = await fetchVersionManifest();
+      if (cancelled || !manifest) return;
+      if (manifest.version && isNewerVersion(manifest.version, appVersion)) {
+        setLatestVersion(manifest.version);
+        setUpdateStatus('available');
+      } else {
+        setUpdateStatus('latest');
       }
     })();
     return () => {
@@ -267,8 +263,11 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   // open the download page in the browser instead.
   const handleUpdate = useCallback(async () => {
     if (!latestVersion) return;
-    const downloadPage = 'https://echobird.ai/';
-    if (!navigator.userAgent.includes('Windows')) {
+    const downloadPage = RELEASE_PAGE_URL;
+    const isWindows = navigator.userAgent.includes('Windows');
+    const isMac = navigator.userAgent.includes('Mac');
+    // Linux packages have no in-app path: hand off to the release page.
+    if (!isWindows && !isMac) {
       await api.openExternal(downloadPage);
       return;
     }
@@ -282,8 +281,14 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
         setInstallPct(p.percent);
       });
       await api.downloadAndInstallUpdate(latestVersion);
-      // Success: the installer launched and the app is about to exit — leave
+      // Windows: the installer launched and the app is about to exit — leave
       // the progress UI as-is until the window closes.
+      // macOS: the .dmg is open in Finder, so there is no exit to wait for —
+      // hand control back and let the user drag the app across.
+      if (isMac) {
+        setInstalling(false);
+        setInstallPhase(null);
+      }
     } catch {
       await api.openExternal(downloadPage);
       setInstalling(false);
