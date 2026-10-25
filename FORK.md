@@ -23,6 +23,24 @@
 2. `cdn.jsdelivr.net/gh/LouXiaXiaoHei/EchoBird@main/docs/api/version/index.json`（国内通常可达）
 3. `raw.githubusercontent.com/...`（权威分支副本）
 
+## 版本号约定
+
+可以用带后缀的版本号，比如 `6.0.7-lxxh-preview`（`src-tauri/tauri.conf.json` 的
+`version` 与 git tag 保持一致即可，`v` 前缀只加在 tag 上）。注意三点：
+
+1. **核心数字要往上走**。semver 里 `6.0.6-lxxh-preview` 比 `6.0.6` **旧**，
+   所以装了上游 6.0.6 的人不会收到更新提示；想让他们看到提示，得写
+   `6.0.7-lxxh-preview` 这类"数字更大 + 后缀"的形式。
+   同一核心号的后缀按 semver 排序：`-preview` < `-preview.2` < `-preview.10`。
+   `isNewerVersion`（`src/utils/version.ts`）已按 semver 实现并有单测覆盖。
+2. **Windows 只打 NSIS，不出 MSI**。WiX 对 MSI 的 ProductVersion 要求严格数字，
+   带后缀会打包失败；NSIS 会把 `VIProductVersion` 强制成数字，后缀不影响。
+   应用内更新也只用 `-setup.exe`。
+3. **macOS 尽量别用后缀**。dmg 里的 `CFBundleShortVersionString` /
+   `CFBundleVersion` 按 Apple 规范应是数字，带后缀在个别系统上可能出现
+   "应用已损坏/无法打开"。如果打了带后缀的包发现 mac 打不开，把 `version`
+   换成纯数字重新出包即可（tag 仍可保留后缀）。
+
 ## 发版流程
 
 1. 改 `src-tauri/tauri.conf.json` 的 `version`（例：`6.0.6` → `6.1.0`），同时把版本号写进 `docs/api/version/index.json` 的 `version` 与 `releaseNotesI18n`（发版日志）。

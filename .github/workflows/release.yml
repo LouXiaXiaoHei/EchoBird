@@ -56,9 +56,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # NSIS only, deliberately no MSI. Two reasons: the in-app updater
+          # downloads the `-setup.exe`, and WiX validates MSI ProductVersion
+          # strictly (numeric x.y.z), so a fork version number carrying a
+          # prerelease suffix — 6.0.7-lxxh-preview — would fail that bundle.
+          # NSIS forces its VIProductVersion numeric and is happy either way.
           - platform: 'windows-latest'
             rust-target: 'x86_64-pc-windows-msvc'
-            args: ''
+            args: '--bundles nsis'
 
           # macOS: native build per architecture. Rosetta 2 only runs the
           # OTHER way (Intel binaries on ARM Macs) — Intel Macs cannot
