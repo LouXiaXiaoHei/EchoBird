@@ -173,6 +173,12 @@ jobs:
     # release counter, version-less updater bundle). Rename every asset on the
     # release in place via the GitHub API — non-destructive, no re-upload.
     needs: release
+    # `always()` matters: a single flaky platform job (or one arch failing to
+    # upload) used to skip renaming for EVERY asset, leaving the release with
+    # tauri's raw names. The in-app updater resolves assets by the labelled
+    # name, so a skipped rename silently breaks updates on the platforms that
+    # built fine. Renaming whatever did upload is what we want.
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: write
