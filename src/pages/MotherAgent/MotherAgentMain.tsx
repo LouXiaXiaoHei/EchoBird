@@ -332,6 +332,11 @@ export function MotherAgentMain() {
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             onKeyDown={(e) => {
+              // IME guard: while a Chinese/Japanese/Korean IME composition is
+              // active, Enter only confirms the candidate — it must never send.
+              // Safari reports keyCode 229 with isComposing already false, so
+              // both checks are required.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 if (!isProcessing) handleChatSend();
