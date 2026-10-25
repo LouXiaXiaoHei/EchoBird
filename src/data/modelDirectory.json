@@ -416,6 +416,30 @@
       "region": "cn"
     },
     {
+      "name": "Command Code",
+      "url": "https://commandcode.ai",
+      "baseUrl": "https://api.commandcode.ai/provider/v1",
+      "anthropicUrl": "https://api.commandcode.ai/provider/v1/messages",
+      "modelId": "deepseek/deepseek-v4-pro",
+      "modelIds": [
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-flash",
+        "deepseek/deepseek-v4.1-flash",
+        "moonshotai/Kimi-K3.1-Pro",
+        "zai-org/GLM-5.3",
+        "Qwen/Qwen3.8-Max",
+        "xiaomi/mimo-v2.6-pro",
+        "minimax/minimax-m3.1-flash",
+        "google/gemini-4-argon",
+        "xai/grok-4.7",
+        "gpt-6-astra",
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-4-5-20251001"
+      ],
+      "region": "global"
+    },
+    {
       "name": "OpenRouter",
       "url": "https://openrouter.ai",
       "baseUrl": "https://openrouter.ai/api/v1",

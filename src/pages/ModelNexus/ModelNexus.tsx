@@ -376,8 +376,14 @@ export function ModelNexusPanel() {
       .getModelDirectory()
       .then((remote) => {
         if (cancelled || !remote) return;
-        setProviders(remote.providers as DirectoryEntry[]);
-        setRelays(remote.relays as DirectoryEntry[]);
+        // Fork: the remote directory never knows about locally added vendors,
+        // so keep the remote order and append bundled-only entries.
+        const mergeDirectory = (bundled: DirectoryEntry[], fetched: DirectoryEntry[]) => {
+          const known = new Set(fetched.map((entry) => entry.name));
+          return [...fetched, ...bundled.filter((entry) => !known.has(entry.name))];
+        };
+        setProviders(mergeDirectory(BUNDLED_PROVIDERS, remote.providers as DirectoryEntry[]));
+        setRelays(mergeDirectory(BUNDLED_RELAYS, remote.relays as DirectoryEntry[]));
       })
       .catch(() => {
         /* keep bundled */
