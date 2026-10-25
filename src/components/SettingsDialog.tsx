@@ -12,6 +12,7 @@ import {
   Power,
   Monitor,
   Gift,
+  Wifi,
 } from 'lucide-react';
 import { getVersion } from '@tauri-apps/api/app';
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
@@ -35,7 +36,13 @@ const LOCALE_OPTIONS = [
   { id: 'ja', glyph: 'あ', label: '日本語' },
 ];
 
-type SettingsTab = 'general' | 'appearance' | 'language';
+type SettingsTab = 'general' | 'appearance' | 'network' | 'language';
+
+const PROXY_KINDS = ['http', 'https', 'socks5'] as const;
+
+// Shared look for the proxy form inputs, matching the rest of the dialog.
+const PROXY_INPUT_CLASS =
+  'w-full h-10 rounded-md border border-cyber-border/50 bg-cyber-surface px-3 text-[13px] text-cyber-text outline-none focus:border-cyber-accent';
 
 const UI_SCALE_TICKS = [70, 80, 90, 100, 110, 120, 130, 140, 150];
 
@@ -85,6 +92,17 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   const scalePercent =
     scalePreference === 'auto' ? Math.round(uiScale.scale * 100) : scalePreference;
   const [dragPercent, setDragPercent] = useState<number | null>(null);
+
+  // Global outbound proxy. Persisted in settings.json; the Rust side rewrites
+  // HTTP_PROXY / HTTPS_PROXY / ALL_PROXY for the whole process so every client
+  // and every spawned agent CLI inherits it.
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyKind, setProxyKind] = useState<(typeof PROXY_KINDS)[number]>('http');
+  const [proxyHost, setProxyHost] = useState('');
+  const [proxyPort, setProxyPort] = useState('');
+  const [proxyUsername, setProxyUsername] = useState('');
+  const [proxyPassword, setProxyPassword] = useState('');
+  const [proxyStatus, setProxyStatus] = useState<'idle' | 'saved' | 'invalid'>('idle');
   const sliderPercent = dragPercent ?? scalePercent;
   const scaleDrag = useRef<{
     screenX: number;
@@ -135,6 +153,15 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
             ? null
             : (settings.closeToTray ?? false)
         );
+        const proxy = settings.networkProxy;
+        if (proxy) {
+          setProxyEnabled(Boolean(proxy.enabled));
+          setProxyKind(proxy.kind === 'https' || proxy.kind === 'socks5' ? proxy.kind : 'http');
+          setProxyHost(proxy.host ?? '');
+          setProxyPort(proxy.port ? String(proxy.port) : '');
+          setProxyUsername(proxy.username ?? '');
+          setProxyPassword(proxy.password ?? '');
+        }
       });
     }
   }, [isOpen]);
@@ -163,6 +190,30 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
       closeWindowBehaviorSet: true,
     });
   }, []);
+
+  // Persist the proxy and let the backend rewrite the process environment, so
+  // requests created from now on already use it.
+  const handleProxySave = useCallback(async () => {
+    const port = Number.parseInt(proxyPort.trim(), 10);
+    const portValid = Number.isInteger(port) && port >= 1 && port <= 65535;
+    if (proxyEnabled && (!proxyHost.trim() || !portValid)) {
+      setProxyStatus('invalid');
+      return;
+    }
+    const settings = await api.getSettings();
+    await api.saveSettings({
+      ...settings,
+      networkProxy: {
+        enabled: proxyEnabled,
+        kind: proxyEnabled ? proxyKind : null,
+        host: proxyEnabled ? proxyHost.trim() : null,
+        port: proxyEnabled ? port : null,
+        username: proxyEnabled ? proxyUsername.trim() || null : null,
+        password: proxyEnabled ? proxyPassword || null : null,
+      },
+    });
+    setProxyStatus('saved');
+  }, [proxyEnabled, proxyKind, proxyHost, proxyPort, proxyUsername, proxyPassword]);
 
   // Close with animation
   const handleClose = useCallback(() => {
@@ -270,6 +321,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
               [
                 ['general', Settings2, t('settings.general')],
                 ['appearance', Palette, t('settings.appearance')],
+                ['network', Wifi, t('settings.network')],
                 ['language', Globe, t('settings.language')],
               ] as const
             ).map(([id, Icon, label]) => (
@@ -620,6 +672,161 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                   locale={locale}
                   onChange={setColorTheme}
                 />
+              </div>
+            ) : activeTab === 'network' ? (
+              <div className="space-y-5">
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <Wifi size={14} className="text-cyber-text-secondary" />
+                    <span className="text-[14px] font-medium text-cyber-text-secondary">
+                      {t('settings.proxyTitle')}
+                    </span>
+                  </div>
+                  <p className="text-[12px] leading-5 text-cyber-text-muted">
+                    {t('settings.proxyDesc')}
+                  </p>
+                </div>
+
+                <div className="h-px bg-cyber-border/50" />
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-[13px] text-cyber-text">{t('settings.proxyEnable')}</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={proxyEnabled}
+                    aria-label={t('settings.proxyEnable')}
+                    onClick={() => {
+                      setProxyEnabled((value) => !value);
+                      setProxyStatus('idle');
+                    }}
+                    className={`relative h-6 w-11 rounded-full transition-colors ${
+                      proxyEnabled ? 'bg-cyber-accent' : 'bg-cyber-border/60'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
+                        proxyEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                <div
+                  className={
+                    proxyEnabled ? 'space-y-4' : 'pointer-events-none space-y-4 opacity-40'
+                  }
+                >
+                  <div className="space-y-2">
+                    <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                      {t('settings.proxyProtocol')}
+                    </span>
+                    <ViewModeTabGroup className="view-mode-tabs flex border border-cyber-border rounded-button overflow-hidden">
+                      {PROXY_KINDS.map((kind) => (
+                        <button
+                          key={kind}
+                          type="button"
+                          onClick={() => {
+                            setProxyKind(kind);
+                            setProxyStatus('idle');
+                          }}
+                          aria-pressed={proxyKind === kind}
+                          className={`view-mode-tab flex-1 h-10 flex items-center justify-center text-[13px] ${
+                            proxyKind === kind
+                              ? 'bg-cyber-elevated text-cyber-text font-semibold'
+                              : 'text-cyber-text-secondary hover:text-cyber-text'
+                          }`}
+                        >
+                          {kind === 'socks5' ? 'SOCKS5' : kind.toUpperCase()}
+                        </button>
+                      ))}
+                    </ViewModeTabGroup>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <label className="flex-1 space-y-2">
+                      <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                        {t('settings.proxyHost')}
+                      </span>
+                      <input
+                        value={proxyHost}
+                        onChange={(event) => {
+                          setProxyHost(event.target.value);
+                          setProxyStatus('idle');
+                        }}
+                        placeholder="127.0.0.1"
+                        className={PROXY_INPUT_CLASS}
+                      />
+                    </label>
+                    <label className="w-[120px] space-y-2">
+                      <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                        {t('settings.proxyPort')}
+                      </span>
+                      <input
+                        value={proxyPort}
+                        onChange={(event) => {
+                          setProxyPort(event.target.value);
+                          setProxyStatus('idle');
+                        }}
+                        placeholder="7890"
+                        inputMode="numeric"
+                        className={PROXY_INPUT_CLASS}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <label className="flex-1 space-y-2">
+                      <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                        {t('settings.proxyUsername')}
+                      </span>
+                      <input
+                        value={proxyUsername}
+                        onChange={(event) => setProxyUsername(event.target.value)}
+                        autoComplete="off"
+                        className={PROXY_INPUT_CLASS}
+                      />
+                    </label>
+                    <label className="flex-1 space-y-2">
+                      <span className="text-[12px] font-semibold text-cyber-text-secondary">
+                        {t('settings.proxyPassword')}
+                      </span>
+                      <input
+                        type="password"
+                        value={proxyPassword}
+                        onChange={(event) => setProxyPassword(event.target.value)}
+                        autoComplete="off"
+                        className={PROXY_INPUT_CLASS}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                {proxyStatus === 'invalid' && (
+                  <p role="alert" className="text-[13px] text-red-400">
+                    {t('settings.proxyInvalid')}
+                  </p>
+                )}
+                {proxyStatus === 'saved' && (
+                  <p role="status" className="text-[13px] text-cyber-accent">
+                    {t('settings.proxySaved')}
+                  </p>
+                )}
+
+                <div className="h-px bg-cyber-border/50" />
+
+                <div className="flex items-center justify-between gap-4">
+                  <span className="max-w-[380px] text-[12px] leading-5 text-cyber-text-muted">
+                    {t('settings.proxyRestart')}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleProxySave}
+                    className="h-9 px-4 text-[13px] font-semibold border border-cyber-accent/50 bg-cyber-surface text-cyber-accent hover:border-cyber-accent transition-colors rounded-button"
+                  >
+                    {t('settings.proxySave')}
+                  </button>
+                </div>
               </div>
             ) : (
               <div className="grid grid-cols-2 gap-2">

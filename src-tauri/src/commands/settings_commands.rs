@@ -2,6 +2,27 @@ use crate::utils::platform::echobird_dir;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+/// Global outbound proxy, edited in Settings → 网络.
+///
+/// `kind` is `http` | `https` | `socks5`. Kept as plain strings/numbers so the
+/// front end can round-trip a half-filled form without validation errors —
+/// `network_proxy::apply` ignores incomplete settings instead of failing.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NetworkProxySettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppSettings {
     #[serde(default)]
@@ -22,6 +43,10 @@ pub struct AppSettings {
     // settings.json small.
     #[serde(default, rename = "displayName")]
     pub display_name: Option<String>,
+    // Global outbound proxy (Settings → 网络). Applied to the process
+    // environment so reqwest clients and spawned agent CLIs inherit it.
+    #[serde(default, rename = "networkProxy")]
+    pub network_proxy: Option<NetworkProxySettings>,
 }
 
 fn settings_path() -> std::path::PathBuf {
@@ -72,6 +97,11 @@ pub fn save_settings(settings: AppSettings, app: tauri::AppHandle) -> Result<(),
             crate::rebuild_tray_menu(&app);
         }
     }
+
+    // Re-apply the global proxy so the change takes effect without waiting for
+    // a restart. Clients created from now on use it; already-built ones keep
+    // the previous value until the app restarts (the UI says so).
+    crate::services::network_proxy::apply(&settings);
 
     Ok(())
 }

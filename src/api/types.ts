@@ -165,12 +165,29 @@ export interface ApplyModelInput {
 
 // ─── App Settings Types ───
 
+export type ProxyKind = 'http' | 'https' | 'socks5';
+
+/**
+ * Global outbound proxy (Settings → 网络). The backend converts this into
+ * HTTP_PROXY / HTTPS_PROXY / ALL_PROXY so both EchoBird's own requests and the
+ * agent CLIs it launches use it. Loopback is always excluded.
+ */
+export interface NetworkProxySettings {
+  enabled?: boolean;
+  kind?: ProxyKind | null;
+  host?: string | null;
+  port?: number | null;
+  username?: string | null;
+  password?: string | null;
+}
+
 export interface AppSettings {
   locale?: string;
   themeMode?: 'light' | 'dark';
   colorTheme?: string;
   closeToTray?: boolean | null; // null = always ask, true = minimize to tray, false = quit directly
   closeWindowBehaviorSet?: boolean; // Track if user has made a choice about close behavior
+  networkProxy?: NetworkProxySettings;
 }
 
 // ─── Store Model Types ───

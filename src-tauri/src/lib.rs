@@ -814,6 +814,11 @@ pub fn run() {
         .manage(services::agent_loop::create_session_map())
         .manage(services::parasite::create_parasite_sessions())
         .setup(move |app| {
+            // Apply the persisted global proxy before anything can build an
+            // HTTP client or spawn a child process, so the whole session — and
+            // every agent CLI EchoBird launches — uses it.
+            services::network_proxy::apply_persisted();
+
             // Clean up orphaned llama-server from a previous EchoBird session.
             kill_stale_llama_server();
             log::info!("[Setup] Cleaned up any leftover llama-server processes");

@@ -59,6 +59,7 @@ pub mod model_manager;
 pub(crate) mod msix;
 pub mod musecode_proxy;
 pub(crate) mod native_account_files;
+pub mod network_proxy;
 pub mod parasite;
 pub mod process_manager;
 pub mod pulse_archive;

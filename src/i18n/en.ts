@@ -230,6 +230,21 @@ const en: Translations = {
   // Settings
   'settings.title': 'SETTINGS',
   'settings.general': 'GENERAL',
+  'settings.network': 'NETWORK',
+  'settings.proxyTitle': 'Proxy',
+  'settings.proxyDesc':
+    'Route EchoBird outbound requests — and the agent CLIs it launches — through a proxy. Local services always bypass it.',
+  'settings.proxyEnable': 'Use a proxy',
+  'settings.proxyProtocol': 'TYPE',
+  'settings.proxyHost': 'HOST',
+  'settings.proxyPort': 'PORT',
+  'settings.proxyUsername': 'USERNAME (OPTIONAL)',
+  'settings.proxyPassword': 'PASSWORD (OPTIONAL)',
+  'settings.proxySave': 'SAVE',
+  'settings.proxySaved': 'Saved. Restart EchoBird so every request uses it.',
+  'settings.proxyInvalid': 'Enter a host and a port between 1 and 65535.',
+  'settings.proxyRestart':
+    'New requests use the proxy immediately; restart EchoBird to apply it everywhere.',
   'settings.version': 'VERSION',
   'settings.language': 'LANGUAGE',
   'settings.appearance': 'APPEARANCE',
