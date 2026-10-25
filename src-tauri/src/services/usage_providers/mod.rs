@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod commandcode;
 pub mod deepseek;
 pub mod kimi;
 pub mod minimax;
@@ -141,6 +142,13 @@ async fn send_usage_request(request: reqwest::RequestBuilder) -> Result<serde_js
     let response = request
         .header("Accept", "application/json")
         .header("Content-Type", "application/json")
+        // `reqwest::Client::new()` sends no User-Agent, and Cloudflare-fronted
+        // usage APIs (api.commandcode.ai, opencode.ai) answer such a request
+        // with `403 error code: 1010` — an empty UA is treated as a bot.
+        .header(
+            "User-Agent",
+            concat!("EchoBird/", env!("CARGO_PKG_VERSION")),
+        )
         .timeout(std::time::Duration::from_secs(15))
         .send()
         .await
@@ -174,6 +182,7 @@ pub trait UsageProvider {
 
 /// Provider enum - concrete type wrapper
 pub enum Provider {
+    CommandCode(commandcode::CommandCodeProvider),
     DeepSeek(deepseek::DeepSeekProvider),
     Kimi(kimi::KimiProvider),
     MiniMax(minimax::MiniMaxProvider),
@@ -191,6 +200,7 @@ pub enum Provider {
 impl Provider {
     pub async fn query_usage(&self, api_key: &str, base_url: &str) -> Result<UsageResult, String> {
         match self {
+            Provider::CommandCode(p) => p.query_usage(api_key, base_url).await,
             Provider::DeepSeek(p) => p.query_usage(api_key, base_url).await,
             Provider::Kimi(p) => p.query_usage(api_key, base_url).await,
             Provider::MiniMax(p) => p.query_usage(api_key, base_url).await,
@@ -243,6 +253,9 @@ pub fn detect_provider(base_url: &str) -> Option<Provider> {
     }
     if volcengine::VolcengineProvider.can_handle(&url) {
         return Some(Provider::Volcengine(volcengine::VolcengineProvider));
+    }
+    if commandcode::CommandCodeProvider.can_handle(&url) {
+        return Some(Provider::CommandCode(commandcode::CommandCodeProvider));
     }
     if relay_subscription::RelaySubscriptionProvider.can_handle(&url) {
         return Some(Provider::RelaySubscription(

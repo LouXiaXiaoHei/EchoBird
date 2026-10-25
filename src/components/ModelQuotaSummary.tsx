@@ -14,9 +14,18 @@ export function ModelQuotaSummary({
     usage.quotas.some((quota) => quota.balance == null && !!quota.period && quota.resetAt > 0)
   );
   const balance = usage.quotas.find((quota) => quota.balance != null);
+  const compact = compactModelUsage(usage, now);
+  // Quota windows are stored as used percentages but displayed as what is left,
+  // so the bare number ("100% 4h59m") reads like a window has been spent. Label
+  // it with the same wording the aria label uses.
+  const windowsLabel = usage.quotas.some((quota) => quota.balance == null && quota.period)
+    ? `${t('model.quota.remaining')} `
+    : '';
   const summary = balance
     ? `${t('model.balance')}${balance.balance!.toFixed(2)}`
-    : compactModelUsage(usage, now);
+    : compact
+      ? `${windowsLabel}${compact}`
+      : '';
   const label = balance
     ? summary
     : usage.quotas

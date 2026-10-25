@@ -41,7 +41,9 @@ describe('multi-window model quotas', () => {
         />
       );
     });
-    expect(JSON.stringify(renderer.toJSON())).toContain('1% 4h8m(80%)');
+    // Windows are stored as used percentages but shown as what is left, so the
+    // summary must say so instead of leaving a bare "1%" that reads as usage.
+    expect(JSON.stringify(renderer.toJSON())).toContain('model.quota.remaining 1% 4h8m(80%)');
     act(() => {
       vi.advanceTimersByTime(60_000);
     });
