@@ -1274,6 +1274,10 @@ async fn send_api_request(
     if let Some(user_agent) = headers.get(header::USER_AGENT) {
         request = request.header(header::USER_AGENT, user_agent.clone());
     }
+    // OpenCode Go rejects any request that lacks the CLI's session headers
+    // unless it comes from the app itself. Applied last so the Go user agent
+    // wins over the caller's.
+    request = zen_free::apply_go_headers(request, headers, &body, &candidate.base_url);
     let upstream = request.send().await.map_err(|e| e.to_string())?;
     let status = upstream.status();
     let response_headers = upstream.headers().clone();

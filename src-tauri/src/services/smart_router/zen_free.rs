@@ -172,6 +172,45 @@ fn inject_core_tools(body: &mut Value, responses: bool) {
     }
 }
 
+/// True for the paid OpenCode "Go" plan, which is served from the same origin
+/// as Zen (`opencode.ai`) under the `/zen/go` prefix.
+///
+/// Go rejects API-key traffic that lacks the CLI's session headers with
+/// `Request is missing x-opencode-session`. The keyless Zen path below sets
+/// them itself; API-key traffic goes through `send_api_request`, which applies
+/// them via [`apply_go_headers`].
+pub(super) fn is_opencode_go(base_url: &str) -> bool {
+    url::Url::parse(base_url).ok().is_some_and(|url| {
+        url.host_str() == Some("opencode.ai")
+            && url.path().trim_end_matches('/').starts_with("/zen/go")
+    })
+}
+
+/// Inject the session headers every current OpenCode client sends, so a Go
+/// request originating from EchoBird's generic API-key path is accepted.
+pub(super) fn apply_go_headers(
+    request: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    body: &Value,
+    base_url: &str,
+) -> reqwest::RequestBuilder {
+    if !is_opencode_go(base_url) {
+        return request;
+    }
+    let session = session_id(headers, body);
+    request
+        .header("x-opencode-project", "global")
+        .header("x-opencode-session", &session)
+        .header("x-opencode-session-id", &session)
+        .header("x-opencode-request", opencode_id("msg", false))
+        .header("x-opencode-client", "cli")
+        .header(header::ACCEPT, "*/*")
+        .header(
+            header::USER_AGENT,
+            "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+        )
+}
+
 fn session_id(headers: &HeaderMap, body: &Value) -> String {
     let signal = [
         "x-opencode-session",
