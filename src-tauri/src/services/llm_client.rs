@@ -270,6 +270,7 @@ impl LlmClient {
         let http = self.http.clone();
         let url_owned = url.clone();
         let body_owned = body.clone();
+        let go_seed = super::smart_router::conversation_seed(&body);
         let make_request = move || -> Result<reqwest::RequestBuilder, String> {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -288,6 +289,11 @@ impl LlmClient {
             );
             headers.insert("X-Title", HeaderValue::from_static("EchoBird"));
             headers.insert("X-OpenRouter-Title", HeaderValue::from_static("EchoBird"));
+            // OpenCode Go rejects traffic that lacks the CLI's session headers
+            // with `Request is missing x-opencode-session`. This path talks to
+            // the provider directly, so the smart router cannot add them.
+            let seed = go_seed.clone();
+            super::smart_router::apply_go_headers_to(&mut headers, &url_owned, &seed);
             Ok(http.post(&url_owned).headers(headers).json(&body_owned))
         };
 
@@ -537,6 +543,7 @@ impl LlmClient {
         let http = self.http.clone();
         let url_owned = url.clone();
         let body_owned = body.clone();
+        let go_seed = super::smart_router::conversation_seed(&body);
         let make_request = move || -> Result<reqwest::RequestBuilder, String> {
             let mut headers = HeaderMap::new();
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -548,6 +555,9 @@ impl LlmClient {
                 HeaderValue::from_static("https://echobird.ai"),
             );
             headers.insert("X-Title", HeaderValue::from_static("EchoBird"));
+            // See the OpenAI path above: Go also fronts the /messages endpoint.
+            let seed = go_seed.clone();
+            super::smart_router::apply_go_headers_to(&mut headers, &url_owned, &seed);
             Ok(http.post(&url_owned).headers(headers).json(&body_owned))
         };
 

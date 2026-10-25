@@ -6,6 +6,13 @@ mod server;
 
 pub(crate) use server::{cancel_probe, probe_candidate, ProbeResult};
 
+// OpenCode Go requires the CLI's session headers on every request. The smart
+// router applies them itself; the direct callers (agent chat, Model Nexus test)
+// import these helpers.
+pub(crate) use server::zen_free::{
+    apply_go_headers_to, apply_go_headers_to_request, conversation_seed,
+};
+
 #[cfg(test)]
 pub(crate) use server::route_live_account_probe;
 

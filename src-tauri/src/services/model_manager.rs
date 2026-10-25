@@ -915,6 +915,14 @@ pub async fn test_model(internal_id: &str, prompt: &str, protocol: &str) -> Test
                 .header("anthropic-version", "2023-06-01");
         }
 
+        // Go fronts /messages as well and rejects requests without the CLI
+        // session headers, so the test would report a false failure.
+        let req = crate::services::smart_router::apply_go_headers_to_request(
+            req,
+            &url,
+            &crate::services::smart_router::conversation_seed(&body),
+        );
+
         match req.json(&body).send().await {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as f64;
@@ -959,6 +967,13 @@ pub async fn test_model(internal_id: &str, prompt: &str, protocol: &str) -> Test
                 } else {
                     let status = resp.status().as_u16();
                     let error_text = resp.text().await.unwrap_or_default();
+                    log::warn!(
+                        "[ModelManager] {} test failed: {} HTTP {}: {}",
+                        protocol,
+                        model.name,
+                        status,
+                        error_text
+                    );
                     TestResult {
                         success: false,
                         latency,
@@ -1003,14 +1018,18 @@ pub async fn test_model(internal_id: &str, prompt: &str, protocol: &str) -> Test
             "temperature": 0.7
         });
 
-        match client
+        let req = client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", usable_key))
-            .json(&body)
-            .send()
-            .await
-        {
+            .header("Authorization", format!("Bearer {}", usable_key));
+        // Same reason as the Anthropic branch above.
+        let req = crate::services::smart_router::apply_go_headers_to_request(
+            req,
+            &url,
+            &crate::services::smart_router::conversation_seed(&body),
+        );
+
+        match req.json(&body).send().await {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as f64;
                 if resp.status().is_success() {
@@ -1044,6 +1063,13 @@ pub async fn test_model(internal_id: &str, prompt: &str, protocol: &str) -> Test
                 } else {
                     let status = resp.status().as_u16();
                     let error_text = resp.text().await.unwrap_or_default();
+                    log::warn!(
+                        "[ModelManager] {} test failed: {} HTTP {}: {}",
+                        protocol,
+                        model.name,
+                        status,
+                        error_text
+                    );
                     TestResult {
                         success: false,
                         latency,

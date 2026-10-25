@@ -22,7 +22,7 @@ use crate::models::model::AccountProvider;
 use crate::services::model_manager;
 
 #[path = "zen_free.rs"]
-mod zen_free;
+pub(crate) mod zen_free;
 
 #[path = "workbuddy_reset.rs"]
 mod workbuddy_reset;

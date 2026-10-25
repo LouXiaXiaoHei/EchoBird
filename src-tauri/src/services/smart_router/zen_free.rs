@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::Response;
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -186,6 +186,27 @@ pub(super) fn is_opencode_go(base_url: &str) -> bool {
     })
 }
 
+/// Go inspects the user agent as well as the session headers, so it is part of
+/// the set rather than a nicety.
+const GO_USER_AGENT: &str = "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+
+/// The header set every current OpenCode client sends to Go.
+fn go_header_map(session: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert("x-opencode-project", HeaderValue::from_static("global"));
+    if let Ok(value) = HeaderValue::from_str(session) {
+        headers.insert("x-opencode-session", value.clone());
+        headers.insert("x-opencode-session-id", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&opencode_id("msg", false)) {
+        headers.insert("x-opencode-request", value);
+    }
+    headers.insert("x-opencode-client", HeaderValue::from_static("cli"));
+    headers.insert(header::ACCEPT, HeaderValue::from_static("*/*"));
+    headers.insert(header::USER_AGENT, HeaderValue::from_static(GO_USER_AGENT));
+    headers
+}
+
 /// Inject the session headers every current OpenCode client sends, so a Go
 /// request originating from EchoBird's generic API-key path is accepted.
 pub(super) fn apply_go_headers(
@@ -197,18 +218,42 @@ pub(super) fn apply_go_headers(
     if !is_opencode_go(base_url) {
         return request;
     }
-    let session = session_id(headers, body);
-    request
-        .header("x-opencode-project", "global")
-        .header("x-opencode-session", &session)
-        .header("x-opencode-session-id", &session)
-        .header("x-opencode-request", opencode_id("msg", false))
-        .header("x-opencode-client", "cli")
-        .header(header::ACCEPT, "*/*")
-        .header(
-            header::USER_AGENT,
-            "opencode/1.19.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
-        )
+    request.headers(go_header_map(&session_id(headers, body)))
+}
+
+/// Same injection for callers that do not sit behind the smart router: the
+/// agent chat client and the Model Nexus test button reach the provider
+/// directly, so they add the headers to their own map. No-op unless
+/// `base_url` is the Go origin, so it is safe to call unconditionally.
+pub(crate) fn apply_go_headers_to(headers: &mut HeaderMap, base_url: &str, seed: &str) {
+    if !is_opencode_go(base_url) {
+        return;
+    }
+    // `HeaderMap` iteration yields `Option<HeaderName>`; `extend` merges it
+    // without dropping the existing auth headers the caller already set.
+    headers.extend(go_header_map(&session_for(seed)));
+}
+
+/// [`reqwest::RequestBuilder`] flavour of [`apply_go_headers_to`].
+pub(crate) fn apply_go_headers_to_request(
+    request: reqwest::RequestBuilder,
+    base_url: &str,
+    seed: &str,
+) -> reqwest::RequestBuilder {
+    if !is_opencode_go(base_url) {
+        return request;
+    }
+    request.headers(go_header_map(&session_for(seed)))
+}
+
+/// Session seed for direct callers: the first user turn, so every request of
+/// one conversation keeps the same upstream session id.
+pub(crate) fn conversation_seed(body: &Value) -> String {
+    body["messages"]
+        .as_array()
+        .and_then(|messages| messages.iter().find(|message| message["role"] == "user"))
+        .map(|message| message["content"].to_string())
+        .unwrap_or_else(|| opencode_id("ses", true))
 }
 
 fn session_id(headers: &HeaderMap, body: &Value) -> String {
@@ -232,6 +277,12 @@ fn session_id(headers: &HeaderMap, body: &Value) -> String {
     let Some(signal) = signal else {
         return opencode_id("ses", true);
     };
+    session_for(&signal)
+}
+
+/// Map one conversation signal to a stable session id, remembering the last
+/// 1000 so a long conversation keeps a single upstream session.
+fn session_for(signal: &str) -> String {
     let key = format!("{:x}", Sha256::digest(signal.as_bytes()));
     let sessions = SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut sessions = sessions.lock().unwrap();
@@ -259,6 +310,60 @@ fn opencode_id(prefix: &str, descending: bool) -> String {
         .map(|byte| ALPHABET[(*byte as usize) % ALPHABET.len()] as char)
         .collect();
     format!("{prefix}_{stamp:012x}{tail}")
+}
+
+/// The Go gate is a pure header check, so it can be verified without a key:
+/// a request carrying this set gets past routing and fails only on the
+/// credential.
+#[test]
+fn go_headers_carry_every_field_the_gate_requires() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer key"),
+    );
+    apply_go_headers_to(&mut headers, "https://opencode.ai/zen/go/v1", "seed-1");
+
+    for name in [
+        "x-opencode-project",
+        "x-opencode-session",
+        "x-opencode-session-id",
+        "x-opencode-request",
+        "x-opencode-client",
+    ] {
+        assert!(headers.contains_key(name), "missing {name}");
+    }
+    // The caller's own credential must survive the merge.
+    assert_eq!(headers[header::AUTHORIZATION], "Bearer key");
+    // One conversation keeps one session id across requests.
+    let session = headers["x-opencode-session"].clone();
+    let mut second = HeaderMap::new();
+    apply_go_headers_to(&mut second, "https://opencode.ai/zen/go/v1", "seed-1");
+    assert_eq!(second["x-opencode-session"], session);
+}
+
+#[test]
+fn go_headers_stay_off_other_providers() {
+    for base in [
+        "https://opencode.ai/zen/v1",
+        "https://api.commandcode.ai/provider/v1",
+        "https://api.openai.com/v1",
+    ] {
+        let mut headers = HeaderMap::new();
+        apply_go_headers_to(&mut headers, base, "seed-1");
+        assert!(headers.is_empty(), "{base} must not receive Go headers");
+    }
+}
+
+#[test]
+fn conversation_seed_survives_a_growing_message_list() {
+    let first = json!({"messages": [{"role": "user", "content": "hello"}]});
+    let later = json!({"messages": [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "next"},
+    ]});
+    assert_eq!(conversation_seed(&first), conversation_seed(&later));
 }
 
 #[cfg(test)]
