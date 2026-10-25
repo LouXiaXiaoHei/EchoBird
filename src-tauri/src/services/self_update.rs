@@ -43,6 +43,7 @@ fn emit(app: &AppHandle, status: &'static str, percent: u8) {
 
 /// Repository that publishes this fork's releases. Upstream hard-coded its own
 /// repo here, which made a fork update itself with upstream binaries.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 const RELEASE_REPO: &str = "LouXiaXiaoHei/EchoBird";
 
 /// Windows x64 installer asset name. Must match the name `fork-release.yml`
