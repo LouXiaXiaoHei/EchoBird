@@ -1,6 +1,7 @@
 {
   "version": "6.0.6-lxxh-preview",
   "releaseDate": "2026-10-25",
+  "releaseNotes": "Release v6.0.6-lxxh-preview",
   "releaseNotesI18n": {
     "zh-cn": "### 自用 fork 首个预览版\n\n基于上游 6.0.6，额外包含：\n\n- **设置 → 网络**：全局出站代理，支持 HTTP / HTTPS / SOCKS5（可带账号密码），\n  EchoBird 启动的 Agent CLI、npm、git 等子进程一并生效，本机地址自动排除。\n- **模型管理**：新增 Command Code 供应商；联网时本地新增的供应商不再被远端目录覆盖。\n- **OpenCode Go**：API Key 请求补齐 `x-opencode-session` 系列头，不再报\n  \"Request is missing x-opencode-session\"。\n- **输入框**：中文 / 日文 / 韩文输入法选词时按回车不再误发送消息。\n- 版本检查与更新改为跟随本仓库的 release，macOS 也支持应用内更新。\n\nmacOS 包未签名，首次打开若提示损坏，执行：\n`xattr -dr com.apple.quarantine /Applications/EchoBird.app`",
     "en": "### First preview build of the personal fork\n\nBased on upstream 6.0.6, plus:\n\n- **Settings → Network**: global outbound proxy (HTTP / HTTPS / SOCKS5, optional\n  credentials) applied to EchoBird's own requests and every child process it\n  spawns (agent CLIs, npm, git). Loopback addresses are always excluded.\n- **Model Nexus**: new Command Code provider; locally added providers are no\n  longer dropped when the remote directory is reachable.\n- **OpenCode Go**: API-key requests now send the `x-opencode-session` headers.\n- **Composer**: Enter no longer sends while an IME candidate window is open\n  (Chinese / Japanese / Korean input).\n- Update checks and in-app updates now follow this fork's releases; macOS\n  supports in-app updates too.\n\nThe macOS build is unsigned. If macOS reports the app is damaged, run:\n`xattr -dr com.apple.quarantine /Applications/EchoBird.app`",
