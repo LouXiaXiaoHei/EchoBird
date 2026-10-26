@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/edison7009/EchoBird/releases">
-    <img src="https://img.shields.io/github/v/release/edison7009/EchoBird?style=flat-square&color=D97757" alt="Release" />
+    <img src="https://img.shields.io/github/v/release/LouXiaXiaoHei/EchoBird?style=flat-square&color=D97757" alt="Release" />
   </a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=flat-square" alt="Platform" />
   <img src="https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust-orange?style=flat-square" alt="Tauri + Rust" />
@@ -17,14 +17,24 @@
 
 <p align="center">
   <a href="https://echobird.ai">Website</a> ·
-  <a href="https://github.com/edison7009/EchoBird/releases/latest">Download</a> ·
+  <a href="https://github.com/LouXiaXiaoHei/EchoBird/releases">Download</a> ·
+  <a href="https://github.com/edison7009/EchoBird">Upstream</a> ·
   <a href="https://echobird.ai/support/">☕ Buy a coffee</a> ·
   <a href="README.zh-CN.md">中文 README</a>
 </p>
 
-> **Note** — This repository is just one of several download channels
-> and an issue tracker. For product information, announcements, and
-> commercial inquiries, visit [echobird.ai](https://echobird.ai).
+> **This is a personal fork.** Forked from
+> [edison7009/EchoBird](https://github.com/edison7009/EchoBird); all credit for the
+> product belongs upstream. This fork adds a handful of self-hosted conveniences
+> (global outbound proxy, Command Code support, releases and in-app updates served
+> from this repository, IME-safe Enter). Releases here are **unsigned preview
+> builds**, versioned `x.y.z-lxxh-preview.N`.
+>
+> - Full list of what differs from upstream: **[FORK.md](FORK.md)**
+> - What changed in each version: **[CHANGELOG.md](CHANGELOG.md)**
+> - Official product, announcements and commercial inquiries:
+>   [echobird.ai](https://echobird.ai) ·
+>   [edison7009/EchoBird](https://github.com/edison7009/EchoBird)
 
 ---
 

@@ -1,7 +1,13 @@
 # EchoBird fork — 本仓库说明
 
-这是 [edison7009/EchoBird](https://github.com/edison7009/EchoBird) 的个人自用 fork。
-除了上游功能，只加了下面这些"自用 + 自发布"需要的改动，方便自己出安装包、自己收更新。
+这是 [edison7009/EchoBird](https://github.com/edison7009/EchoBird) 的个人自用 fork
+（上游仓库：<https://github.com/edison7009/EchoBird>）。除了上游功能，只加了下面这些
+"自用 + 自发布"需要的改动，方便自己出安装包、自己收更新。
+
+- 与上游的差异：本文档
+- **每个版本改了什么**：[CHANGELOG.md](CHANGELOG.md)
+- 本仓库的 release 均为**未签名预览版**，版本号形如 `x.y.z-lxxh-preview.N`
+- 产品本身、公告与商业询价，请看上游 [echobird.ai](https://echobird.ai)
 
 ## 相对上游改了哪些
 
@@ -9,7 +15,10 @@
 | --- | --- |
 | 设置 → **网络**：全局出站代理（HTTP / HTTPS / SOCKS5，可带账号密码） | `src/components/SettingsDialog.tsx`、`src-tauri/src/services/network_proxy.rs` |
 | 模型管理新增 **Command Code** 供应商，并让本地新增供应商在联网时也不被远端目录覆盖 | `src/data/modelDirectory.json`、`src/pages/ModelNexus/ModelNexus.tsx` |
-| **OpenCode Go** 的 API Key 请求补齐 `x-opencode-session` 系列头 | `src-tauri/src/services/smart_router/zen_free.rs` |
+| **OpenCode Go** 的 API Key 请求补齐 `x-opencode-session` 系列头（中转 + 直连聊天 + 模型测试） | `src-tauri/src/services/smart_router/zen_free.rs`、`llm_client.rs`、`model_manager.rs` |
+| **Command Code** 用量查询（走 `/alpha/billing` 路由，5 小时 / 每周 / 月度） | `src-tauri/src/services/usage_providers/commandcode.rs` |
+| 用量请求统一带 `User-Agent`（否则 Cloudflare 返回 `403 error code: 1010`） | `src-tauri/src/services/usage_providers/mod.rs` |
+| 窗口配额文案补「剩余」标签，避免 `100% 4h59m` 被读成已用满 | `src/components/ModelQuotaSummary.tsx` |
 | 中文 / 日文 / 韩文输入法选词时按回车不再误发送 | `src/pages/MotherAgent/MotherAgentMain.tsx` |
 | 版本检查 / 更新日志 / 应用内更新全部指向**本仓库**的 release | `src/config/release.ts`、`src-tauri/src/services/self_update.rs` |
 | macOS 也能在应用内更新（下载 dmg 并交给 Finder） | `src-tauri/src/services/self_update.rs` |

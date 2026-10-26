@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/edison7009/EchoBird/releases">
-    <img src="https://img.shields.io/github/v/release/edison7009/EchoBird?style=flat-square&color=D97757" alt="Release" />
+    <img src="https://img.shields.io/github/v/release/LouXiaXiaoHei/EchoBird?style=flat-square&color=D97757" alt="Release" />
   </a>
   <img src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20macOS%20%7C%20Linux-blue?style=flat-square" alt="平台" />
   <img src="https://img.shields.io/badge/%E6%8A%80%E6%9C%AF-Tauri%20%2B%20Rust-orange?style=flat-square" alt="Tauri + Rust" />
@@ -17,13 +17,23 @@
 
 <p align="center">
   <a href="https://echobird.ai">官网</a> ·
-  <a href="https://github.com/edison7009/EchoBird/releases/latest">下载</a> ·
+  <a href="https://github.com/LouXiaXiaoHei/EchoBird/releases">下载</a> ·
+  <a href="https://github.com/edison7009/EchoBird">上游仓库</a> ·
   <a href="https://echobird.ai/support/">☕ 请喝咖啡</a> ·
   <a href="README.md">English README</a>
 </p>
 
-> **说明** —— 本仓库仅为下载渠道与 issue 反馈渠道之一,产品信息、
-> 公告、商业询价请访问 [echobird.ai](https://echobird.ai)。
+> **这是个人自用 fork。** 来自
+> [edison7009/EchoBird](https://github.com/edison7009/EchoBird),产品本身的一切
+> 归功于上游。本仓库只加了几项"自用 + 自发布"的便利(全局出站代理、Command Code
+> 支持、更新走本仓库的 release、输入法选词回车不误发),发布的是**未签名的预览版**,
+> 版本号形如 `x.y.z-lxxh-preview.N`。
+>
+> - 与上游的完整差异:**[FORK.md](FORK.md)**
+> - 每个版本改了什么:**[CHANGELOG.md](CHANGELOG.md)**
+> - 官方产品、公告与商业询价:
+>   [echobird.ai](https://echobird.ai) ·
+>   [edison7009/EchoBird](https://github.com/edison7009/EchoBird)
 
 ---
 
