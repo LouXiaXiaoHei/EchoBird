@@ -8,6 +8,51 @@ fork。与上游的整体差异见 [FORK.md](FORK.md)；这里按版本记录**�
 
 ---
 
+## 6.0.6-lxxh-preview.4 — 2026-10-27
+
+**修复：智能接入在慢请求上"自伤"——一次慢响应变成几分钟的 503**
+
+现象：`503 All Auto Router models are cooling down`，之后无论怎么重试都是
+503，过一会儿自己又好了。日志里的真实链条：
+
+```
+08:22:40  m-498cac timed out before response headers
+08:22:55  m-1e235a timed out before response headers   ← 比上一条晚 15 秒整
+08:22:55  all candidates failed: [transient, transient]
+08:23:13  all candidates failed: []                    ← 两个都在冷却，零次尝试
+```
+
+三处根因，逐一修掉（`src-tauri/src/services/smart_router/server.rs`）：
+
+1. **超时死线不随请求体增长**（`RoutePolicy::for_request` 新增）
+   原来 `header_timeout = 30s` 固定；200+ 条消息、数百 KB 的上下文在上游
+   prefill 阶段本来就常超过 30 秒，于是"慢"被判成"挂"。现在按序列化后的请求体
+   放大：每 KiB +250ms，30s 起、120s 封顶（`HEADER_TIMEOUT_PER_KB` /
+   `MAX_HEADER_TIMEOUT`）。
+2. **总预算不够一次完整的 failover**（`MAX_TIME_BUDGET`）
+   原来 `time_budget = 45s`，第一个候选吃掉 30s 后，第二个只剩 15 秒——注定
+   超时，日志里两条超时正好差 15 秒。现在预算至少是 `header_timeout × 候选数`，
+   10 分钟封顶。
+3. **流式请求的首包死线从发请求时开始算**
+   流式分支此前用 `header_timeout.min(first_content_timeout)`（30s）压住等待
+   响应头，且首包死线在 `send_candidate` 之前就开始计时。现在等待响应头只受
+   放大后的 `header_timeout` 约束，首包死线改在**收到响应头之后**才开始计
+   `first_content_timeout`。
+
+另外两处行为调整：
+
+- **超时不再逐次翻倍冷却**（`mark_slow_attempt`）：超时记为慢请求，固定 30 秒
+  冷却、不累加 `consecutiveFailures`，不会再从 30s 阶梯爬到 5 分钟。
+- **全部候选冷却时不再直接 503**（`soonest_recovering` +
+  `try_begin_attempt_despite_cooldown`）：挑最早解冻的那个候选试一次，只有它也
+  失败才返回 503。绑定续写（`previous_response_id`）仍只走原候选。
+
+验证：`cargo test --lib` 1900 通过（新增 3 条：死线按体量放大且预算覆盖每个
+候选、慢请求不升级冷却、全冷却时回落到最早解冻的候选）、`cargo fmt --check`
+干净、`cargo clippy` 无新增告警。修复前后 `.2/.3` 都在现场复现过，日志见上。
+
+---
+
 ## 6.0.6-lxxh-preview.3 — 2026-10-25
 
 **新增：智能接入支持 Anthropic 协议上游**

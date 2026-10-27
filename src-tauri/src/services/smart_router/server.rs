@@ -50,6 +50,19 @@ const UPSTREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(120);
 const UPSTREAM_FIRST_CONTENT_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+// Prompt length dominates time-to-first-byte: a 200-message conversation can
+// spend a minute in upstream prefill before the first SSE frame. A flat 30s
+// deadline therefore kills requests that are merely slow, so the wait scales
+// with the serialized body up to a hard cap.
+const HEADER_TIMEOUT_PER_KB: Duration = Duration::from_millis(250);
+const MAX_HEADER_TIMEOUT: Duration = Duration::from_secs(120);
+// The chain budget must cover every candidate's own deadline. Sharing 45s
+// between two 30s attempts left the second candidate 15s — a guaranteed
+// timeout that cooled it down for a request it never had a chance to answer.
+const MAX_TIME_BUDGET: Duration = Duration::from_secs(10 * 60);
+// A deadline is evidence that one request was slow, not that the endpoint is
+// down: slow attempts get a fixed short cooldown and never escalate.
+const SLOW_REQUEST_COOLDOWN: Duration = Duration::from_secs(30);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_TRANSIENT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
@@ -423,6 +436,32 @@ impl Default for RoutePolicy {
             first_byte_timeout: UPSTREAM_FIRST_BYTE_TIMEOUT,
             first_content_timeout: UPSTREAM_FIRST_CONTENT_TIMEOUT,
             stream_idle_timeout: UPSTREAM_STREAM_IDLE_TIMEOUT,
+        }
+    }
+}
+
+impl RoutePolicy {
+    /// Policy for one inbound request: the header deadline follows the body
+    /// size and the chain budget covers one deadline per candidate.
+    fn for_request(body: &Value, candidate_count: usize) -> Self {
+        let body_bytes = serde_json::to_vec(body).map_or(0, |bytes| bytes.len());
+        Self::for_body_size(body_bytes, candidate_count)
+    }
+
+    fn for_body_size(body_bytes: usize, candidate_count: usize) -> Self {
+        let per_candidate =
+            HEADER_TIMEOUT_PER_KB.saturating_mul((body_bytes / 1024).min(u32::MAX as usize) as u32);
+        let header_timeout = UPSTREAM_HEADER_TIMEOUT
+            .saturating_add(per_candidate)
+            .min(MAX_HEADER_TIMEOUT);
+        let attempts = candidate_count.clamp(1, MAX_ROUTE_ATTEMPTS) as u32;
+        let time_budget = FALLBACK_TIME_BUDGET
+            .max(header_timeout.saturating_mul(attempts))
+            .min(MAX_TIME_BUDGET);
+        Self {
+            header_timeout,
+            time_budget,
+            ..Self::default()
         }
     }
 }
@@ -879,17 +918,23 @@ async fn route_messages_with_candidates(
         );
     }
     let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let policy = RoutePolicy::default();
+    let policy = RoutePolicy::for_request(&body, candidates.len());
     let routing_started = Instant::now();
     let _ = state
         .standby
         .order_for_request(&mut candidates, state.request_epoch);
-    let available = prioritized_candidates(state, candidates);
+    let mut available = prioritized_candidates(state, candidates.clone());
+    let mut last_resort = false;
     if available.is_empty() {
-        return anthropic_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "All Auto Router models are cooling down",
-        );
+        if let Some(candidate) = soonest_recovering(state, &candidates) {
+            available.push(candidate);
+            last_resort = true;
+        } else {
+            return anthropic_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "All Auto Router models are cooling down",
+            );
+        }
     }
 
     let mut last_error: Option<Response> = None;
@@ -908,7 +953,13 @@ async fn route_messages_with_candidates(
             .filter(|_| candidate.account_source.is_none());
 
         if let Some(anthropic_base) = native_base {
-            if !try_begin_attempt(state, &mut candidate) {
+            let attempt_begun = if last_resort {
+                last_resort = false;
+                try_begin_attempt_despite_cooldown(state, &mut candidate)
+            } else {
+                try_begin_attempt(state, &mut candidate)
+            };
+            if !attempt_begun {
                 continue;
             }
             let sent = tokio::time::timeout(
@@ -928,7 +979,7 @@ async fn route_messages_with_candidates(
                     continue;
                 }
                 Err(_) => {
-                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    mark_slow_attempt(state, &candidate);
                     log::warn!(
                         "[SmartRouter] {} timed out before Anthropic response headers",
                         candidate.internal_id
@@ -955,7 +1006,7 @@ async fn route_messages_with_candidates(
             {
                 Ok(Ok(collected)) => collected.to_bytes(),
                 _ => {
-                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    mark_slow_attempt(state, &candidate);
                     continue;
                 }
             };
@@ -1072,14 +1123,8 @@ async fn route_chat_with_candidates(
     body: Value,
     candidates: Vec<Candidate>,
 ) -> Response {
-    route_chat_with_policy(
-        state,
-        inbound_headers,
-        body,
-        candidates,
-        RoutePolicy::default(),
-    )
-    .await
+    let policy = RoutePolicy::for_request(&body, candidates.len());
+    route_chat_with_policy(state, inbound_headers, body, candidates, policy).await
 }
 
 async fn route_responses_with_candidates(
@@ -1088,12 +1133,13 @@ async fn route_responses_with_candidates(
     body: Value,
     candidates: Vec<Candidate>,
 ) -> Response {
+    let policy = RoutePolicy::for_request(&body, candidates.len());
     route_with_policy(
         state,
         inbound_headers,
         body,
         candidates,
-        RoutePolicy::default(),
+        policy,
         RouteProtocol::Responses,
     )
     .await
@@ -1664,13 +1710,23 @@ async fn route_with_policy(
         .standby
         .order_for_request(&mut candidates, state.request_epoch)
         .filter(|_| !bound_continuation);
-    let mut available = prioritized_candidates(state, candidates);
+    let mut available = prioritized_candidates(state, candidates.clone());
     if bound_continuation {
         available.retain(|candidate| {
             bound_candidates
                 .iter()
                 .any(|bound| bound.internal_id == candidate.internal_id)
         });
+    }
+    // Rejecting the request outright leaves the caller with a 503 and zero
+    // attempts. Try the candidate that recovers first instead; it is the same
+    // endpoint the caller would hit a few seconds later anyway.
+    let mut last_resort = false;
+    if available.is_empty() && !bound_continuation {
+        if let Some(candidate) = soonest_recovering(state, &candidates) {
+            available.push(candidate);
+            last_resort = true;
+        }
     }
     if available.is_empty() {
         return openai_error(
@@ -1691,9 +1747,15 @@ async fn route_with_policy(
         .or_else(|| available.next().map(|candidate| (candidate, None)))
     {
         let authentication_retried = refreshed_credentials.is_some();
-        if (authentication_retried && candidate_is_cooling_down(state, &candidate))
-            || (!authentication_retried && !try_begin_attempt(state, &mut candidate))
-        {
+        let attempt_begun = if authentication_retried {
+            !candidate_is_cooling_down(state, &candidate)
+        } else if last_resort {
+            last_resort = false;
+            try_begin_attempt_despite_cooldown(state, &mut candidate)
+        } else {
+            try_begin_attempt(state, &mut candidate)
+        };
+        if !attempt_begun {
             continue;
         }
         if attempts.len() >= policy.max_attempts {
@@ -1718,13 +1780,8 @@ async fn route_with_policy(
         upstream_body["model"] = Value::String(candidate.model_id.clone());
         let activity_guard =
             RouteActivityGuard::begin_for(&candidate.internal_id, state.activity.clone());
-        let first_content_deadline = tokio::time::Instant::now() + policy.first_content_timeout;
         let sent = tokio::time::timeout(
-            if stream_requested {
-                header_timeout.min(policy.first_content_timeout)
-            } else {
-                header_timeout
-            },
+            header_timeout,
             send_candidate(
                 state,
                 inbound_headers,
@@ -1753,7 +1810,7 @@ async fn route_with_policy(
                 continue;
             }
             Err(_) => {
-                mark_failure(state, &candidate, FailureClass::Transient, None);
+                mark_slow_attempt(state, &candidate);
                 attempts.push(AttemptRecord {
                     candidate_id: candidate.internal_id.clone(),
                     model_id: candidate.model_id.clone(),
@@ -1920,12 +1977,16 @@ async fn route_with_policy(
                 ..StreamCompletion::default()
             };
             let mut upstream_stream = response.into_body().into_data_stream();
+            // Prefill happens before the response headers, so the first-content
+            // deadline starts here rather than at send time — otherwise a slow
+            // prompt would burn it before a single byte could arrive.
+            let first_content_deadline = tokio::time::Instant::now() + policy.first_content_timeout;
             let Some(first_byte_timeout) = remaining_timeout(
                 routing_started,
                 policy.time_budget,
                 policy.first_byte_timeout,
             ) else {
-                mark_failure(state, &candidate, FailureClass::Transient, None);
+                mark_slow_attempt(state, &candidate);
                 attempts.push(AttemptRecord {
                     candidate_id: candidate.internal_id.clone(),
                     model_id: candidate.model_id.clone(),
@@ -1965,7 +2026,7 @@ async fn route_with_policy(
                 }),
                 Ok(Err(error)) => Err(error),
                 Err(_) => {
-                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    mark_slow_attempt(state, &candidate);
                     attempts.push(AttemptRecord {
                         candidate_id: candidate.internal_id.clone(),
                         model_id: candidate.model_id.clone(),
@@ -2190,7 +2251,7 @@ async fn route_with_policy(
         let Some(body_timeout) =
             remaining_timeout(routing_started, policy.time_budget, policy.time_budget)
         else {
-            mark_failure(state, &candidate, FailureClass::Transient, None);
+            mark_slow_attempt(state, &candidate);
             attempts.push(AttemptRecord {
                 candidate_id: candidate.internal_id.clone(),
                 model_id: candidate.model_id.clone(),
@@ -2364,7 +2425,7 @@ async fn route_with_policy(
                 );
             }
             Err(_) => {
-                mark_failure(state, &candidate, FailureClass::Transient, None);
+                mark_slow_attempt(state, &candidate);
                 attempts.push(AttemptRecord {
                     candidate_id: candidate.internal_id.clone(),
                     model_id: candidate.model_id.clone(),
@@ -2856,6 +2917,24 @@ fn anthropic_response(
             "Failed to build Anthropic router response",
         )
     })
+}
+
+/// The candidate that comes back first, used as a last-resort attempt when
+/// every candidate is cooling instead of answering with an immediate 503.
+fn soonest_recovering(state: &AppState, candidates: &[Candidate]) -> Option<Candidate> {
+    let Ok(memory) = state.route_memory.lock() else {
+        return None;
+    };
+    let now = now_ms();
+    candidates
+        .iter()
+        .filter(|candidate| is_cooling_down(&memory, candidate, now))
+        .min_by_key(|candidate| {
+            candidate_health(&memory, candidate)
+                .and_then(|health| health.cooldown_until_ms)
+                .unwrap_or(u64::MAX)
+        })
+        .cloned()
 }
 
 fn prioritized_candidates(state: &AppState, candidates: Vec<Candidate>) -> Vec<Candidate> {
@@ -3388,6 +3467,7 @@ fn mark_upstream_failure(
         retry_after,
         model_scope || known.is_some(),
         known.and_then(|known| known.reset_at_ms),
+        true,
     );
     Some(failure)
 }
@@ -3398,10 +3478,20 @@ fn begin_attempt(state: &AppState, candidate: &mut Candidate) {
 }
 
 fn try_begin_attempt(state: &AppState, candidate: &mut Candidate) -> bool {
+    begin_attempt_with(state, candidate, false)
+}
+
+/// Last-resort attempt for a request that would otherwise be rejected: the
+/// candidate is still cooling, but refusing it outright is worse than one try.
+fn try_begin_attempt_despite_cooldown(state: &AppState, candidate: &mut Candidate) -> bool {
+    begin_attempt_with(state, candidate, true)
+}
+
+fn begin_attempt_with(state: &AppState, candidate: &mut Candidate, ignore_cooldown: bool) -> bool {
     let Ok(mut memory) = state.route_memory.lock() else {
         return false;
     };
-    if is_cooling_down(&memory, candidate, now_ms()) {
+    if !ignore_cooldown && is_cooling_down(&memory, candidate, now_ms()) {
         return false;
     }
     // Weak leases last through the response body, and disappear on cancellation.
@@ -3678,7 +3768,31 @@ fn mark_failure_scoped(
     retry_after: Option<Duration>,
     model_scope: bool,
 ) {
-    mark_failure_until(state, candidate, failure, retry_after, model_scope, None);
+    mark_failure_until(
+        state,
+        candidate,
+        failure,
+        retry_after,
+        model_scope,
+        None,
+        true,
+    );
+}
+
+/// A candidate that merely missed a deadline is not a sick endpoint: give it a
+/// fixed short cooldown and never escalate it, so one huge slow prompt cannot
+/// spiral into minutes of hard 503s.
+fn mark_slow_attempt(state: &AppState, candidate: &Candidate) {
+    let deadline = now_ms().saturating_add(SLOW_REQUEST_COOLDOWN.as_millis() as u64);
+    mark_failure_until(
+        state,
+        candidate,
+        FailureClass::Transient,
+        None,
+        false,
+        Some(deadline),
+        false,
+    );
 }
 
 fn mark_failure_until(
@@ -3688,6 +3802,7 @@ fn mark_failure_until(
     retry_after: Option<Duration>,
     model_scope: bool,
     reset_at_ms: Option<u64>,
+    count_failure: bool,
 ) {
     if failure == FailureClass::RequestIncompatible {
         return;
@@ -3718,7 +3833,9 @@ fn mark_failure_until(
     }
     memory.revision = memory.revision.saturating_add(1);
     let revision = memory.revision;
-    next.consecutive_failures = next.consecutive_failures.saturating_add(1);
+    if count_failure {
+        next.consecutive_failures = next.consecutive_failures.saturating_add(1);
+    }
     let entry = memory
         .candidates
         .entry(candidate.internal_id.clone())
@@ -4969,6 +5086,73 @@ mod tests {
         let recovered = prioritized_candidates(&state, vec![first, second]);
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0].internal_id, "first");
+    }
+
+    #[test]
+    fn header_deadline_scales_with_the_prompt_and_budget_covers_every_candidate() {
+        // A short prompt keeps the flat 30s floor and the 45s chain budget.
+        let small = RoutePolicy::for_body_size(512, 1);
+        assert_eq!(small.header_timeout, UPSTREAM_HEADER_TIMEOUT);
+        assert_eq!(small.time_budget, FALLBACK_TIME_BUDGET);
+
+        // A 200-message conversation is hundreds of KB: prefill alone can take
+        // a minute, so the deadline has to grow with the body.
+        let large = RoutePolicy::for_body_size(320 * 1024, 2);
+        assert!(large.header_timeout > UPSTREAM_HEADER_TIMEOUT);
+        assert!(large.header_timeout <= MAX_HEADER_TIMEOUT);
+        // ... and the budget must cover one full deadline per candidate,
+        // otherwise the second candidate is born with a guarantee timeout.
+        assert!(large.time_budget >= large.header_timeout * 2);
+
+        // Oversized bodies clamp instead of growing without bound.
+        let clamped = RoutePolicy::for_body_size(64 * 1024 * 1024, 20);
+        assert_eq!(clamped.header_timeout, MAX_HEADER_TIMEOUT);
+        assert_eq!(clamped.time_budget, MAX_TIME_BUDGET);
+        // The hard budget cap wins over a pathological candidate list: it still
+        // covers several full deadlines without holding the caller for hours.
+        assert!(clamped.time_budget >= clamped.header_timeout * 2);
+    }
+
+    #[test]
+    fn slow_attempts_never_escalate_their_cooldown() {
+        let state = AppState::for_tests().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let slow = candidate(addr, "slow");
+
+        for _ in 0..6 {
+            mark_slow_attempt(&state, &slow);
+        }
+        let memory = state.route_memory.lock().unwrap();
+        let health = memory.candidates.get("slow").expect("health entry");
+        let until = health.cooldown_until_ms.expect("cooldown");
+        let remaining = until.saturating_sub(now_ms());
+        // Never the 5-minute transient ceiling, never an escalated wave.
+        assert!(remaining <= SLOW_REQUEST_COOLDOWN.as_millis() as u64);
+        assert_eq!(health.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn every_candidate_cooling_falls_back_to_the_first_to_recover() {
+        let state = AppState::for_tests().unwrap();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let later = candidate(addr, "later");
+        let sooner = candidate(addr, "sooner");
+        mark_failure(
+            &state,
+            &later,
+            FailureClass::RateLimit,
+            Some(Duration::from_secs(120)),
+        );
+        mark_slow_attempt(&state, &sooner);
+
+        let candidates = vec![later, sooner];
+        assert!(prioritized_candidates(&state, candidates.clone()).is_empty());
+
+        let fallback = soonest_recovering(&state, &candidates).expect("last resort");
+        assert_eq!(fallback.internal_id, "sooner");
+        let mut fallback = fallback;
+        assert!(try_begin_attempt_despite_cooldown(&state, &mut fallback));
+        assert!(fallback.attempt.is_some());
     }
 
     #[test]
