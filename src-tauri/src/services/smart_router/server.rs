@@ -367,6 +367,10 @@ struct Candidate {
     internal_id: String,
     model_id: String,
     base_url: String,
+    /// Anthropic-protocol endpoint for this model, when the user configured
+    /// one. Requests that arrive as Anthropic Messages can then be forwarded
+    /// verbatim instead of being downgraded to OpenAI chat.
+    anthropic_base: Option<String>,
     api_key: String,
     account_source: Option<crate::models::model::AccountSource>,
     fingerprint: String,
@@ -691,16 +695,55 @@ async fn handle_models(State(state): State<AppState>, headers: HeaderMap) -> Res
         return openai_error(StatusCode::UNAUTHORIZED, "Invalid EchoBird router API key");
     }
 
+    // Publish the window so a client can size its own budget instead of
+    // falling back to its smallest built-in tier. The value is the MINIMUM
+    // across the candidates this router may actually use, because a request
+    // can fail over to any of them; advertising the largest window would let
+    // a client overflow a smaller fallback. Budgets are reported in three
+    // conventions (`context_length` for OpenRouter-style clients,
+    // `context_window` for LiteLLM/Anthropic-style clients, and the nested
+    // `top_provider` form for clients that only read that).
+    let (context_window, max_output_tokens) =
+        published_budgets(resolve_candidates(config.candidate_ids.clone()));
+
     Json(json!({
         "object": "list",
         "data": [{
             "id": config.model_id,
             "object": "model",
             "created": 0,
-            "owned_by": "echobird"
+            "owned_by": "echobird",
+            "context_length": context_window,
+            "context_window": context_window,
+            "max_context_length": context_window,
+            "max_output_tokens": max_output_tokens,
+            "top_provider": {
+                "context_length": context_window,
+                "max_completion_tokens": max_output_tokens
+            }
         }]
     }))
     .into_response()
+}
+
+/// Conservative budgets for the router's published model id: the smallest
+/// window among the candidates a request may be routed to, plus a completion
+/// budget that leaves at least half of it for the prompt.
+fn published_budgets(candidates: Vec<Candidate>) -> (u64, u64) {
+    let context_window = candidates
+        .iter()
+        .map(|candidate| {
+            crate::services::model_context::context_window_for(
+                &candidate.base_url,
+                &candidate.model_id,
+            )
+        })
+        .min()
+        .unwrap_or(crate::services::model_context::DEFAULT_CONTEXT_WINDOW);
+    let max_output_tokens = (context_window / 4)
+        .clamp(8_192, 64_000)
+        .min(context_window / 2);
+    (context_window, max_output_tokens)
 }
 
 async fn handle_chat(
@@ -811,25 +854,155 @@ async fn handle_messages(
     .await
 }
 
+/// Serve an Anthropic Messages request candidate by candidate, in the
+/// configured order, choosing the wire protocol per candidate:
+///
+///  * a candidate with its own Anthropic endpoint is forwarded verbatim, so
+///    `anthropic-beta` grants (1M context), prompt caching and the SSE stream
+///    reach the upstream exactly as the client sent them;
+///  * anything else goes through the existing OpenAI pipeline and is converted
+///    back to Anthropic, as before.
+///
+/// Candidates are tried one at a time rather than as one batch so the
+/// configured order (and any standby ordering) is preserved across the two
+/// protocol families.
 async fn route_messages_with_candidates(
     state: &AppState,
     headers: &HeaderMap,
     body: Value,
-    candidates: Vec<Candidate>,
+    mut candidates: Vec<Candidate>,
 ) -> Response {
+    if candidates.is_empty() {
+        return anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No usable models are configured for Auto Router",
+        );
+    }
     let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
-    let mut openai_body = crate::services::local_llm::proxy::anthropic_to_openai(&body);
-    openai_body["model"] = Value::String(state.model_id.clone());
-    let response = route_chat_with_candidates(state, headers, openai_body, candidates).await;
+    let policy = RoutePolicy::default();
+    let routing_started = Instant::now();
+    let _ = state
+        .standby
+        .order_for_request(&mut candidates, state.request_epoch);
+    let available = prioritized_candidates(state, candidates);
+    if available.is_empty() {
+        return anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "All Auto Router models are cooling down",
+        );
+    }
 
-    if !response.status().is_success() {
-        return openai_error_to_anthropic(response).await;
+    let mut last_error: Option<Response> = None;
+    for mut candidate in available {
+        let Some(header_timeout) =
+            remaining_timeout(routing_started, policy.time_budget, policy.header_timeout)
+        else {
+            break;
+        };
+
+        // Account-backed candidates need the account credential machinery in
+        // the OpenAI pipeline; only plain API-key models take the native path.
+        let native_base = candidate
+            .anthropic_base
+            .clone()
+            .filter(|_| candidate.account_source.is_none());
+
+        if let Some(anthropic_base) = native_base {
+            if !try_begin_attempt(state, &mut candidate) {
+                continue;
+            }
+            let sent = tokio::time::timeout(
+                header_timeout,
+                send_anthropic_messages(state, headers, &candidate, &anthropic_base, &body),
+            )
+            .await;
+            let response = match sent {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    log::warn!(
+                        "[SmartRouter] {} transport failure on the Anthropic protocol: {}",
+                        candidate.internal_id,
+                        error
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    log::warn!(
+                        "[SmartRouter] {} timed out before Anthropic response headers",
+                        candidate.internal_id
+                    );
+                    continue;
+                }
+            };
+            if response.status().is_success() {
+                log::info!(
+                    "[SmartRouter] {} served /v1/messages natively (Anthropic protocol)",
+                    candidate.internal_id
+                );
+                return response;
+            }
+
+            let status = response.status();
+            let retry_after = retry_after(response.headers());
+            let response_body = match tokio::time::timeout(
+                remaining_timeout(routing_started, policy.time_budget, policy.header_timeout)
+                    .unwrap_or(header_timeout),
+                response.into_body().collect(),
+            )
+            .await
+            {
+                Ok(Ok(collected)) => collected.to_bytes(),
+                _ => {
+                    mark_failure(state, &candidate, FailureClass::Transient, None);
+                    continue;
+                }
+            };
+            // A context-limit rejection is the caller's request, not a stale
+            // candidate: surface it instead of failing over.
+            if is_context_limit_body(&response_body) {
+                return upstream_error_body(StatusCode::BAD_REQUEST, response_body);
+            }
+            let failure = mark_upstream_failure(
+                state,
+                &candidate,
+                status,
+                &response_body,
+                retry_after,
+                false,
+            );
+            log::warn!(
+                "[SmartRouter] {} returned {} on the Anthropic protocol ({:?}), trying next candidate",
+                candidate.internal_id,
+                status.as_u16(),
+                failure
+            );
+            last_error = Some(upstream_error_body(status, response_body));
+            continue;
+        }
+
+        let mut openai_body = crate::services::local_llm::proxy::anthropic_to_openai(&body);
+        openai_body["model"] = Value::String(candidate.model_id.clone());
+        let response =
+            route_chat_with_policy(state, headers, openai_body, vec![candidate], policy).await;
+        if !response.status().is_success() {
+            last_error = Some(openai_error_to_anthropic(response).await);
+            continue;
+        }
+        return if stream_requested {
+            openai_stream_to_anthropic_for_model(response, state.model_id.clone())
+        } else {
+            openai_response_to_anthropic(response).await
+        };
     }
-    if stream_requested {
-        openai_stream_to_anthropic_for_model(response, state.model_id.clone())
-    } else {
-        openai_response_to_anthropic(response).await
-    }
+
+    last_error.unwrap_or_else(|| {
+        anthropic_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No Auto Router candidate answered",
+        )
+    })
 }
 
 fn resolve_candidates(ids: Vec<String>) -> Vec<Candidate> {
@@ -857,6 +1030,7 @@ fn resolve_candidates_from(
                     fingerprint: candidate_fingerprint(&model_id, &base_url, &api_key),
                     model_id,
                     base_url,
+                    anthropic_base: None,
                     api_key,
                     account_source: None,
                 });
@@ -883,6 +1057,7 @@ fn resolve_candidates_from(
                 ),
                 model_id: model_id.to_string(),
                 base_url: model.base_url.clone(),
+                anthropic_base: anthropic_messages_base(model),
                 api_key,
                 account_source: model.account_source.clone(),
             })
@@ -941,6 +1116,7 @@ pub(crate) async fn route_live_account_probe(
     }
     let source_json = serde_json::to_string(&source).map_err(|_| "Invalid account source")?;
     let candidate = Candidate {
+        anthropic_base: None,
         attempt: None,
         internal_id: "live-account-probe".into(),
         fingerprint: candidate_fingerprint(&model_id, "account://echobird", &source_json),
@@ -1228,6 +1404,141 @@ async fn responses_from_chat(
         response,
         original["stream"].as_bool().unwrap_or(false),
     )
+}
+
+/// Forward an Anthropic Messages request to an upstream that speaks the
+/// Anthropic protocol, verbatim.
+///
+/// Nothing is translated here: the body, the `anthropic-beta` grants the
+/// client negotiated (1M context, prompt caching) and the SSE stream all pass
+/// through untouched. That is the point of this path — the OpenAI conversion
+/// in the fallback below cannot carry those grants upstream, so a client that
+/// asked for 1M context would silently get the provider's default window.
+async fn send_anthropic_messages(
+    state: &AppState,
+    inbound_headers: &HeaderMap,
+    candidate: &Candidate,
+    anthropic_base: &str,
+    body: &Value,
+) -> Result<Response, String> {
+    let url = anthropic_messages_url(anthropic_base);
+    let mut request = state
+        .http_client
+        .post(&url)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("HTTP-Referer", "https://echobird.ai")
+        .header("X-OpenRouter-Title", "EchoBird")
+        .header("X-OpenRouter-Categories", "programming-app,personal-agent");
+
+    let anthropic_version = inbound_headers
+        .get("anthropic-version")
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("2023-06-01"));
+    request = request.header("anthropic-version", anthropic_version);
+    if let Some(beta) = inbound_headers.get("anthropic-beta") {
+        request = request.header("anthropic-beta", beta.clone());
+    }
+    if let Some(user_agent) = inbound_headers.get(header::USER_AGENT) {
+        request = request.header(header::USER_AGENT, user_agent.clone());
+    }
+
+    let host = url::Url::parse(&url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_string))
+        .unwrap_or_default();
+    if host.ends_with("anthropic.com") {
+        // api.anthropic.com authenticates API keys with x-api-key only.
+        request = request.header("x-api-key", candidate.api_key.clone());
+    } else {
+        // Third-party Anthropic-compatible gateways accept either scheme;
+        // send both so the request is not rejected for using the other one.
+        request = request
+            .header("x-api-key", candidate.api_key.clone())
+            .bearer_auth(candidate.api_key.clone());
+    }
+
+    #[cfg(test)]
+    if let Some(response) = take_native_fixture(state, &candidate.internal_id) {
+        return Ok(with_routed_via(response, candidate));
+    }
+
+    let upstream = request.json(body).send().await.map_err(|e| e.to_string())?;
+    Ok(with_routed_via(passthrough_response(upstream), candidate))
+}
+
+/// Same diagnostic header the OpenAI path sets, so a caller (and our logs) can
+/// tell which candidate answered.
+fn with_routed_via(mut response: Response, candidate: &Candidate) -> Response {
+    response
+        .headers_mut()
+        .insert("X-EchoBird-Routed-Via", routed_via(candidate));
+    response
+}
+
+/// Test-only: hand back a scripted response instead of calling the network,
+/// mirroring how `send_candidate` consumes `fixture_responses`.
+#[cfg(test)]
+fn take_native_fixture(state: &AppState, candidate_id: &str) -> Option<Response> {
+    let response = state
+        .fixture_responses
+        .as_ref()?
+        .lock()
+        .ok()?
+        .remove(candidate_id)?;
+    let mut response = response;
+    if let Ok(value) = HeaderValue::from_str(candidate_id) {
+        response.headers_mut().insert("X-EchoBird-Fixture", value);
+    }
+    Some(response)
+}
+
+/// Hand an upstream response back without inspecting its body. Used when the
+/// wire protocol already matches what the client speaks, so both JSON bodies
+/// and SSE streams stay byte-identical.
+///
+/// The body still gets the idle deadline the OpenAI path applies: an upstream
+/// that stops producing bytes must not hang the caller forever.
+fn passthrough_response(upstream: reqwest::Response) -> Response {
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut response = Response::new(Body::from_stream(idle_limited(upstream.bytes_stream())));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
+
+/// Pass an upstream byte stream through unchanged, but stop waiting on one that
+/// goes silent instead of hanging the caller forever.
+fn idle_limited<S>(source: S) -> impl futures_util::Stream<Item = Result<Bytes, axum::Error>>
+where
+    S: futures_util::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    stream::unfold(Some(Box::pin(source)), |state| async move {
+        let mut source = state?;
+        match tokio::time::timeout(UPSTREAM_STREAM_IDLE_TIMEOUT, source.as_mut().next()).await {
+            Ok(Some(Ok(chunk))) => Some((Ok(chunk), Some(source))),
+            Ok(Some(Err(error))) => Some((Err(axum::Error::new(error)), None)),
+            Ok(None) => None,
+            Err(_) => Some((
+                Err(axum::Error::new(stream_timeout_error(
+                    "stream_idle_timeout",
+                    "Upstream stream timed out waiting for output",
+                ))),
+                None,
+            )),
+        }
+    })
+}
+
+/// Return an upstream error body verbatim, keeping its status.
+fn upstream_error_body(status: StatusCode, body: Bytes) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
 async fn send_api_request(
@@ -3660,6 +3971,38 @@ fn retry_after(headers: &HeaderMap) -> Option<Duration> {
     Some(wait.to_std().unwrap_or_default().min(MAX_RETRY_AFTER))
 }
 
+/// Anthropic Messages endpoint for a user-configured model, when the model
+/// carries one. `anthropic_url` is the same field EchoBird writes into the
+/// Claude clients' `ANTHROPIC_BASE_URL`, and a `base_url` that already points
+/// at `/v1/messages` is treated the same way.
+fn anthropic_messages_base(model: &crate::models::model::ModelConfig) -> Option<String> {
+    let configured = model
+        .anthropic_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty());
+    if let Some(url) = configured {
+        return Some(url.to_string());
+    }
+    let base = model.base_url.trim();
+    if base.ends_with("/messages") || base.contains("/v1/messages") {
+        return Some(base.to_string());
+    }
+    None
+}
+
+/// Accepts either a bare host (`https://api.anthropic.com`), a `/v1` suffix or
+/// an endpoint that already ends in `/messages` — the three shapes EchoBird
+/// stores for `anthropic_url`.
+fn anthropic_messages_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with("/messages") {
+        return base.to_string();
+    }
+    let base = base.strip_suffix("/v1").unwrap_or(base);
+    format!("{}/v1/messages", base.trim_end_matches('/'))
+}
+
 fn chat_completions_url(base_url: &str) -> String {
     let base_url = base_url.trim_end_matches('/');
     if base_url.ends_with("/chat/completions") {
@@ -3983,6 +4326,11 @@ mod responses_tests;
 mod audit_tests;
 
 #[cfg(test)]
+#[cfg(test)]
+#[path = "anthropic_native_tests.rs"]
+mod anthropic_native_tests;
+
+#[cfg(test)]
 #[path = "concurrency_tests.rs"]
 mod concurrency_tests;
 
@@ -4003,6 +4351,7 @@ mod tests {
         let base_url = format!("http://{addr}/v1");
         let api_key = "upstream-key".to_string();
         Candidate {
+            anthropic_base: None,
             attempt: None,
             internal_id: id.to_string(),
             fingerprint: candidate_fingerprint(&model_id, &base_url, &api_key),

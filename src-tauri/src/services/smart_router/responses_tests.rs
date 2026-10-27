@@ -55,6 +55,7 @@ impl MockServer {
         let base_url = format!("http://{}/v1", self.addr);
         let api_key = "upstream-key".to_string();
         Candidate {
+            anthropic_base: None,
             internal_id: id.into(),
             fingerprint: candidate_fingerprint(&model_id, &base_url, &api_key),
             model_id,

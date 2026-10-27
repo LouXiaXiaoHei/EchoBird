@@ -116,6 +116,7 @@ mod tests {
             .unwrap()
             .timestamp_millis() as u64;
         let mut candidate = Candidate {
+            anthropic_base: None,
             attempt: None,
             internal_id: "fixture".into(),
             fingerprint: "fixture".into(),

@@ -57,6 +57,7 @@ fn ok() -> Json<Value> {
 
 fn model(id: &str) -> Candidate {
     Candidate {
+        anthropic_base: None,
         internal_id: id.into(),
         model_id: "concurrent-model".into(),
         base_url: "http://127.0.0.1:1/v1".into(),

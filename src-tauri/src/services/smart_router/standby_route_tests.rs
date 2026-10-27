@@ -54,6 +54,7 @@ impl Upstream {
     fn candidates(&self, ids: &[&str]) -> Vec<Candidate> {
         ids.iter()
             .map(|id| Candidate {
+                anthropic_base: None,
                 internal_id: (*id).into(),
                 model_id: (*id).into(),
                 base_url: self.base.clone(),

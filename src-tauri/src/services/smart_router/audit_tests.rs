@@ -836,6 +836,7 @@ fn audit_http_candidate(addr: SocketAddr, id: &str) -> Candidate {
     let model_id = format!("{id}-model");
     let base_url = format!("http://{addr}/v1");
     Candidate {
+        anthropic_base: None,
         attempt: None,
         internal_id: id.into(),
         fingerprint: candidate_fingerprint(&model_id, &base_url, "fixture-key"),

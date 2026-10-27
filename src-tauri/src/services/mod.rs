@@ -53,6 +53,7 @@ pub(crate) mod local_proxy;
 pub mod manus_accounts;
 pub mod minimax_accounts;
 pub(crate) mod minimax_native;
+pub mod model_context;
 pub mod model_directory;
 pub mod model_manager;
 #[cfg(any(windows, test))]

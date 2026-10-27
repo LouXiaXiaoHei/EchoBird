@@ -396,6 +396,7 @@ mod tests {
         let state = AppState::for_tests().unwrap();
         for model in ["big-pickle", "space-bunny-free", RESPONSES_MODEL] {
             let candidate = Candidate {
+                anthropic_base: None,
                 internal_id: format!("live-{model}"),
                 model_id: model.into(),
                 base_url: BASE_URL.into(),
@@ -438,6 +439,7 @@ mod tests {
         let state = AppState::for_tests().unwrap();
         for model in ["big-pickle", "space-bunny-free", RESPONSES_MODEL] {
             let candidate = Candidate {
+                anthropic_base: None,
                 internal_id: format!("live-stream-{model}"),
                 model_id: model.into(),
                 base_url: BASE_URL.into(),
@@ -470,6 +472,7 @@ mod tests {
             assert!(text.contains("[DONE]"), "{model}: {text}");
         }
         let candidate = Candidate {
+            anthropic_base: None,
             internal_id: "live-muse-responses".into(),
             model_id: RESPONSES_MODEL.into(),
             base_url: BASE_URL.into(),

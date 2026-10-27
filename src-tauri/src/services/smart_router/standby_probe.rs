@@ -269,6 +269,7 @@ mod tests {
 
     fn candidate(id: &str) -> Candidate {
         Candidate {
+            anthropic_base: None,
             internal_id: id.into(),
             model_id: "standby-model".into(),
             base_url: "http://127.0.0.1:1/v1".into(),
