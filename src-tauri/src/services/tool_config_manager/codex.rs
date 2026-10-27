@@ -7,6 +7,7 @@ use super::{
 };
 use crate::services::codex_accounts;
 use crate::services::codex_catalog;
+use crate::services::model_context;
 use std::fs;
 use std::path::Path;
 
@@ -35,20 +36,6 @@ const CODEX_ROUTE_TOP_LEVEL_KEYS: &[&str] = &[
 // mis-advertises a third-party model. The values below are sourced from the
 // provider's official model specs so apply_codex / apply_zcode stay
 // data-driven — no model-id branching inside the apply logic.
-
-const DEFAULT_CODEX_CONTEXT_WINDOW: u64 = 1_000_000;
-
-/// Look up a model's real context window (in tokens). Returns
-/// `DEFAULT_CODEX_CONTEXT_WINDOW` for models the registry does not list —
-/// the historic Codex default — so unknown models keep working as before.
-fn model_context_window_for(model_id: &str) -> u64 {
-    match model_id {
-        "deepseek-flash" | "deepseek-v4-pro" => 1_048_576,
-        "MiniMax-M3" => 1_000_000,
-        "MiniMax-M2.7" => 204_800,
-        _ => DEFAULT_CODEX_CONTEXT_WINDOW,
-    }
-}
 
 /// Derive the auto-compact token limit (90% of the context window) that
 /// Codex writes as `model_auto_compact_token_limit`. Keeping it proportional
@@ -315,10 +302,7 @@ pub(crate) fn apply_codex_at(
     // `model_context_window` / `model_auto_compact_token_limit` matching the
     // model's actual token budget rather than the historic 1M default.
     let catalog_template = codex_catalog::template_for_model(&base_url, model_id);
-    let context_window = catalog_template
-        .as_ref()
-        .and_then(|template| template["context_window"].as_u64())
-        .unwrap_or_else(|| model_context_window_for(model_id));
+    let context_window = model_context::context_window_for(&base_url, model_id);
 
     ensure_parent(&config_path);
 
@@ -690,7 +674,7 @@ mod tests {
                     "",
                     base_url,
                     "fixture",
-                    DEFAULT_CODEX_CONTEXT_WINDOW,
+                    model_context::DEFAULT_CONTEXT_WINDOW,
                     Some(enabled),
                 );
                 assert_eq!(toml_read_top(&out, "web_search"), expected);
@@ -705,7 +689,7 @@ mod tests {
                 "",
                 "http://127.0.0.1:53683/v1",
                 "auto",
-                DEFAULT_CODEX_CONTEXT_WINDOW,
+                model_context::DEFAULT_CONTEXT_WINDOW,
                 enabled,
             );
             assert_eq!(toml_read_top(&out, "web_search"), "disabled");
@@ -734,7 +718,7 @@ mod tests {
             stale,
             "https://ark.cn-beijing.volces.com/api/coding/v1",
             "glm-5.2",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(
@@ -756,7 +740,7 @@ mod tests {
             stale,
             "https://provider.example/v1",
             "provider-model",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(!out.contains("review_model"));
@@ -775,7 +759,7 @@ mod tests {
             stale,
             "https://provider.example/v1",
             "provider-model",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(
@@ -810,14 +794,17 @@ mod tests {
 
     #[test]
     fn model_context_window_for_known_model() {
-        assert_eq!(model_context_window_for("MiniMax-M2.7"), 204_800);
+        assert_eq!(
+            model_context::context_window_for("", "MiniMax-M2.7"),
+            204_800
+        );
     }
 
     #[test]
     fn deepseek_context_matches_official_catalog_in_config_and_generated_catalog() {
         let template = serde_json::from_str(codex_catalog::DEEPSEEK_TEMPLATE).unwrap();
         for model in ["deepseek-flash", "deepseek-v4-pro"] {
-            let context = model_context_window_for(model);
+            let context = model_context::context_window_for("https://api.deepseek.com", model);
             assert_eq!(context, 1_048_576);
             let config =
                 write_codex_canonical_fields("", "https://api.deepseek.com", model, context, None);
@@ -844,7 +831,7 @@ mod tests {
                 &config,
                 "https://api.deepseek.com",
                 model,
-                model_context_window_for(model),
+                model_context::context_window_for("https://api.deepseek.com", model),
                 None,
             );
             assert_eq!(
@@ -858,7 +845,7 @@ mod tests {
             &config,
             "https://api.deepseek.com",
             "deepseek-v4-pro",
-            model_context_window_for("deepseek-v4-pro"),
+            model_context::context_window_for("https://api.deepseek.com", "deepseek-v4-pro"),
             None,
         );
         assert_eq!(reapplied, config);
@@ -871,7 +858,7 @@ mod tests {
                 &config,
                 base_url,
                 "other-model",
-                DEFAULT_CODEX_CONTEXT_WINDOW,
+                model_context::DEFAULT_CONTEXT_WINDOW,
                 None,
             );
             assert!(!other.contains("enabled-reasoning-efforts"));
@@ -902,7 +889,7 @@ mod tests {
                 &config,
                 "https://provider.example/v1",
                 "other-model",
-                DEFAULT_CODEX_CONTEXT_WINDOW,
+                model_context::DEFAULT_CONTEXT_WINDOW,
                 None,
             );
             assert!(
@@ -933,7 +920,7 @@ mod tests {
                 &config,
                 "https://api.xiaomimimo.com/v1",
                 "mimo-v2.5",
-                DEFAULT_CODEX_CONTEXT_WINDOW,
+                model_context::DEFAULT_CONTEXT_WINDOW,
                 None,
             );
             assert_eq!(
@@ -1005,10 +992,13 @@ mod tests {
                     "high",
                 ),
                 (
+                    // A slug the bundled catalog does not list yet resolves
+                    // from the DeepSeek family (its own endpoints serve 1MiB),
+                    // not from the cross-vendor default.
                     "https://api.deepseek.com",
                     "deepseek-v5-flash",
                     "https://api.deepseek.com",
-                    DEFAULT_CODEX_CONTEXT_WINDOW,
+                    1_048_576,
                     "high",
                 ),
                 (
@@ -1222,9 +1212,33 @@ mod tests {
     #[test]
     fn model_context_window_for_unknown_model_defaults_to_1m() {
         assert_eq!(
-            model_context_window_for("glm-5.2"),
-            DEFAULT_CODEX_CONTEXT_WINDOW
+            model_context::context_window_for("https://provider.example/v1", "some-onprem-model"),
+            model_context::DEFAULT_CONTEXT_WINDOW
         );
+        assert_eq!(
+            model_context::context_window_for("https://provider.example/v1", ""),
+            model_context::DEFAULT_CONTEXT_WINDOW
+        );
+    }
+
+    #[test]
+    fn family_windows_reach_the_written_config() {
+        // Neither id is in a bundled vendor catalog, so Codex used to advertise
+        // the 1M default for a 200K and a 256K model.
+        for (model, window) in [("claude-sonnet-4-5", 200_000), ("kimi-k2.7-code", 262_144)] {
+            let context = model_context::context_window_for("https://relay.example/v1", model);
+            assert_eq!(context, window);
+            let config =
+                write_codex_canonical_fields("", "https://relay.example/v1", model, context, None);
+            assert_eq!(
+                toml_read_top(&config, "model_context_window"),
+                window.to_string()
+            );
+            assert_eq!(
+                toml_read_top(&config, "model_auto_compact_token_limit"),
+                codex_compact_limit_for(window).to_string()
+            );
+        }
     }
 
     #[test]
@@ -1240,7 +1254,7 @@ mod tests {
             stale,
             "https://provider.example/v1",
             "provider-model",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(
@@ -1288,7 +1302,7 @@ mod tests {
                 "",
                 base_url,
                 "provider-model",
-                DEFAULT_CODEX_CONTEXT_WINDOW,
+                model_context::DEFAULT_CONTEXT_WINDOW,
                 None,
             );
             assert!(out.contains("web_search = \"disabled\""), "got: {out}");
@@ -1301,7 +1315,7 @@ mod tests {
             "",
             "https://api.xiaomimimo.com/v1",
             "mimo-v2.5-pro",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(mimo.contains("model_supports_reasoning_summaries = true"));
@@ -1311,7 +1325,7 @@ mod tests {
             &mimo,
             "https://provider.example/v1",
             "provider-model",
-            DEFAULT_CODEX_CONTEXT_WINDOW,
+            model_context::DEFAULT_CONTEXT_WINDOW,
             None,
         );
         assert!(!other.contains("model_supports_reasoning_summaries"));

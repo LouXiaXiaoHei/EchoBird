@@ -99,7 +99,28 @@ fn write_opencode_native_config(
     let provider_id = "echobird";
     super::provider_selection::enable_provider(&mut config, provider_id);
     super::provider_selection::allow_provider_policy(&mut config, provider_id);
-    config["provider"][provider_id] = serde_json::json!({
+    config["provider"][provider_id] = provider_entry(model_info, model_id, base_url, provider_name);
+    config["model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
+    config["small_model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
+
+    write_json_file(&config_path, &config)
+}
+
+/// The `echobird` provider entry written into `opencode.jsonc`.
+///
+/// OpenCode sizes a model's budget from `limit.context`. Without it the model
+/// falls back to the client's smallest built-in tier, so a 1M-context model
+/// behaves like a small one. `limit.output` has to fit inside the window too,
+/// or OpenCode clamps `max_tokens` to an even smaller default.
+fn provider_entry(
+    model_info: &ModelInfo,
+    model_id: &str,
+    base_url: &str,
+    provider_name: &str,
+) -> serde_json::Value {
+    let context = crate::services::model_context::context_window_for(base_url, model_id);
+    let output = context_output_limit(context);
+    serde_json::json!({
         "npm": "@ai-sdk/openai-compatible",
         "name": provider_name,
         "options": {
@@ -108,14 +129,20 @@ fn write_opencode_native_config(
         },
         "models": {
             model_id: {
-                "name": model_info.name.as_deref().unwrap_or(model_id)
+                "name": model_info.name.as_deref().unwrap_or(model_id),
+                "limit": {
+                    "context": context,
+                    "output": output
+                }
             }
         }
-    });
-    config["model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
-    config["small_model"] = serde_json::Value::String(format!("{}/{}", provider_id, model_id));
+    })
+}
 
-    write_json_file(&config_path, &config)
+/// Completion budget to publish alongside the context window: a quarter of it,
+/// clamped to a sane range and never more than half the window.
+fn context_output_limit(context: u64) -> u64 {
+    (context / 4).clamp(8_192, 64_000).min(context / 2)
 }
 
 pub(super) fn read_opencode() -> Option<ModelInfo> {
@@ -287,8 +314,55 @@ fn opencode_config_dir_from(
 
 #[cfg(test)]
 mod tests {
-    use super::opencode_config_dir_from;
+    use super::{opencode_config_dir_from, provider_entry};
+    use crate::services::tool_config_manager::ModelInfo;
     use std::path::PathBuf;
+
+    #[test]
+    fn provider_entry_publishes_the_documented_context_limit() {
+        let info: ModelInfo = serde_json::from_value(serde_json::json!({
+            "name": "Display",
+            "model": "glm-5.2",
+            "baseUrl": "https://maas.qianwenaiapi.com/v1",
+            "apiKey": "key"
+        }))
+        .unwrap();
+        let entry = provider_entry(
+            &info,
+            "glm-5.2",
+            "https://maas.qianwenaiapi.com/v1",
+            "EchoBird",
+        );
+        let model = &entry["models"]["glm-5.2"];
+        // Documented 1M window, not the client's smallest default tier.
+        assert_eq!(model["limit"]["context"], 1_000_000);
+        assert_eq!(model["limit"]["output"], 64_000);
+        assert_eq!(model["name"], "Display");
+        assert_eq!(
+            entry["options"]["baseURL"],
+            "https://maas.qianwenaiapi.com/v1"
+        );
+    }
+
+    #[test]
+    fn provider_entry_keeps_a_small_window_small() {
+        let info: ModelInfo = serde_json::from_value(serde_json::json!({})).unwrap();
+        // 200K window: the completion budget stays inside it.
+        let entry = provider_entry(
+            &info,
+            "claude-sonnet-4-5",
+            "https://relay.example/v1",
+            "EchoBird",
+        );
+        let limit = &entry["models"]["claude-sonnet-4-5"]["limit"];
+        assert_eq!(limit["context"], 200_000);
+        assert_eq!(limit["output"], 50_000);
+        assert!(limit["output"].as_u64().unwrap() <= limit["context"].as_u64().unwrap() / 2);
+        assert_eq!(
+            entry["models"]["claude-sonnet-4-5"]["name"],
+            "claude-sonnet-4-5"
+        );
+    }
 
     #[test]
     fn config_dir_follows_opencode_v2_precedence() {
