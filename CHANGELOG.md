@@ -8,6 +8,42 @@ fork。与上游的整体差异见 [FORK.md](FORK.md)；这里按版本记录**�
 
 ---
 
+## 6.0.6-lxxh-preview.3 — 2026-10-25
+
+**新增：智能接入支持 Anthropic 协议上游**
+
+外部客户端（Claude Code 等）经智能接入发 `/v1/messages` 时，此前一律先转成
+OpenAI 再转回来，Anthropic 协议专属能力必然丢失：`anthropic-beta`
+（1M 上下文靠它开）被丢弃、`cache_control` 缓存标记被抹掉、模型 id 被改写。
+现在按候选逐个选协议：
+
+- 模型配了 `anthropicUrl`（且不是账号型候选）→ 请求体与 `anthropic-beta` /
+  `anthropic-version` / UA 等请求头原样转发到上游 `/v1/messages`，返回体（JSON 与
+  SSE）也原样回给客户端，不再经过 OpenAI→Anthropic 适配器；
+- 其余候选仍走原来的 OpenAI 管线，行为不变。
+
+候选顺序、failover、冷却记分、上下文超限直接 400、`X-EchoBird-Routed-Via`
+诊断头都保留；透传流额外加空闲超时，避免上游静默挂死。
+（`src-tauri/src/services/smart_router/server.rs`、新增
+`src-tauri/src/services/smart_router/anthropic_native_tests.rs`）
+
+**修复：窗口信息不再缺位**
+
+- **`/v1/models`**：之前只回 `{id, owned_by}`，靠自动发现模型的客户端拿不到窗口，
+  只能按自己最小的档位走。现在补上 `context_length` / `context_window` /
+  `max_context_length` / `max_output_tokens` / `top_provider.*`，取值是「所有候选
+  里的最小窗口」（请求可能 failover 到更小的那个，广播最大值会撑爆后备候选）。
+- **OpenCode**：`echobird` provider 缺 `limit.context` / `limit.output`，1M 模型
+  表现得像小模型。现在按真实窗口写入（output 取窗口 1/4，clamp 在 8K–64K 且不超过
+  窗口一半）。
+- **Codex**：`model_context_window` / `model_auto_compact_token_limit` 改用共享的
+  窗口来源，与路由器、OpenCode 同源。kimi（256K）、claude（200K）、glm-5.1
+  （200K）、gpt-5.1-codex（400K）等此前一律按 1M 写，Codex 在真实窗口一半左右就
+  开始撞上下文；未知模型仍是 1M 默认。
+
+窗口统一收进新的 `src-tauri/src/services/model_context.rs`：厂商目录（按 base_url
+选对目录、按 slug 取对应条目）→ 家族兜底 → 1M 默认。
+
 ## 6.0.6-lxxh-preview.2 — 2026-10-25
 
 **修复**
