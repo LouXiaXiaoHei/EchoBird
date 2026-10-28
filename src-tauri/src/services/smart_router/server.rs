@@ -63,8 +63,11 @@ const MAX_TIME_BUDGET: Duration = Duration::from_secs(10 * 60);
 // A deadline is evidence that one request was slow, not that the endpoint is
 // down: slow attempts get a fixed short cooldown and never escalate.
 const SLOW_REQUEST_COOLDOWN: Duration = Duration::from_secs(30);
-const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
-const MAX_TRANSIENT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+// A 5xx or a dropped connection says "this request failed", not "this model is
+// dead". Retrying a few seconds later is the whole point: escalating this to
+// minutes turned a momentary upstream hiccup into a wall of 503s for every
+// client retry that followed.
+const TRANSIENT_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
 const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 const AUTH_OR_BILLING_COOLDOWN: Duration = Duration::from_secs(60 * 60);
 const MODEL_UNAVAILABLE_COOLDOWN: Duration = Duration::from_secs(6 * 60 * 60);
@@ -938,7 +941,8 @@ async fn route_messages_with_candidates(
     }
 
     let mut last_error: Option<Response> = None;
-    for mut candidate in available {
+    let mut available = available.into_iter().peekable();
+    while let Some(mut candidate) = available.next() {
         let Some(header_timeout) =
             remaining_timeout(routing_started, policy.time_budget, policy.header_timeout)
         else {
@@ -957,7 +961,9 @@ async fn route_messages_with_candidates(
                 last_resort = false;
                 try_begin_attempt_despite_cooldown(state, &mut candidate)
             } else {
+                let is_last = available.peek().is_none();
                 try_begin_attempt(state, &mut candidate)
+                    || (is_last && try_begin_attempt_despite_cooldown(state, &mut candidate))
             };
             if !attempt_begun {
                 continue;
@@ -1508,7 +1514,11 @@ async fn send_anthropic_messages(
         return Ok(with_routed_via(response, candidate));
     }
 
-    let upstream = request.json(body).send().await.map_err(|e| e.to_string())?;
+    let upstream = request
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| describe_error_chain(&error))?;
     Ok(with_routed_via(passthrough_response(upstream), candidate))
 }
 
@@ -1635,7 +1645,10 @@ async fn send_api_request(
     // unless it comes from the app itself. Applied last so the Go user agent
     // wins over the caller's.
     request = zen_free::apply_go_headers(request, headers, &body, &candidate.base_url);
-    let upstream = request.send().await.map_err(|e| e.to_string())?;
+    let upstream = request
+        .send()
+        .await
+        .map_err(|error| describe_error_chain(&error))?;
     let status = upstream.status();
     let response_headers = upstream.headers().clone();
     let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
@@ -1740,7 +1753,7 @@ async fn route_with_policy(
     let mut incompatible_response = None;
     let routing_started = Instant::now();
 
-    let mut available = available.into_iter();
+    let mut available = available.into_iter().peekable();
     let mut authentication_retry: Option<(Candidate, Option<Value>)> = None;
     while let Some((mut candidate, refreshed_credentials)) = authentication_retry
         .take()
@@ -1753,7 +1766,13 @@ async fn route_with_policy(
             last_resort = false;
             try_begin_attempt_despite_cooldown(state, &mut candidate)
         } else {
+            // The queue's last candidate is always attempted: answering 503
+            // without a single upstream attempt (every candidate cooling, or
+            // every lease still held by a hung request) is the one outcome a
+            // caller can never retry their way out of.
+            let is_last = available.peek().is_none();
             try_begin_attempt(state, &mut candidate)
+                || (is_last && try_begin_attempt_despite_cooldown(state, &mut candidate))
         };
         if !attempt_begun {
             continue;
@@ -3482,16 +3501,17 @@ fn try_begin_attempt(state: &AppState, candidate: &mut Candidate) -> bool {
 }
 
 /// Last-resort attempt for a request that would otherwise be rejected: the
-/// candidate is still cooling, but refusing it outright is worse than one try.
+/// candidate is still cooling (or a previous attempt still holds its lease),
+/// but refusing the caller outright is worse than one try.
 fn try_begin_attempt_despite_cooldown(state: &AppState, candidate: &mut Candidate) -> bool {
     begin_attempt_with(state, candidate, true)
 }
 
-fn begin_attempt_with(state: &AppState, candidate: &mut Candidate, ignore_cooldown: bool) -> bool {
+fn begin_attempt_with(state: &AppState, candidate: &mut Candidate, force: bool) -> bool {
     let Ok(mut memory) = state.route_memory.lock() else {
         return false;
     };
-    if !ignore_cooldown && is_cooling_down(&memory, candidate, now_ms()) {
+    if !force && is_cooling_down(&memory, candidate, now_ms()) {
         return false;
     }
     // Weak leases last through the response body, and disappear on cancellation.
@@ -3522,9 +3542,10 @@ fn begin_attempt_with(state: &AppState, candidate: &mut Candidate, ignore_cooldo
     }) {
         recovery_keys.push(format!("account:{key}"));
     }
-    if recovery_keys
-        .iter()
-        .any(|key| memory.recovering.contains_key(key))
+    if !force
+        && recovery_keys
+            .iter()
+            .any(|key| memory.recovering.contains_key(key))
     {
         return false;
     }
@@ -3779,6 +3800,22 @@ fn mark_failure_scoped(
     );
 }
 
+/// `reqwest::Error`'s own message stops at the URL ("error sending request for
+/// url ..."), which hides whether the failure was DNS, TLS, a reset or the local
+/// proxy dropping the socket. Walk the source chain so the log says which.
+fn describe_error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !text.is_empty() && !parts.iter().any(|part| part == &text) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(" <- ")
+}
+
 /// A candidate that merely missed a deadline is not a sick endpoint: give it a
 /// fixed short cooldown and never escalate it, so one huge slow prompt cannot
 /// spiral into minutes of hard 503s.
@@ -3893,10 +3930,8 @@ fn cooldown_for_failure(
             .unwrap_or(RATE_LIMIT_COOLDOWN)
             .min(MAX_RETRY_AFTER),
         FailureClass::Transient => {
-            let multiplier = 1_u32 << consecutive_failures.saturating_sub(1).min(3);
-            TRANSIENT_COOLDOWN
-                .saturating_mul(multiplier)
-                .min(MAX_TRANSIENT_COOLDOWN)
+            let _ = consecutive_failures;
+            TRANSIENT_RETRY_COOLDOWN
         }
         FailureClass::RequestIncompatible => Duration::ZERO,
     }
@@ -5089,6 +5124,36 @@ mod tests {
     }
 
     #[test]
+    fn transport_errors_keep_their_underlying_cause_in_the_log() {
+        #[derive(Debug)]
+        struct Chain(&'static str, Option<Box<Chain>>);
+        impl std::fmt::Display for Chain {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.0)
+            }
+        }
+        impl std::error::Error for Chain {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.1
+                    .as_deref()
+                    .map(|cause| cause as &(dyn std::error::Error + 'static))
+            }
+        }
+
+        let error = Chain(
+            "error sending request for url (https://example.test/v1)",
+            Some(Box::new(Chain(
+                "client error (SendRequest)",
+                Some(Box::new(Chain("connection reset by peer", None))),
+            ))),
+        );
+        let described = describe_error_chain(&error);
+        assert!(described.contains("error sending request"));
+        assert!(described.contains("connection reset by peer"));
+        assert_eq!(described.matches(" <- ").count(), 2);
+    }
+
+    #[test]
     fn header_deadline_scales_with_the_prompt_and_budget_covers_every_candidate() {
         // A short prompt keeps the flat 30s floor and the 45s chain budget.
         let small = RoutePolicy::for_body_size(512, 1);
@@ -5303,10 +5368,14 @@ mod tests {
             cooldown_for_failure(FailureClass::RateLimit, None, 1),
             Duration::from_secs(60)
         );
-        assert_eq!(
-            cooldown_for_failure(FailureClass::Transient, None, 4),
-            Duration::from_secs(4 * 60)
-        );
+        // A 5xx or a dropped connection must never lock the candidate out for
+        // minutes: the client's own retries arrive seconds later.
+        for streak in [1, 2, 4, 12] {
+            assert_eq!(
+                cooldown_for_failure(FailureClass::Transient, None, streak),
+                Duration::from_secs(5)
+            );
+        }
         assert_eq!(
             cooldown_for_failure(FailureClass::ModelUnavailable, None, 1),
             Duration::from_secs(6 * 60 * 60)
@@ -5335,27 +5404,29 @@ mod tests {
     }
 
     #[test]
-    fn expired_transient_cooldown_keeps_failure_streak() {
+    fn transient_failures_never_lock_a_candidate_out() {
         let state = AppState::for_tests().unwrap();
         let model = candidate(SocketAddr::from(([127, 0, 0, 1], 1)), "transient");
 
         mark_failure(&state, &model, FailureClass::Transient, None);
-        {
-            let mut memory = state.route_memory.lock().unwrap();
-            memory
-                .candidates
-                .get_mut(&model.internal_id)
-                .unwrap()
-                .cooldown_until_ms = Some(now_ms().saturating_sub(1));
+        for _ in 0..5 {
+            {
+                let mut memory = state.route_memory.lock().unwrap();
+                memory
+                    .candidates
+                    .get_mut(&model.internal_id)
+                    .unwrap()
+                    .cooldown_until_ms = Some(now_ms().saturating_sub(1));
+            }
+            mark_failure(&state, &model, FailureClass::Transient, None);
         }
-        assert_eq!(prioritized_candidates(&state, vec![model.clone()]).len(), 1);
-
-        mark_failure(&state, &model, FailureClass::Transient, None);
         let memory = state.route_memory.lock().unwrap();
         let health = memory.candidates.get(&model.internal_id).unwrap();
-        assert_eq!(health.consecutive_failures, 2);
+        // The streak is still recorded for visibility ...
+        assert_eq!(health.consecutive_failures, 6);
+        // ... but it never buys a longer lockout.
         let remaining = health.cooldown_until_ms.unwrap().saturating_sub(now_ms());
-        assert!(remaining >= Duration::from_secs(59).as_millis() as u64);
+        assert!(remaining <= Duration::from_secs(5).as_millis() as u64);
     }
 
     #[tokio::test]

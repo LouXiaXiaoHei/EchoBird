@@ -647,8 +647,11 @@ async fn expired_cooldown_admits_one_probe_across_groups_others_use_backup() {
     assert!(first.route_memory.lock().unwrap().candidates.is_empty());
 }
 
+/// A live stream used to hold the recovering candidate's lease, so every other
+/// request got 503 with zero upstream attempts. Availability wins: a second
+/// request reaches the upstream too, and health clears once both finish.
 #[tokio::test]
-async fn streaming_probe_lives_until_body_end_or_client_cancellation() {
+async fn live_probe_stream_does_not_starve_concurrent_requests() {
     let release = Arc::new(Notify::new());
     let hits = Arc::new(AtomicUsize::new(0));
     let upstream = Mock::start(Router::new().route("/v1/chat/completions", post({
@@ -680,8 +683,6 @@ async fn streaming_probe_lives_until_body_end_or_client_cancellation() {
     };
     let first = request().await;
     assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(request().await.status(), StatusCode::SERVICE_UNAVAILABLE);
-    drop(first);
     let second = request().await;
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(hits.load(Ordering::SeqCst), 2);
