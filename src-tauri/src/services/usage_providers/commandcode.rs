@@ -19,6 +19,7 @@ use super::{
 use serde_json::Value;
 
 const API_BASE: &str = "https://api.commandcode.ai";
+const WHOAMI_PATH: &str = "/alpha/whoami?limits=1";
 const CREDITS_PATH: &str = "/alpha/billing/credits";
 const SUBSCRIPTION_PATH: &str = "/alpha/billing/subscriptions";
 
@@ -36,6 +37,17 @@ fn plan_monthly_credits(plan_id: &str) -> Option<f64> {
         "team-pro" => 40.0,
         _ => return None,
     })
+}
+
+/// `org.id` from whoami, if this account belongs to one.
+async fn fetch_org_id(authorization: &str) -> Option<String> {
+    let body = fetch_usage(&format!("{API_BASE}{WHOAMI_PATH}"), authorization)
+        .await
+        .ok()?;
+    body["org"]["id"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
 }
 
 fn used_percent(used: f64, cap: f64) -> Option<f64> {
@@ -77,30 +89,64 @@ fn parse_quotas(credits: &Value, subscription: Option<&Value>) -> Vec<UsageQuota
     .collect()
 }
 
+/// Billing routes are scoped, and the scope is the org the CLI resolves
+/// first: `GET /alpha/whoami?limits=1` → `org.id`, then every billing call
+/// carries `?orgId=` (the CLI and the account-pool both do exactly this).
+/// A personal account has no org, and then the parameter is omitted entirely
+/// rather than sent empty.
+fn alpha_url(path: &str, org_id: Option<&str>) -> String {
+    match org_id {
+        Some(org_id) => format!("{API_BASE}{path}?orgId={}", urlencoding(org_id)),
+        None => format!("{API_BASE}{path}"),
+    }
+}
+
+/// Percent-encode the org id; ids are opaque, so anything outside the
+/// unreserved set must be escaped rather than concatenated raw.
+fn urlencoding(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 #[async_trait::async_trait]
 impl UsageProvider for CommandCodeProvider {
     async fn query_usage(&self, api_key: &str, _base_url: &str) -> Result<UsageResult, String> {
         let authorization = format!("Bearer {api_key}");
-        let credits = match fetch_usage(&format!("{API_BASE}{CREDITS_PATH}"), &authorization).await
-        {
-            Ok(body) => body,
-            // `/alpha/billing` belongs to the web dashboard: it takes a Studio
-            // session, not the API key that the Provider API accepts. A
-            // provider key therefore gets 401 here while `/provider/v1` works.
-            // Nothing is retryable, so report it as unsupported instead of a
-            // failure the user keeps being asked to fix.
-            Err(error) if crate::services::usage_providers::is_scope_error(&error) => {
-                return Ok(UsageResult::unsupported(format!(
-                    "{error} — the Command Code Provider API exposes no usage route"
-                )));
-            }
-            Err(error) => return Ok(UsageResult::failure(error)),
-        };
+        // whoami only yields the org scope. A failure (including 401) must not
+        // abort the query: personal keys have no org, and the credits call is
+        // the one that decides whether the credential works at all.
+        let org_id = fetch_org_id(&authorization).await;
+        let credits =
+            match fetch_usage(&alpha_url(CREDITS_PATH, org_id.as_deref()), &authorization).await {
+                Ok(body) => body,
+                // `/alpha/billing` belongs to the web dashboard: it takes a Studio
+                // session, not the API key that the Provider API accepts. A
+                // provider key therefore gets 401 here while `/provider/v1` works.
+                // Nothing is retryable, so report it as unsupported instead of a
+                // failure the user keeps being asked to fix.
+                Err(error) if crate::services::usage_providers::is_scope_error(&error) => {
+                    return Ok(UsageResult::unsupported(format!(
+                        "{error} — this key cannot read Command Code's billing routes"
+                    )));
+                }
+                Err(error) => return Ok(UsageResult::failure(error)),
+            };
         // The subscription only names the monthly pool. A plan lookup that
         // fails (or an unknown plan) must not hide the window meters.
-        let subscription = fetch_usage(&format!("{API_BASE}{SUBSCRIPTION_PATH}"), &authorization)
-            .await
-            .ok();
+        let subscription = fetch_usage(
+            &alpha_url(SUBSCRIPTION_PATH, org_id.as_deref()),
+            &authorization,
+        )
+        .await
+        .ok();
         Ok(UsageResult::from_quotas(parse_quotas(
             &credits,
             subscription.as_ref(),
@@ -135,6 +181,26 @@ mod tests {
 
     fn subscription(plan: &str) -> Value {
         json!({"success": true, "data": {"planId": plan, "currentPeriodEnd": "2026-11-17T13:25:40.000Z"}})
+    }
+
+    #[test]
+    fn billing_calls_carry_the_org_scope_resolved_by_whoami() {
+        // Personal accounts: no org, no parameter (never `?orgId=`).
+        assert_eq!(
+            alpha_url(CREDITS_PATH, None),
+            "https://api.commandcode.ai/alpha/billing/credits"
+        );
+        assert_eq!(
+            alpha_url(CREDITS_PATH, Some("org_123")),
+            "https://api.commandcode.ai/alpha/billing/credits?orgId=org_123"
+        );
+        assert_eq!(
+            alpha_url(SUBSCRIPTION_PATH, Some("org_123")),
+            "https://api.commandcode.ai/alpha/billing/subscriptions?orgId=org_123"
+        );
+        // Opaque ids: anything outside the unreserved set is escaped.
+        assert_eq!(urlencoding("org 1/2"), "org%201%2F2");
+        assert!(alpha_url(CREDITS_PATH, None).starts_with(API_BASE));
     }
 
     #[test]

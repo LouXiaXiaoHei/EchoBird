@@ -8,6 +8,45 @@ fork。与上游的整体差异见 [FORK.md](FORK.md)；这里按版本记录**�
 
 ---
 
+## 6.0.6-lxxh-preview.7 — 2026-10-28
+
+**按 Command Code CLI 的真实调用序列补上 org 作用域**
+
+对着本机 `~/Project/ai-acount-pool`（Go 版账号池）的 `internal/provider/commandcode.go`
+和它归档的调研（`docs/research/commandcode-api.md`，从 CLI 1.54.2 的 `cli.mjs`
+里抠出的常量）核对，CLI 的 `/usage` 是**三步**：
+
+1. `GET /alpha/whoami?limits=1` → 取 `org.id`
+2. `GET /alpha/billing/credits?orgId=<org.id>`
+3. `GET /alpha/billing/subscriptions?orgId=<org.id>`
+
+EchoBird 之前直接打了第 2、3 步且**不带 orgId**——个人账号没问题，但只要账号
+挂在 org 下，账单路由就按 org 作用域解析。现在补齐 whoami 与 `?orgId=`，且
+orgId 走百分号编码；whoami 失败（含 401）不中断查询，个人账号照旧省略该参数
+（不发 `orgId=`）。
+
+**但同时实测到一件与预期不符的事，记在这里免得下次重新查**
+
+同一台 Mac、直连、用 `Authorization: Bearer <user_…>`：
+`/provider/v1/chat/completions` 正常（推理能用），而
+`/alpha/whoami?limits=1`、`/alpha/billing/credits`、`/alpha/billing/subscriptions`、
+`/alpha/fingerprint/record`、`/alpha/lifecycle-events` 全部 **401**
+`Invalid 'Authorization' header or token`。试过 `x-api-key`、裸 `Authorization`、
+`User-Agent: cli` + `x-command-code-version` + `x-cli-environment` +
+`x-session-id` + `x-project-slug` 全套 CLI 身份头，仍全部 401。
+
+账号池那边也不行：它库里那条 `user_…`（93 字符，与 EchoBird 的 key 同形）
+今天直连同样 401，`sync_state.fingerprint` 最后更新停在 **2026-09-19**，最后一次
+成功快照是 GOAT 档（five-hour cap 14 / weekly 35 / monthly 70）。所以"账号池
+能查"是 9 月的状态，`/alpha/*` 这批路由现在不接受这种 key；这不是网络、代理
+或 EchoBird 侧的问题。下一步待验证：用 `cmd login` 生成的 CLI 登录 key 是否
+仍能读 `/alpha/*`（本机没装 CLI，无法在此确认）。
+
+验证：`cargo test --lib` 1903 通过（新增 orgId 拼接与编码测试），`fmt` 干净，
+`clippy` 仅既有告警。
+
+---
+
 ## 6.0.6-lxxh-preview.6 — 2026-10-28
 
 **修复：Command Code 的"用量刷新失败"其实是没有用量接口，不该报成错误**
