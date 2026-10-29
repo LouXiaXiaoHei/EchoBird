@@ -168,6 +168,7 @@ fn no_data() -> UsageResult {
         success: false,
         data: None,
         error: None,
+        unsupported: false,
     }
 }
 
@@ -213,6 +214,7 @@ impl UsageProvider for RelaySubscriptionProvider {
                     last_updated: Some(now_millis()),
                 }),
                 error: None,
+                unsupported: false,
             });
         }
 
@@ -237,6 +239,7 @@ impl UsageProvider for RelaySubscriptionProvider {
                     last_updated: Some(now_millis()),
                 }),
                 error: None,
+                unsupported: false,
             });
         }
 
@@ -279,6 +282,7 @@ impl UsageProvider for RelaySubscriptionProvider {
                 last_updated: Some(now_millis()),
             }),
             error: None,
+            unsupported: false,
         })
     }
 

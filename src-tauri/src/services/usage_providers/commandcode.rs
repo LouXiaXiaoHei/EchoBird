@@ -84,6 +84,16 @@ impl UsageProvider for CommandCodeProvider {
         let credits = match fetch_usage(&format!("{API_BASE}{CREDITS_PATH}"), &authorization).await
         {
             Ok(body) => body,
+            // `/alpha/billing` belongs to the web dashboard: it takes a Studio
+            // session, not the API key that the Provider API accepts. A
+            // provider key therefore gets 401 here while `/provider/v1` works.
+            // Nothing is retryable, so report it as unsupported instead of a
+            // failure the user keeps being asked to fix.
+            Err(error) if crate::services::usage_providers::is_scope_error(&error) => {
+                return Ok(UsageResult::unsupported(format!(
+                    "{error} — the Command Code Provider API exposes no usage route"
+                )));
+            }
             Err(error) => return Ok(UsageResult::failure(error)),
         };
         // The subscription only names the monthly pool. A plan lookup that
@@ -125,6 +135,28 @@ mod tests {
 
     fn subscription(plan: &str) -> Value {
         json!({"success": true, "data": {"planId": plan, "currentPeriodEnd": "2026-11-17T13:25:40.000Z"}})
+    }
+
+    #[test]
+    fn a_key_without_a_billing_route_is_reported_as_unsupported() {
+        use crate::services::usage_providers::is_scope_error;
+
+        // What api.commandcode.ai actually answers for a Provider API key.
+        let denied =
+            "Usage authentication failed (HTTP 401): Invalid 'Authorization' header or token.";
+        assert!(is_scope_error(denied));
+        assert!(is_scope_error(
+            "Usage access denied; check the key and subscription (HTTP 403)"
+        ));
+        // A flaky upstream stays a retryable failure.
+        assert!(!is_scope_error("Usage API error (HTTP 502)"));
+        assert!(!is_scope_error("Unable to reach the usage API"));
+
+        let result = UsageResult::unsupported(denied);
+        assert!(!result.success);
+        assert!(result.unsupported);
+        assert_eq!(result.error.as_deref(), Some(denied));
+        assert!(result.data.is_none());
     }
 
     #[test]

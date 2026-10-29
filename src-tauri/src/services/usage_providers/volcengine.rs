@@ -368,6 +368,7 @@ impl VolcengineProvider {
                 success: false,
                 data: None,
                 error: Some("VOLC_AKSK_REQUIRED".to_string()),
+                unsupported: false,
             });
         };
         let body = serde_json::json!({ "ProjectName": PROJECT_NAME });
@@ -404,6 +405,7 @@ impl UsageProvider for VolcengineProvider {
             success: false,
             data: None,
             error: Some("VOLC_AKSK_REQUIRED".to_string()),
+            unsupported: false,
         })
     }
 

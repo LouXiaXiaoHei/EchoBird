@@ -8,6 +8,45 @@ fork。与上游的整体差异见 [FORK.md](FORK.md)；这里按版本记录**�
 
 ---
 
+## 6.0.6-lxxh-preview.6 — 2026-10-28
+
+**修复：Command Code 的"用量刷新失败"其实是没有用量接口，不该报成错误**
+
+用线上真实的 key 复现，Command Code 的两条路是分开的：
+
+- `GET https://api.commandcode.ai/provider/v1/models` → **200**（key 有效，聊天
+  也正常）；
+- `GET https://api.commandcode.ai/alpha/billing/credits` → **401**
+  `{"error":{"message":"Invalid 'Authorization' header or token."}}`，
+  `subscriptions` 同样 401；`/provider/v1/usage`、`/provider/v1/me`、
+  `/provider/v1/billing/credits` 全 404。
+
+官方 Provider API 文档只列了 `chat/completions`、`responses`、`messages`、
+`models`、`systemone` 五条路由，**没有任何用量/账单路由**；`/alpha/billing`
+是网页端 Studio 的内部接口，只认登录态，不认 API key。所以这不是网络、不是
+代理、也不是 key 失效，而是这个 key 类型天然查不到用量——每次刷新都必然失败，
+而弹窗里只说"失败"，看不出原因。
+
+改动：
+
+1. **401/403 视为"该凭据没有用量接口"**（`UsageResult.unsupported`）
+   `commandcode.rs` 遇到 401/403 返回 unsupported 而不是 failure；
+   `usage_providers/mod.rs` 新增 `is_scope_error` 与 `unsupported` 字段
+   （`#[serde(default)]`，其余 provider 全部保持 `false`）。前端
+   `provider.tsx` 把它归到提示（info）而不是错误（error），文案
+   `model.quota.refreshUnsupported`（四种语言）。
+2. **失败弹窗带上真实原因**
+   `send_usage_request` 现在把上游 JSON 的 `error.message` / `message` 拼进
+   错误串，前端把首个失败原因附在弹窗后面（例：
+   `Usage authentication failed (HTTP 401): Invalid 'Authorization' header or token.`）。
+   以后不用再猜是 key、套餐还是路由。
+
+验证：`cargo test --lib` 1902 通过（新增 1 条 401/404 归类测试），前端
+`vitest` 2055 通过（新增 1 条 unsupported 提示测试），`tsc`、`fmt`、`clippy`
+（仅存在既有告警）均干净。真实请求对照结果见上。
+
+---
+
 ## 6.0.6-lxxh-preview.5 — 2026-10-28
 
 **修复：上游只是偶发 5xx / 连一下就断，也被放大成一长串 503**

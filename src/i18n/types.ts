@@ -212,6 +212,7 @@ export type TKey =
   | 'model.balance'
   | 'model.quota.accessFailed'
   | 'model.quota.refreshFailed'
+  | 'model.quota.refreshUnsupported'
   | 'model.quota.teamHint'
   | 'model.quota.fiveHour'
   | 'model.quota.daily'

@@ -77,6 +77,11 @@ pub struct UsageResult {
     pub success: bool,
     pub data: Option<ModelUsageData>,
     pub error: Option<String>,
+    /// The upstream has no usage route for this credential at all (an API key
+    /// where only the web dashboard exposes billing). There is nothing the user
+    /// can retry or fix, so the UI must not report it as a failure.
+    #[serde(default)]
+    pub unsupported: bool,
 }
 
 impl UsageResult {
@@ -91,6 +96,7 @@ impl UsageResult {
                 last_updated: Some(now_millis()),
             }),
             error: None,
+            unsupported: false,
         }
     }
 
@@ -99,6 +105,16 @@ impl UsageResult {
             success: false,
             data: None,
             error: Some(message.into()),
+            unsupported: false,
+        }
+    }
+
+    fn unsupported(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(message.into()),
+            unsupported: true,
         }
     }
 }
@@ -155,16 +171,41 @@ async fn send_usage_request(request: reqwest::RequestBuilder) -> Result<serde_js
         .map_err(|_| "Unable to reach the usage API".to_string())?;
     let status = response.status();
     if !status.is_success() {
-        return Err(match status.as_u16() {
+        // The upstream usually explains itself (`{"error":{"message":...}}` or
+        // `{"message":...}`). Keep that sentence: "HTTP 401" alone tells the
+        // user nothing about whether the key, the plan or the route is wrong.
+        let detail = response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body["error"]["message"]
+                    .as_str()
+                    .or_else(|| body["message"].as_str())
+                    .map(str::to_string)
+            })
+            .filter(|message| !message.trim().is_empty());
+        let summary = match status.as_u16() {
             401 => "Usage authentication failed (HTTP 401)".to_string(),
             403 => "Usage access denied; check the key and subscription (HTTP 403)".to_string(),
             _ => format!("Usage API error (HTTP {status})"),
+        };
+        return Err(match detail {
+            Some(detail) => format!("{summary}: {detail}"),
+            None => summary,
         });
     }
     response
         .json()
         .await
         .map_err(|_| "Invalid usage API response".to_string())
+}
+
+/// A 401/403 from a usage route means this credential cannot read that route,
+/// which for API-key products usually means "no usage API for this key type"
+/// rather than "try again later".
+pub(crate) fn is_scope_error(message: &str) -> bool {
+    message.contains("(HTTP 401)") || message.contains("(HTTP 403)")
 }
 
 /// Provider trait - each provider implements this
@@ -279,6 +320,7 @@ pub async fn query_model_usage(
                 success: false,
                 data: None,
                 error: Some("Provider does not support usage query".to_string()),
+                unsupported: true,
             });
         }
     };
@@ -295,6 +337,7 @@ pub async fn query_model_usage(
             success: false,
             data: None,
             error: Some("API key is empty".to_string()),
+            unsupported: false,
         });
     }
 

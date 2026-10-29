@@ -225,9 +225,28 @@ describe('Model usage refresh and credential changes', () => {
     expect(context.modelUsageData.model.quotas[0].balance).toBe(80);
     expect(context.modelUsageData.second.quotas[0].balance).toBe(17);
     expect(context.modelUsageData.third.quotas[0].balance).toBe(30);
+    // The reason travels with the toast now: "HTTP 401" alone says nothing
+    // about whether the key, the plan or the route is wrong.
     expect(showToast).toHaveBeenCalledExactlyOnceWith(
       'error',
-      'model.quota.refreshFailed Second, Third'
+      'model.quota.refreshFailed Second, Third (Access denied)'
+    );
+    expect(context.isRefreshingUsage).toBe(false);
+  });
+  it('reports a missing usage API as information instead of a failure', async () => {
+    vi.mocked(api.getModels).mockResolvedValue([original]);
+    await open();
+    vi.mocked(api.queryModelUsage).mockResolvedValueOnce({
+      success: false,
+      error: 'Usage authentication failed (HTTP 401)',
+      unsupported: true,
+    });
+    await act(async () => {
+      await context.refreshAllUsage();
+    });
+    expect(showToast).toHaveBeenCalledExactlyOnceWith(
+      'info',
+      'model.quota.refreshUnsupported Test'
     );
     expect(context.isRefreshingUsage).toBe(false);
   });

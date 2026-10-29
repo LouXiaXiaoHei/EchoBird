@@ -115,6 +115,8 @@ export interface UsageResult {
   success: boolean;
   data?: ModelUsageData;
   error?: string;
+  /** The upstream has no usage route for this credential; nothing to retry. */
+  unsupported?: boolean;
 }
 
 export async function queryModelUsage(internalId: string): Promise<UsageResult> {

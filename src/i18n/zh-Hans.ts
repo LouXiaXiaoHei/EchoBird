@@ -317,6 +317,7 @@ const zhHans: Partial<Translations> = {
   'model.balance': '余额',
   'model.quota.accessFailed': '无法读取或保存用量访问权限。',
   'model.quota.refreshFailed': '用量刷新失败：{n} 个模型：',
+  'model.quota.refreshUnsupported': '以下模型没有用量接口（该 key 只能调用，不返回用量）：',
   'model.quota.teamHint': '团队套餐填写组织和项目 ID；个人套餐留空。',
   'model.quota.fiveHour': '5小时',
   'model.quota.daily': '每日',

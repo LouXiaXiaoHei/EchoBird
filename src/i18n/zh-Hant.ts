@@ -354,6 +354,7 @@ const zhHant: Partial<Translations> = {
   'model.balance': '餘額',
   'model.quota.accessFailed': '無法讀取或儲存用量存取權限。',
   'model.quota.refreshFailed': '用量重新整理失敗：{n} 個模型：',
+  'model.quota.refreshUnsupported': '以下模型沒有用量介面（此 key 只能呼叫，不回應用量）：',
   'model.quota.teamHint': '團隊方案填寫組織與專案 ID；個人方案留空。',
   'model.quota.fiveHour': '5小時',
   'model.quota.daily': '每日',

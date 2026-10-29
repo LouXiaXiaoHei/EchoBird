@@ -353,10 +353,32 @@ export function ModelNexusProvider({ children }: { children: React.ReactNode }) 
           revisions[i] === (usageAccessRevision.current[model.internalId] ?? 0) &&
           !(results[i].status === 'fulfilled' && results[i].value.success && results[i].value.data)
       );
-      if (failed.length) {
+      // "This upstream has no usage API for this key" is not a failure the user
+      // can act on; report it as information and keep the error toast for the
+      // cases that carry a reason worth reading.
+      const unsupported = failed.filter((model) => {
+        const result = results[models.indexOf(model)];
+        return result.status === 'fulfilled' && result.value.unsupported === true;
+      });
+      const broken = failed.filter((model) => !unsupported.includes(model));
+      if (unsupported.length) {
+        showToast(
+          'info',
+          `${t('model.quota.refreshUnsupported')} ${unsupported.map((model) => model.name).join(', ')}`
+        );
+      }
+      if (broken.length) {
+        const reason = broken
+          .map((model) => {
+            const result = results[models.indexOf(model)];
+            return result.status === 'fulfilled' ? result.value.error : undefined;
+          })
+          .find((value): value is string => Boolean(value?.trim()));
         showToast(
           'error',
-          `${t('model.quota.refreshFailed').replace('{n}', String(failed.length))} ${failed.map((model) => model.name).join(', ')}`
+          `${t('model.quota.refreshFailed').replace('{n}', String(broken.length))} ${broken
+            .map((model) => model.name)
+            .join(', ')}${reason ? ` (${reason})` : ''}`
         );
       }
     } finally {
